@@ -83,11 +83,27 @@ probe_connectors() {
     done
 }
 
+# A new driver image brings the guest scripts that go with it. Once they're in place, the new gpu-up.sh
+# takes over from here. If they can't be, the guest keeps the ones it has, and boots as before.
+refresh_from_image() {
+    [ -z "${NVFWD_REFRESHED:-}" ] && [ -e "$driver/setup/refresh.sh" ] || return 0
+    bash "$driver/setup/refresh.sh" --if-changed
+    case $? in
+    0) NVFWD_REFRESHED=1 exec "$installed/gpu-up.sh" ;;
+    3) ;;
+    *) mkdir -p "$root/run/motd.d"
+       printf "This guest's scripts weren't refreshed from the driver image: %s\n" \
+           "$(cat "$guest_files_problem" 2>/dev/null)" > "$root/run/motd.d/49-nvfwd-refresh" ;;
+    esac
+}
+
 # Links from an earlier boot must not outlive it, whatever this boot decides.
 "$here/link-driver.sh" unlink
 udevadm settle --timeout=30
 device_present || gpu_off "$(host_reason)"
-mount_image || gpu_off "the host offered no driver image"
+# Already there when this run follows a refresh of the scripts.
+[ -n "${NVFWD_REFRESHED:-}" ] || mount_image || gpu_off "the host offered no driver image"
+refresh_from_image
 
 version=$(value_of "$driver/manifest" version)
 image_id=$(value_of "$driver/manifest" id)

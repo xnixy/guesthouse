@@ -194,7 +194,19 @@ check_apps() {
     done
 }
 
+# Whether the guest's scripts are the ones on the driver image, which a boot puts in place.
+check_guest_files() {
+    local problem
+    problem=$(cat "$guest_files_problem" 2>/dev/null)
+    if [ -n "$problem" ]; then
+        warn "the guest's scripts weren't refreshed from the driver image: $problem"
+    elif [ -e "$driver/setup/refresh.sh" ] && [ "$(guest_files_id "$driver/setup")" != "$(cat "$guest_files_marker" 2>/dev/null)" ]; then
+        warn "the guest's scripts are older than the driver image's: as root, bash /opt/nv/driver/setup/refresh.sh, then reboot"
+    fi
+}
+
 finish() {
+    check_guest_files
     echo '----'
     if [ "$failed" != 0 ]; then
         echo "FAIL $failed parts do not work"

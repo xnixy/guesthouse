@@ -49,6 +49,27 @@ enable_services() {
     systemctl set-default graphical.target
 }
 
+# A later driver image's scripts and settings, once refresh.sh has put the scripts in place: the same
+# files as a first boot installs, with no packages, no Firefox and no restart.
+refresh() {
+    install -m 644 "$here/files/modprobe-nvfwd.conf" "$root/etc/modprobe.d/nvfwd.conf"
+    install -m 644 "$here/files/70-nvfwd.rules" "$root/etc/udev/rules.d/70-nvfwd.rules"
+    install -D -m 644 "$here/files/logind-nvfwd.conf" "$root/etc/systemd/logind.conf.d/90-nvfwd.conf"
+    if ! cmp -s "$here/files/grub-nvfwd.cfg" "$root/etc/default/grub.d/90-nvfwd.cfg"; then
+        install -D -m 644 "$here/files/grub-nvfwd.cfg" "$root/etc/default/grub.d/90-nvfwd.cfg"
+        update-grub
+    fi
+    # Only if the first boot diverted it: the wrapper needs Xwayland.real beside it.
+    [ ! -e "$root/usr/bin/Xwayland.real" ] || install -m 755 "$here/Xwayland" "$root/usr/bin/Xwayland"
+    ln -sf "$here/check.sh" "$root/usr/local/sbin/nvfwd-check"
+    systemctl daemon-reload
+    systemctl enable "$here/units/nvfwd-gpu.service" "$here/units/nvfwd-desktop.service"
+}
+
+if [ "${1:-}" = --refresh ]; then
+    refresh
+    exit 0
+fi
 install_packages
 install_settings
 wrap_xwayland

@@ -11,7 +11,6 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "$here/distro.sh"
 . "$here/own-desktop.sh"
 image=$(dirname "$here")
-installed=$root/usr/lib/nvfwd
 units=$root/etc/systemd/system
 # EFI's global variable: its fifth byte is 1 when Secure Boot is on.
 secure_boot_variable=$root/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
@@ -81,6 +80,7 @@ copy_scripts() {
     printf 'family=%s\nlibraries=%s\n' "$family" "$(libraries_folder "$family")" > "$own_install"
     # Someone who put their desktop back on the plain screen keeps it there.
     [ -z "$desktop" ] || echo "desktop=$desktop" >> "$own_install"
+    guest_files_id "$here" > "$guest_files_marker"
 }
 
 install_hook() {
@@ -174,6 +174,20 @@ build_now() {
     fi
     echo "$image_id $kernel" > "$target/built-for"
 }
+
+# A later driver image's scripts and settings, in a guest that's set up already: refresh.sh runs this at
+# boot. The packages and the build stay as they are; the boot builds for the new image anyway.
+if [ "${1:-}" = --refresh ]; then
+    [ -n "$own_family" ] || refuse "this guest wasn't set up by setup-own.sh."
+    family=$own_family
+    kernel=$(uname -r)
+    copy_scripts
+    install_settings
+    label_for_selinux
+    systemctl daemon-reload
+    systemctl enable nvfwd-gpu.service nvfwd-desktop-watch.service
+    exit 0
+fi
 
 check_system
 kernel=$(uname -r)

@@ -1,6 +1,9 @@
 //! Getting a queue's submissions onto the GPU.
 
-use crate::channel::{AREA_SIZE, Channel, ChannelPlace, Engine, LIST_AREA, ListChannel, ListFull};
+use crate::channel::{
+    AREA_SIZE, Channel, ChannelPlace, Engine, LIST_AREA, LOCAL_MEMORY_ALIGN, LOCAL_MEMORY_BYTES, ListChannel,
+    ListFull,
+};
 use crate::list_repair;
 use crate::pushbuffer::{ENTRY_SIZE, Header, RingEntry};
 use crate::ring_position::has_ring_position_flag;
@@ -223,6 +226,20 @@ impl<R: Rm> NvidiaBackend<R> {
         host.take_gpu_addresses(size as u64, crate::CHANNEL_ADDRESS_ALIGN).ok()
     }
 
+    /// A GPU address for a graphics channel's shader local memory, if this engine runs shaders.
+    fn local_memory_address(&mut self, host: &mut dyn HostServices, engine: Engine) -> Option<u64> {
+        if engine != Engine::Graphics {
+            return None;
+        }
+        match host.take_gpu_addresses(LOCAL_MEMORY_BYTES, LOCAL_MEMORY_ALIGN) {
+            Ok(address) => Some(address),
+            Err(error) => {
+                log::warn!("no address for shader local memory: {error}");
+                None
+            }
+        }
+    }
+
     /// The queue's channel on a guest's ring, made the first time. `first` is where this
     /// submission starts, and the entry before it is free for the prelude.
     fn ring_channel(&mut self, host: &mut dyn HostServices, work: &Work<'_>, ring_address: u64, first: u32) {
@@ -246,11 +263,17 @@ impl<R: Rm> NvidiaBackend<R> {
             return;
         };
         let place = ChannelPlace { ring_address, ring_entries, area_address, area_size: AREA_SIZE };
-        let Some(space) = self.spaces.get(&work.space) else { return };
         let engine = self.video_engine(work).map_or(Engine::Graphics, Engine::Video);
+        let local_memory = self.local_memory_address(host, engine);
+        let Some(space) = self.spaces.get(&work.space) else { return };
         let made = Channel::new(&mut self.device, self.generation, self.host_branch, space, place, engine);
         match made {
-            Ok(channel) => {
+            Ok(mut channel) => {
+                if let Some(address) = local_memory
+                    && let Err(error) = channel.add_local_memory(&mut self.device, space, address)
+                {
+                    log::warn!("no shader local memory: {error}");
+                }
                 let prelude_at = span.guest_address + u64::from(first - 1) * ENTRY_SIZE as u64;
                 if let Err(error) = host.write_u64(prelude_at, channel.prelude_entry()) {
                     // A channel with no prelude would fault, so it never gets to run.
@@ -464,10 +487,11 @@ impl<R: Rm> NvidiaBackend<R> {
             return matches!(self.queues[&work.queue].channel, QueueChannel::List(_));
         }
         let mut queue = LiveQueue::new(work.space);
+        let engine = self.engine_for(work);
+        let local_memory = self.local_memory_address(host, engine);
         if let (Some(area_address), Some(space)) =
             (self.take_area(host, LIST_AREA), self.spaces.get(&work.space))
         {
-            let engine = self.engine_for(work);
             let place = ChannelPlace {
                 ring_address: ListChannel::ring_address(area_address),
                 ring_entries: ListChannel::RING_ENTRIES,
@@ -475,7 +499,14 @@ impl<R: Rm> NvidiaBackend<R> {
                 area_size: LIST_AREA,
             };
             match Channel::new(&mut self.device, self.generation, self.host_branch, space, place, engine) {
-                Ok(channel) => queue.channel = QueueChannel::List(ListChannel::new(channel)),
+                Ok(mut channel) => {
+                    if let Some(address) = local_memory
+                        && let Err(error) = channel.add_local_memory(&mut self.device, space, address)
+                    {
+                        log::warn!("no shader local memory: {error}");
+                    }
+                    queue.channel = QueueChannel::List(ListChannel::new(channel));
+                }
                 Err(error) => log::warn!("a channel failed: {error}"),
             }
         }

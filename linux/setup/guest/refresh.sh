@@ -12,6 +12,8 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 unchanged=3
 previous=$root/var/lib/nvfwd/guest-files.previous
 staged=$installed.new
+# What a build runs. Only when one of these changes does the next build come out any different.
+build_scripts=(build-parts.sh common.sh distro.sh)
 kept_a_copy=
 
 fail() {
@@ -33,6 +35,14 @@ installed_matches() {
     while IFS= read -r -d '' name; do
         cmp -s "$here/$name" "$installed/$name" || return 1
     done < <(cd "$here" && find . -type f ! -path '*/__pycache__/*' -print0)
+}
+
+builds_differently() {
+    local name
+    for name in "${build_scripts[@]}"; do
+        cmp -s "$previous/$name" "$installed/$name" || return 0
+    done
+    return 1
 }
 
 # Ubuntu's own install: these scripts over a copy of the installed ones, which keeps the files the
@@ -67,10 +77,13 @@ if [ -n "$own_family" ]; then
 else
     refresh_ubuntu
 fi
+# New scripts can build more than the old ones did. Then the next build, which may be the one this
+# boot is about to start, builds everything again with them.
+if builds_differently; then
+    rm -f "$root"/lib/modules/*/updates/nvfwd/built-for
+fi
 rm -rf "$previous" "$guest_files_problem"
 echo "$new_id" > "$guest_files_marker"
-# New scripts can build more than the old ones did, so the next boot builds again with them.
-rm -f "$root"/lib/modules/*/updates/nvfwd/built-for
 # logind reads its settings again; the rest take effect as each part starts.
 systemctl reload systemd-logind 2>/dev/null || true
 echo "The guest's scripts and settings are now this driver image's ($new_id)."

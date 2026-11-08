@@ -77,10 +77,16 @@ class UbuntuRefresh(unittest.TestCase):
         self.assertFalse(os.path.exists(self.guest.path("var/lib/nvfwd/guest-files.previous")))
         self.assertTrue(self.guest.read("var/lib/nvfwd/guest-files").strip())
 
-    def test_the_next_boot_builds_again_with_the_new_scripts(self):
+    def test_a_new_build_script_builds_again(self):
         write(self.guest.path(BUILT_FOR), "old\n")
+        write(os.path.join(self.guest.installed, "build-parts.sh"), OLD_MARK)
         self.guest.run()
         self.assertFalse(os.path.exists(self.guest.path(BUILT_FOR)))
+
+    def test_scripts_that_build_the_same_keep_the_build(self):
+        write(self.guest.path(BUILT_FOR), "old\n")
+        self.assertEqual(self.guest.run().returncode, 0)
+        self.assertEqual(self.guest.read(BUILT_FOR), "old\n")
 
     def test_a_guest_installed_with_these_scripts_takes_nothing(self):
         shutil.copy(os.path.join(GUEST, "check.sh"), os.path.join(self.guest.installed, "check.sh"))

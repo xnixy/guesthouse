@@ -118,10 +118,14 @@ impl VmPlan {
         ]
     }
 
-    /// The card's render node is the only device of a GPU's it gets.
+    /// The card's render node is the only device of a GPU's it gets, and its folder can only be listed.
     pub(super) fn grant_amd(&self, plan: &mut Plan) {
         let Some(amd) = self.amd_boot() else { return };
         plan.grant(Grant::Device, &amd.card.render_node);
+        // libdrm finds the card's other nodes by listing its folder, and opens none of them.
+        if let Some(folder) = amd.card.render_node.parent() {
+            plan.grant(Grant::List, folder);
+        }
         if let Some(image) = &amd.setup_image {
             plan.grant(Grant::Read, image);
         }
@@ -208,6 +212,8 @@ mod tests {
         let devices: Vec<&PathBuf> =
             rules.paths.iter().filter(|(grant, _)| *grant == Grant::Device).map(|(_, path)| path).collect();
         assert_eq!(devices, [&PathBuf::from("/dev/dri/renderD128")]);
+        let anything_else: Vec<_> = rules.paths.iter().filter(|(grant, _)| *grant != Grant::Device).collect();
+        assert_eq!(anything_else, [&(Grant::List, PathBuf::from("/dev/dri"))], "only listed");
     }
 
     #[test]

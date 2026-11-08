@@ -85,6 +85,7 @@ pub fn of_grant(grant: Grant) -> u64 {
         }
         Grant::Device => READ_FILE | WRITE_FILE | IOCTL_DEV,
         Grant::Socket => RESOLVE_UNIX,
+        Grant::List => READ_DIR,
     }
 }
 

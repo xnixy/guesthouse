@@ -54,6 +54,23 @@ Like Ubuntu's, it uses the card setup chose on a PC with more than one, and gets
 
 What's tested: Fedora 45 Workstation and Fedora 45 KDE Plasma, installed by hand, with SELinux enforcing. The setup, `nvfwd-check`, CUDA, Vulkan and `nvidia-smi` all passed. GDM and GNOME, and Plasma Login and Plasma, came up on the GPU in the viewer, with automatic login and without, a Vulkan window and an X11 GL window drew, and Shut Down worked. After `dnf upgrade kernel` the next boot fetched the new kernel's headers and built for it. The build also passed in Debian 13 and Arch containers against their kernel headers. Debian, Ubuntu, Arch and openSUSE haven't run in a real guest yet, and openSUSE not even in a container.
 
+## An AMD card
+
+A PC with an AMD card, built in or not, can give its 3D to a Linux guest a different way: virtio-gpu's native context. QEMU's virtio GPU passes the guest's amdgpu commands to the host's card through virglrenderer, and the guest runs Mesa's own radeonsi and RADV on it. Nothing of the host's driver goes into the guest. The settings' Card row picks the card on a PC with more than one, and a machine gets either the NVIDIA card or an AMD one, never both. A PC with no NVIDIA card gives new Linux machines its first AMD card.
+
+The host needs nothing but the install script. The release's QEMU is built with OpenGL and carries its own virglrenderer 1.3.0, with Venus and the amdgpu renderer on. It needs libdrm 2.4.121 or newer, which Ubuntu 24.04 and the distros built on it have, and the install script says so if it's older. QEMU is told to use RADV and Mesa's EGL and nothing else, and the jail lets it open the card's render node, list `/dev/dri` and nothing more there. Its frames are read back from the card for the viewer, the same way as the plain screen's.
+
+The guest's side is a Mesa built with `-Damdgpu-virtio=true`, and few distros ship one. Arch does, so it needs nothing. Fedora 44 and 45, Debian sid, and Ubuntu 24.04, 26.04 and 26.10 don't. So the guest builds its own distro's Mesa again, at the version it has, with the distro's own options and that one added, and installs it as the distro's packages with `guesthouse1` on the version. That takes 5 to 10 minutes with 16 cores. A hook in apt or dnf builds it again whenever the distro updates Mesa, and until it's done GL goes through virgl and Vulkan runs on the CPU. The build's progress shows in the machine's row.
+
+- **Ubuntu** does all of this by itself on its first boot.
+- **A Linux you installed yourself** runs the same `setup-own.sh` as above, from the image the machine gets, and the setup builds Mesa there and then. Fedora and Debian-based distros are covered. Arch needs no build. openSUSE has no build yet, so it goes on Venus.
+
+If the build fails, or Mesa still isn't on the card after it, the guest says why on its serial port, the row shows it, and the next start is on Venus: Vulkan on the host's RADV through virglrenderer's render server, and GL on virgl. A guest on Venus that later builds a working Mesa goes back to native context on the start after that.
+
+It should work on any card the host's amdgpu driver runs: GCN, Polaris and RDNA 1 to 4. Neither Mesa's virtio path nor virglrenderer looks at the generation. Older GCN cards need the host's `amdgpu.si_support` or `amdgpu.cik_support`, as radeon takes them by default. Only a Radeon 610M, the iGPU of a Ryzen 9000, has been tried.
+
+What's tested, on that iGPU: Ubuntu 26.04 installed by the app and Fedora 45 Workstation installed by hand, SELinux enforcing. In both, radeonsi and RADV were on native context, GNOME ran on the card, and a GL test and a Vulkan render and compute test all passed, with compute as fast as on the host. Both kept it after a reboot, and a Mesa update from the distro was built again by the hook. A build made to fail moved Fedora to Venus, where the same tests passed, and a new build moved it back.
+
 ## Video
 
 NVENC and NVDEC work in a guest. With ffmpeg, H.264, HEVC and AV1 all encode on the card and decode on the card, and the decoded frames match a software decode exactly.

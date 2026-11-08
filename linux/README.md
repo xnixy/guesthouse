@@ -62,6 +62,8 @@ What's tested: Fedora 45 Workstation and Fedora 45 KDE Plasma, installed by hand
 
 ## An AMD card
 
+This is experimental. It has only run on one integrated Radeon so far, so a discrete or older card may not work yet; if it doesn't, the guest falls back to Venus or boots without the GPU, and never the NVIDIA path. Reports from real cards are welcome.
+
 A PC with an AMD card, built in or not, can give its 3D to a Linux guest a different way: virtio-gpu's native context. QEMU's virtio GPU passes the guest's amdgpu commands to the host's card through virglrenderer, and the guest runs Mesa's own radeonsi and RADV on it. Nothing of the host's driver goes into the guest. The settings' Card row picks the card on a PC with more than one, and a machine gets either the NVIDIA card or an AMD one, never both. A PC with no NVIDIA card gives new Linux machines its first AMD card.
 
 The host needs nothing but the install script. The release's QEMU is built with OpenGL and carries its own virglrenderer 1.3.0, with Venus and the amdgpu renderer on. It needs libdrm 2.4.121 or newer, which Ubuntu 24.04 and the distros built on it have, and the install script says so if it's older. QEMU is told to use RADV and Mesa's EGL and nothing else, and the jail lets it open the card's render node, list `/dev/dri` and nothing more there. Its frames are read back from the card for the viewer, the same way as the plain screen's.

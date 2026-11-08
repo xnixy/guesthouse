@@ -52,6 +52,8 @@ else
 fi
 rm -rf "$previous" "$guest_files_problem"
 echo "$new_id" > "$guest_files_marker"
+# New scripts can build more than the old ones did, so the next boot builds again with them.
+rm -f "$root"/lib/modules/*/updates/nvfwd/built-for
 # logind reads its settings again; the rest take effect as each part starts.
 systemctl reload systemd-logind 2>/dev/null || true
 echo "The guest's scripts and settings are now this driver image's ($new_id)."

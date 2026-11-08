@@ -76,6 +76,11 @@ class UbuntuRefresh(unittest.TestCase):
         self.assertFalse(os.path.exists(self.guest.path("var/lib/nvfwd/guest-files.previous")))
         self.assertTrue(self.guest.read("var/lib/nvfwd/guest-files").strip())
 
+    def test_the_next_boot_builds_again_with_the_new_scripts(self):
+        write(self.guest.path("lib/modules/7.0.0-42-generic/updates/nvfwd/built-for"), "old\n")
+        self.guest.run()
+        self.assertFalse(os.path.exists(self.guest.path("lib/modules/7.0.0-42-generic/updates/nvfwd/built-for")))
+
     def test_the_same_image_again_does_nothing(self):
         self.guest.run("--if-changed")
         open(self.guest.calls, "w").close()

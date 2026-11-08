@@ -12,6 +12,7 @@ from test_gpu_up import Guest, write
 
 GUEST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "guest")
 OLD_MARK = "# the older scripts\n"
+BUILT_FOR = "lib/modules/7.0.0-42-generic/updates/nvfwd/built-for"
 
 
 class Root:
@@ -77,9 +78,16 @@ class UbuntuRefresh(unittest.TestCase):
         self.assertTrue(self.guest.read("var/lib/nvfwd/guest-files").strip())
 
     def test_the_next_boot_builds_again_with_the_new_scripts(self):
-        write(self.guest.path("lib/modules/7.0.0-42-generic/updates/nvfwd/built-for"), "old\n")
+        write(self.guest.path(BUILT_FOR), "old\n")
         self.guest.run()
-        self.assertFalse(os.path.exists(self.guest.path("lib/modules/7.0.0-42-generic/updates/nvfwd/built-for")))
+        self.assertFalse(os.path.exists(self.guest.path(BUILT_FOR)))
+
+    def test_a_failed_copy_leaves_the_installed_scripts_alone(self):
+        self.guest.fake("cp", 'case "$*" in *guest-files.previous*) mkdir -p "${@: -1}"; exit 1;; esac; exec /usr/bin/cp "$@"')
+        self.assertEqual(self.guest.run("--if-changed").returncode, 1)
+        self.assertEqual(self.guest.read("usr/lib/nvfwd/check.sh"), OLD_MARK)
+        self.assertTrue(os.path.exists(self.guest.path("usr/lib/nvfwd/gpu-up.sh")))
+        self.assertIn("keeping a copy", self.guest.read("var/lib/nvfwd/guest-files-problem"))
 
     def test_the_same_image_again_does_nothing(self):
         self.guest.run("--if-changed")
@@ -136,6 +144,14 @@ class OwnRefresh(unittest.TestCase):
         self.assertIn("systemctl enable nvfwd-gpu.service nvfwd-desktop-watch.service", self.guest.lines("systemctl"))
         self.assertEqual(self.guest.lines("dnf"), [], "no packages at boot")
         self.assertEqual(self.guest.run("--if-changed").returncode, 3)
+
+    def test_a_failure_after_the_copy_tries_again_next_boot(self):
+        self.guest.fake("systemctl", '[ "$1" != daemon-reload ]')
+        self.assertEqual(self.guest.run("--if-changed").returncode, 1)
+        self.assertEqual(self.guest.read("usr/lib/nvfwd/check.sh"), OLD_MARK)
+        self.assertFalse(os.path.exists(self.guest.path("var/lib/nvfwd/guest-files")))
+        self.guest.fake("systemctl", "exit 0")
+        self.assertEqual(self.guest.run("--if-changed").returncode, 0)
 
     def test_a_missing_powerdevilrc_is_written(self):
         self.guest.run()

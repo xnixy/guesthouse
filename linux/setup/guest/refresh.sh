@@ -12,13 +12,16 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 unchanged=3
 previous=$root/var/lib/nvfwd/guest-files.previous
 staged=$installed.new
+kept_a_copy=
 
 fail() {
     echo "The guest's scripts weren't refreshed, and it keeps the ones it had: $1"
-    if [ -d "$previous" ]; then
+    if [ -n "$kept_a_copy" ]; then
         rm -rf "$installed" "$staged"
         mv "$previous" "$installed"
     fi
+    # setup-own.sh writes the marker as it copies, and these aren't the scripts it names any more.
+    rm -f "$guest_files_marker"
     printf '%s\n' "$1" > "$guest_files_problem"
     exit 1
 }
@@ -45,6 +48,7 @@ mkdir -p "$(dirname "$guest_files_marker")"
 rm -rf "$previous"
 # Running scripts keep reading their old files, as these are moved or removed, never written over.
 cp -a "$installed" "$previous" || fail "keeping a copy of the scripts failed"
+kept_a_copy=1
 if [ -n "$own_family" ]; then
     bash "$here/setup-own.sh" --refresh || fail "setup-own.sh --refresh failed"
 else

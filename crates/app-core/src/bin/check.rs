@@ -2,12 +2,13 @@
 //! to run from a download, before GTK may be on this PC. It changes nothing, and opens no device.
 //!
 //! Each line is `check`, the state, the title, what was found and the fix. A `gtk` line has the version
-//! of GTK, if there is one, so the script can choose the app that runs on it. The last is `gpu` and
-//! `yes` or `no`, all split by tabs. The script prints these words and never runs them. `--firmware`
-//! prints the firmware a plain VM would boot, and nothing else.
+//! of GTK, if there is one, so the script can choose the app that runs on it. Then come `gpu` and `amd`,
+//! each `yes` or `no`, all split by tabs. The script prints these words and never runs them.
+//! `--firmware` prints the firmware a plain VM would boot, and nothing else.
 
 use guesthouse_app_core::context::Context;
 use guesthouse_app_core::firmware::format_of;
+use guesthouse_app_core::linux::amd::amd_cards;
 use guesthouse_app_core::setup::checks::{Check, CheckState, check_host};
 use guesthouse_app_core::setup::toolkit::gtk_version;
 use std::env;
@@ -60,5 +61,7 @@ fn main() -> ExitCode {
         println!("gtk\t{version}");
     }
     println!("gpu\t{}", if report.gpu { "yes" } else { "no" });
+    // An AMD card can be a Linux guest's GPU, whatever the checks above say of NVIDIA's.
+    println!("amd\t{}", if amd_cards(&context).is_empty() { "no" } else { "yes" });
     ExitCode::SUCCESS
 }

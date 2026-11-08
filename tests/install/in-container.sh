@@ -22,6 +22,8 @@ command -v xz >/dev/null 2>&1 || ln -s "$here/stand-ins/xz" "$T/bin/xz"
 printf 'adw_new_thing' >"$T/libraries/libadwaita-1.so.0"
 printf 'gtk_new_thing' >"$T/libraries/libgtk-4.so.1"
 printf 'pipewire' >"$T/libraries/libpipewire-0.3.so.0"
+for library in libepoxy.so.0 libgbm.so.1 libEGL.so.1 libdrm.so.2; do printf 'gl' >"$T/libraries/$library"; done
+printf 'amdgpu_device_initialize2' >"$T/libraries/libdrm_amdgpu.so.1"
 
 PATH=$T/bin:$PATH
 HOME=$H

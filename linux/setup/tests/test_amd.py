@@ -175,6 +175,18 @@ class MesaService(unittest.TestCase):
         said = self.service()
         self.assertIn("32-bit Mesa packages are installed", said[0])
 
+    def test_ubuntus_helper_that_waits_for_shutdown_is_not_an_update_running(self):
+        self.guest.boot_on("native")
+        self.guest.renderers(RADEONSI, "AMD Radeon 610M (RADV GFX1036)", "radv")
+        helper = "/usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal"
+        write(os.path.join(self.guest.root, "procs"), f"unattended-upgr\n{helper}\n")
+        self.guest.fake("pgrep", f'case $1 in -x) grep -qx "$2" "{self.guest.root}/procs" ;; '
+                                 f'-f) grep -qE "$2" "{self.guest.root}/procs" ;; esac')
+        self.guest.fake("sleep", "exit 0")
+        said = self.service()
+        self.assertTrue(said[0].startswith("guesthouse-amd native"), said)
+        self.assertEqual(self.guest.called("sleep"), 0, "nothing to wait for")
+
     def test_a_working_native_context_needs_no_build(self):
         self.guest.boot_on("native")
         self.guest.renderers(RADEONSI, "AMD Radeon 610M (RADV GFX1036)", "radv")

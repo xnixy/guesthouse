@@ -7,7 +7,10 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "$here/../common.sh"
 . "$here/amd-common.sh"
 # A package manager that runs this hook is still running, and holds its lock until it's done.
-package_managers='apt apt-get dpkg dnf dnf5 rpm pacman zypper unattended-upgr'
+package_managers='apt apt-get dpkg dnf dnf5 rpm pacman zypper'
+# Ubuntu's own updates, by its whole path: the helper that waits for shutdown has the same short name,
+# and runs all the time.
+unattended_upgrades='^/usr/bin/python3 /usr/bin/unattended-upgrade( |$)'
 lock_wait_seconds=3600
 
 package_manager_busy() {
@@ -15,7 +18,7 @@ package_manager_busy() {
     for name in $package_managers; do
         pgrep -x "$name" > /dev/null && return 0
     done
-    return 1
+    pgrep -f "$unattended_upgrades" > /dev/null
 }
 
 wait_for_package_manager() {

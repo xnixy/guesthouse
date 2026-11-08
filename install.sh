@@ -35,6 +35,10 @@ CURL_SECONDS=20
 # What --check-update exits with when there's something newer, so the app can tell it from a failure.
 UPDATE_AVAILABLE_EXIT=10
 TAB=$(printf '\t')
+# QEMU's OpenGL and virglrenderer are the host's Mesa. virglrenderer's AMD native context calls
+# libdrm_amdgpu's amdgpu_device_initialize2, which came in libdrm 2.4.121.
+OPENGL_LIBRARIES="libepoxy.so.0 libgbm.so.1 libEGL.so.1 libdrm.so.2 libdrm_amdgpu.so.1"
+NEWEST_LIBDRM_CALL=amdgpu_device_initialize2
 
 DRY_RUN=no
 UPDATE=no
@@ -361,11 +365,11 @@ build_from_source() {
     download_verified "$source_name.tar.xz" "$SOURCE_SHA256"
     tar -xJf "$STAGING/$source_name.tar.xz" -C "$STAGING"
     bundle=$STAGING/$source_name
-    if command -v cargo >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1; then
+    if command -v cargo >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1 && command -v meson >/dev/null 2>&1; then
         sh "$bundle/packaging/build-release.sh" --out "$STAGING/built" qemu app payload
     else
         command -v podman >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 ||
-            die "building needs cargo and ninja, or podman or docker, and this PC has none of those."
+            die "building needs cargo, ninja and meson, or podman or docker, and this PC has neither."
         sh "$bundle/packaging/build-in-images.sh" --out "$STAGING/built" qemu app payload
     fi
     mv "$STAGING/built/guesthouse-$RELEASE_VERSION-$ARCH.tar.xz" "$STAGING/"
@@ -404,9 +408,11 @@ check_glibc() {
 ask_the_release() {
     HOST_REPORT=$STAGING/host-report
     GPU_ANSWER=no
+    AMD_ANSWER=no
     if [ -x "$TREE/guesthouse-check" ] &&
         GUESTHOUSE_PROGRAM=$TREE "$TREE/guesthouse-check" >"$HOST_REPORT" 2>/dev/null; then
         GPU_ANSWER=$(awk -F "$TAB" '$1 == "gpu" { print $2 }' "$HOST_REPORT")
+        AMD_ANSWER=$(awk -F "$TAB" '$1 == "amd" { print $2 }' "$HOST_REPORT")
     else
         : >"$HOST_REPORT"
     fi
@@ -434,6 +440,9 @@ decide_mode() {
         GPU_NOTE="This release has no GPU part in it, so it's plain VMs only."
     elif [ "$GPU_ANSWER" = yes ]; then
         MODE=gpu
+    elif [ "$AMD_ANSWER" = yes ]; then
+        MODE=gpu
+        GPU_NOTE="The checks above say this PC can't run NVIDIA's GPU machines, but its AMD card can be a Linux guest's GPU."
     elif [ "$previous" = gpu ]; then
         MODE=gpu
         GPU_NOTE="The checks above say this PC can't run GPU machines right now. Often that's a driver update that moved to another branch: host and guest have to match. This update doesn't change that, and doesn't touch your driver. GPU machines won't start until it's fixed, your machines and disks stay as they are, and plain VMs still run."
@@ -457,6 +466,7 @@ need_present() {
         gtk) [ -n "$(library_path libgtk-4.so.1)" ] ;;
         adwaita) [ -n "$(library_path libadwaita-1.so.0)" ] ;;
         pipewire) [ -n "$(library_path libpipewire-0.3.so.0)" ] ;;
+        opengl) for library in $OPENGL_LIBRARIES; do [ -n "$(library_path "$library")" ] || return 1; done ;;
         firmware) firmware_present ;;
         *) command -v "$1" >/dev/null 2>&1 ;;
     esac
@@ -469,6 +479,7 @@ package_for() {
         fedora:gtk) say gtk4 ;;
         fedora:adwaita) say libadwaita ;;
         fedora:pipewire) say pipewire-libs ;;
+        fedora:opengl) say libepoxy mesa-libgbm mesa-libEGL libdrm ;;
         fedora:qemu-img) say qemu-img ;;
         fedora:firmware) say edk2-ovmf ;;
         fedora:7z) say 7zip ;;
@@ -481,6 +492,7 @@ package_for() {
         debian:gtk) say libgtk-4-1 ;;
         debian:adwaita) say libadwaita-1-0 ;;
         debian:pipewire) say libpipewire-0.3-0t64 ;;
+        debian:opengl) say libepoxy0 libgbm1 libegl1 libdrm2 libdrm-amdgpu1 ;;
         debian:qemu-img) say qemu-utils ;;
         debian:firmware) say ovmf ;;
         debian:7z) say 7zip ;;
@@ -493,6 +505,7 @@ package_for() {
         arch:gtk) say gtk4 ;;
         arch:adwaita) say libadwaita ;;
         arch:pipewire) say libpipewire ;;
+        arch:opengl) say libepoxy mesa libglvnd libdrm ;;
         arch:qemu-img) say qemu-img ;;
         arch:firmware) say edk2-ovmf ;;
         arch:7z) say 7zip ;;
@@ -505,6 +518,7 @@ package_for() {
         suse:gtk) say libgtk-4-1 ;;
         suse:adwaita) say libadwaita-1-0 ;;
         suse:pipewire) say libpipewire-0_3-0 ;;
+        suse:opengl) say libepoxy0 libgbm1 libEGL1 libdrm2 libdrm_amdgpu1 ;;
         suse:qemu-img) say qemu-img ;;
         suse:firmware) say qemu-ovmf-x86_64 ;;
         suse:7z) say 7zip ;;
@@ -517,10 +531,11 @@ package_for() {
     esac
 }
 
-# Every machine needs the first five. The rest are what a GPU machine's install and its jail use, and
+# Every machine needs the first six: QEMU loads OpenGL's libraries for an AMD card's GPU, whether or
+# not a machine uses it. The rest are what a GPU machine's install and its jail use, and
 # setarch comes with util-linux, which every one of these systems has.
 wanted_needs() {
-    say gtk adwaita pipewire qemu-img firmware
+    say gtk adwaita pipewire opengl qemu-img firmware
     [ "$MODE" = plain ] || say 7z genisoimage swtpm
     if [ "$MODE" = gpu ] && [ -d "$TREE/linux" ]; then
         say isoinfo openssl ssh-keygen bwrap gcc
@@ -695,6 +710,19 @@ run_root_work() {
         die "this needs sudo, and it's not here. Run this as root yourself, then run me again: $ROOT_COMMAND"
     sudo sh -c "$ROOT_COMMAND" </dev/tty || die "that command failed, so I'm stopping. Nothing of Guesthouse's was installed."
     PACKAGES_ADDED=$PACKAGES
+}
+
+# A libdrm older than virglrenderer needs would only show when QEMU couldn't start. With every symbol
+# bound at once, its loader says what's missing now, and so it does for any other library.
+check_qemu_loads() {
+    qemu=$TREE/$QEMU_PROGRAM
+    [ -x "$qemu" ] || return 0
+    libdrm=$(library_path libdrm_amdgpu.so.1)
+    if [ -n "$libdrm" ] && ! LC_ALL=C grep -aqF "$NEWEST_LIBDRM_CALL" "$libdrm"; then
+        die "libdrm on this system is older than 2.4.121, which this release's QEMU needs for AMD cards and loads for every VM. Update your system, or move to a newer distro release, and run this again."
+    fi
+    said=$(LD_BIND_NOW=1 "$qemu" --version 2>&1) ||
+        die "this release's QEMU can't start on this system: $(say "$said" | head -n 2 | tr '\n' ' ')"
 }
 
 # What's still missing can't be fixed here, and on a system with no packages to install it's up to you.
@@ -1044,6 +1072,7 @@ main() {
     confirm
     run_root_work
     check_after_root
+    check_qemu_loads
     install_files
     remove_old_versions
     say_done

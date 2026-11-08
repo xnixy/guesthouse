@@ -91,6 +91,41 @@ t_a_card_that_cannot_run_still_installs_plain_vms() {
     check_gone "$H/.local/lib/guesthouse/1.0/linux"
 }
 
+t_an_amd_card_keeps_the_linux_files_when_nvidias_cannot_run() {
+    release 1.0 "windows linux"
+    give_everything
+    export FAKE_GPU_REFUSED="No supported card."
+    export FAKE_AMD=yes
+    install_version 1.0
+    check_exit 0
+    check_said "its AMD card can be a Linux guest's GPU"
+    check_there "$H/.local/lib/guesthouse/1.0/linux"
+}
+
+t_a_libdrm_too_old_for_qemu_stops_the_install() {
+    release 1.0
+    give_everything
+    printf 'amdgpu_device_initialize' >"$T/libraries/libdrm_amdgpu.so.1"
+    install_version 1.0
+    check_exit 1
+    check_said "libdrm on this system is older than 2.4.121"
+    check_gone "$H/.local/lib/guesthouse/1.0"
+}
+
+t_a_qemu_that_cannot_load_stops_the_install_and_says_why() {
+    release 1.0
+    give_everything
+    tree=$T/releases/tree-1.0
+    printf '#!/bin/sh\necho "libepoxy.so.0: cannot open shared object file" >&2\nexit 127\n' \
+        >"$tree/guesthouse-1.0-x86_64/qemu/build/qemu-system-x86_64"
+    tar -C "$tree" -cJf "$T/releases/v1.0/guesthouse-1.0-x86_64.tar.xz" guesthouse-1.0-x86_64
+    wanted=$(sha256sum "$T/releases/v1.0/guesthouse-1.0-x86_64.tar.xz" | cut -d ' ' -f 1)
+    sed -i "s/^PAYLOAD_SHA256=.*/PAYLOAD_SHA256=\"$wanted\"/" "$(script_for 1.0)"
+    install_version 1.0
+    check_exit 1
+    check_said "QEMU can't start on this system: libepoxy.so.0: cannot open shared object file"
+}
+
 t_a_release_with_no_gpu_part_says_so() {
     release 1.0
     give_everything
@@ -144,7 +179,7 @@ EOF
 t_from_source_builds_and_installs_the_same_way() {
     release 1.0
     give_everything
-    give_tools cargo ninja
+    give_tools cargo ninja meson
     mv "$T/releases/v1.0/guesthouse-1.0-x86_64.tar.xz" "$T/releases/built.tar.xz"
     fake_source_bundle
     install_version 1.0 --from-source
@@ -161,6 +196,6 @@ t_from_source_with_no_tools_says_what_it_needs() {
     snapshot >"$T/before"
     install_version 1.0 --from-source
     check_exit 1
-    check_said "building needs cargo and ninja"
+    check_said "building needs cargo, ninja and meson"
     check_home_is "$T/before"
 }

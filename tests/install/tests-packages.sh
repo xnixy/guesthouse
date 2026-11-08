@@ -10,11 +10,11 @@ expect_command() {
 }
 
 t_fedora_packages() {
-    expect_command fedora "" "sudo sh -c 'dnf install -y gtk4 libadwaita pipewire-libs qemu-img edk2-ovmf'"
+    expect_command fedora "" "sudo sh -c 'dnf install -y gtk4 libadwaita pipewire-libs libepoxy mesa-libgbm mesa-libEGL libdrm qemu-img edk2-ovmf'"
 }
 
 t_debian_packages() {
-    expect_command debian "" "sudo sh -c 'apt-get update && apt-get install -y --no-remove libgtk-4-1 libadwaita-1-0 libpipewire-0.3-0t64 qemu-utils ovmf'"
+    expect_command debian "" "sudo sh -c 'apt-get update && apt-get install -y --no-remove libgtk-4-1 libadwaita-1-0 libpipewire-0.3-0t64 libepoxy0 libgbm1 libegl1 libdrm2 libdrm-amdgpu1 qemu-utils ovmf'"
 }
 
 t_ubuntu_packages() {
@@ -22,7 +22,7 @@ t_ubuntu_packages() {
 }
 
 t_arch_packages() {
-    expect_command arch "" "sudo sh -c 'pacman -S --needed --noconfirm gtk4 libadwaita libpipewire qemu-img edk2-ovmf'"
+    expect_command arch "" "sudo sh -c 'pacman -S --needed --noconfirm gtk4 libadwaita libpipewire libepoxy mesa libglvnd libdrm qemu-img edk2-ovmf'"
 }
 
 t_a_derivative_uses_its_parents_names() {

@@ -7,7 +7,8 @@ use crate::display::{read_state, ring_in, screen_text};
 use crate::failure::{Failure, Result};
 use crate::gpu_identity::read_state as read_identity;
 use crate::jailing;
-use crate::linux::guest_says;
+use crate::linux::amd::{amd_mode, fallback_reason};
+use crate::linux::{amd_says, guest_says};
 use crate::log::open_for_appending;
 use crate::machine::Machine;
 use crate::processes::{leftovers, memory_taken, running_slots, uses_disk};
@@ -19,7 +20,7 @@ use guesthouse_daemon::slot::{SLOTS, Slot};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 pub const TASK_PROGRAM: &str = "guesthouse-task";
@@ -168,6 +169,21 @@ pub fn free_slot(context: &Context) -> Option<Slot> {
     slots::all().find(is_free)
 }
 
+/// What a guest on an AMD card said of its GPU, which is also kept for its next start: see
+/// [`amd_says::learn`]. Before it says anything, a machine on Venus says why it is.
+fn amd_guest_gpu(context: &Context, machine: &Machine, run_folder: Option<&Path>) -> String {
+    let mode = amd_mode(context, machine);
+    match run_folder.and_then(amd_says::read) {
+        Some(says) => {
+            amd_says::learn(context, machine, mode, &says);
+            says.text(mode)
+        }
+        None => fallback_reason(context, machine)
+            .map(|reason| format!("The guest is on Venus, as native context failed: {reason}"))
+            .unwrap_or_default(),
+    }
+}
+
 /// What is going on with a machine, and if its GPU has stopped, that comes first.
 pub fn status(context: &Context, machine: &Machine) -> Status {
     let mut found = what_is_running(context, machine);
@@ -177,7 +193,11 @@ pub fn status(context: &Context, machine: &Machine) -> Status {
     {
         found.error = note;
     }
-    if found.state == State::Running && (machine.own_linux_gpu() || machine.wants_forwarded_gpu()) {
+    if found.state == State::Running && machine.amd_card().is_some() {
+        // A guest on an AMD card shows its desktop on QEMU's display, whatever its GPU does.
+        found.plain_desktop = true;
+        found.guest_gpu = amd_guest_gpu(context, machine, folder.as_deref());
+    } else if found.state == State::Running && (machine.own_linux_gpu() || machine.wants_forwarded_gpu()) {
         let said = folder.as_deref().and_then(guest_says::read);
         found.guest_gpu = said.as_ref().map(guest_says::GuestSays::text).unwrap_or_default();
         found.plain_desktop = said.is_some_and(|said| said.plain_desktop());
@@ -334,6 +354,25 @@ mod tests {
         assert!(found.plain_desktop);
         assert!(found.guest_gpu.ends_with("plain screen: it never lit"), "{found:?}");
         assert!(!status(&context, &machine()).plain_desktop, "only a Linux machine's guest is heard");
+    }
+
+    #[test]
+    fn a_guest_on_an_amd_card_is_heard_and_a_failure_is_kept_for_its_next_start() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        context.make_run_folder(None).unwrap();
+        let vm = Machine { kind: crate::machine::Kind::Linux, amd_gpu: "0000:7c:00.0".into(), ..machine() };
+        fs::create_dir_all(vm.folder(&context)).unwrap();
+        running_vm(&context, &vm);
+        let serial = context.run_folder(None).join(guest_says::SERIAL_LOG);
+        fs::write(&serial, "guesthouse-amd building 5 10\n").unwrap();
+        let found = status(&context, &vm);
+        assert!(found.plain_desktop && found.guest_gpu.contains("5 of 10"), "{found:?}");
+        fs::write(&serial, "guesthouse-amd failed eglinfo found llvmpipe\n").unwrap();
+        assert!(status(&context, &vm).guest_gpu.ends_with("uses Venus."));
+        assert_eq!(amd_mode(&context, &vm), crate::linux::amd::AmdMode::Venus);
+        fs::write(&serial, "").unwrap();
+        assert!(status(&context, &vm).guest_gpu.ends_with("failed: eglinfo found llvmpipe"));
     }
 
     #[test]

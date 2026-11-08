@@ -20,7 +20,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const VOLUME_LABEL: &str = "NVFWD_DRIVER";
+pub(super) const VOLUME_LABEL: &str = "NVFWD_DRIVER";
 /// The folders the guest's modules include from, and only their headers.
 const HEADER_FOLDERS: [&str; 8] = [
     "src/nvidia-modeset/kapi/interface",
@@ -34,8 +34,8 @@ const HEADER_FOLDERS: [&str; 8] = [
 ];
 const SOURCE_ID_LENGTH: usize = 12;
 /// Where the guest's scripts go on the image, for a Linux the user installed to set itself up from.
-const SETUP_ON_IMAGE: &str = "setup";
-const READ_ONLY: u32 = 0o444;
+pub(super) const SETUP_ON_IMAGE: &str = "setup";
+pub(super) const READ_ONLY: u32 = 0o444;
 
 /// What came of asking for an image.
 #[derive(Debug, PartialEq, Eq)]
@@ -76,7 +76,7 @@ fn our_files(sources: &Path) -> Vec<String> {
 
 /// The guest's scripts, which go on the image as they are. They aren't built, so they're no part of
 /// the manifest's id, and a new script doesn't rebuild a guest that doesn't use them.
-fn setup_files(sources: &Path) -> Vec<String> {
+pub(super) fn setup_files(sources: &Path) -> Vec<String> {
     let mut found = Vec::new();
     walk(sources, GUEST_SETUP, &mut found);
     found.sort();
@@ -84,7 +84,7 @@ fn setup_files(sources: &Path) -> Vec<String> {
 }
 
 /// A copy keeps each file's mode, and the image keeps whether a file runs.
-fn copy_setup(sources: &Path, to: &Path) -> Result<()> {
+pub(super) fn copy_setup(sources: &Path, to: &Path) -> Result<()> {
     for name in setup_files(sources) {
         let target = to.join(&name[GUEST_SETUP.len() + 1..]);
         if let Some(folder) = target.parent() {
@@ -96,7 +96,7 @@ fn copy_setup(sources: &Path, to: &Path) -> Result<()> {
 }
 
 /// Changes when the guest's sources do, so a guest rebuilds when they move on.
-fn sources_id(sources: &Path, names: &[String]) -> Result<String> {
+pub(super) fn sources_id(sources: &Path, names: &[String]) -> Result<String> {
     let mut child = Command::new("sha256sum").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
     let mut input = child.stdin.take().ok_or_else(|| crate::Failure::new("sha256sum took no input."))?;
     for name in names {
@@ -108,7 +108,7 @@ fn sources_id(sources: &Path, names: &[String]) -> Result<String> {
     Ok(String::from_utf8_lossy(&said.stdout).chars().take(SOURCE_ID_LENGTH).collect())
 }
 
-fn run(command: &mut Command) -> Result<()> {
+pub(super) fn run(command: &mut Command) -> Result<()> {
     let result = command.output()?;
     if !result.status.success() {
         let said = String::from_utf8_lossy(&result.stderr);

@@ -3,6 +3,7 @@
 //! The machine's settings and the state of the PC go in, and [`VmPlan::qemu_command`] gives the words
 //! to run. The order of devices is what the guest has already seen, so it must not change.
 
+mod amd;
 mod arguments;
 mod forwarding_jail;
 mod nic;
@@ -10,6 +11,7 @@ mod own_linux;
 mod qemu_jail;
 mod ubuntu;
 
+pub use amd::{AmdBoot, RENDER_SERVER};
 pub use nic::PASST_PID_FILE;
 pub use qemu_jail::{PASST_FD, PID_FILE, TAP_FD};
 pub use ubuntu::{FORWARDED_INPUT_SOCKET, FRAMES_PREFIX, INSTALL_LOG, ssh_port};
@@ -61,7 +63,8 @@ pub struct UbuntuInstall {
     pub initrd: PathBuf,
 }
 
-/// An Ubuntu guest, or a Linux the user installed, gets the forwarded GPU, or the reason it hasn't.
+/// An Ubuntu guest, or a Linux the user installed, gets the forwarded GPU, an AMD card, or the reason it
+/// has no GPU.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UbuntuBoot {
     WithGpu {
@@ -74,6 +77,7 @@ pub enum UbuntuBoot {
     NoGpu {
         reason_file: PathBuf,
     },
+    Amd(AmdBoot),
 }
 
 /// What the first NIC is, and what the private link carries.

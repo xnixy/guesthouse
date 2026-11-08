@@ -1,6 +1,7 @@
 //! What a task does. One of these runs in the `guesthouse-task` process, in the slot of its VM, while
 //! the app watches the small file it leaves.
 
+mod amd_start;
 mod desktop;
 mod display;
 mod gpu_check;

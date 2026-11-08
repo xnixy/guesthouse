@@ -11,6 +11,8 @@ pub const GUEST_DRIVER_FILES: &str = "The host's NVIDIA driver files can't be us
 pub const GUEST_TABLES_DIFFER: &str = "The host's driver changes calls the device checks.";
 pub const GUEST_NO_IMAGE: &str = "The host could not make the driver image.";
 pub const GUEST_NO_CARD: &str = "The host's NVIDIA driver doesn't have the card setup chose.";
+pub const GUEST_NO_AMD_CARD: &str = "The host doesn't have the AMD card chosen for this machine.";
+pub const GUEST_NO_GL: &str = "This QEMU can't give the guest a GPU on an AMD card.";
 /// Added when there's more to say, so someone in the guest knows where to look.
 const SEE_THE_HOST: &str = "The app on the host says why.";
 

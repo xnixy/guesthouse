@@ -12,7 +12,7 @@ pub const SERIAL_LOG: &str = "serial.log";
 const PREFIX: &str = "nvfwd-gpu ";
 const DESKTOP_PREFIX: &str = "nvfwd-desktop ";
 /// The line is written early in the boot, and a guest's console can say a lot after it.
-const TAIL_BYTES: u64 = 256 * 1024;
+pub(super) const TAIL_BYTES: u64 = 256 * 1024;
 const LONGEST_REASON: usize = 240;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,14 +65,14 @@ impl GuestSays {
 }
 
 /// Keeps what a person would type, so a guest can't send the row control characters or markup.
-fn plain(text: &str) -> String {
+pub(super) fn plain(text: &str) -> String {
     let typed = |letter: &char| letter.is_ascii_graphic() || *letter == ' ';
     let kept = text.chars().filter(|letter| typed(letter) && !matches!(letter, '<' | '>' | '&'));
     kept.take(LONGEST_REASON).collect::<String>().trim().to_owned()
 }
 
 /// A line's word, and the plain words after it, if it has the prefix.
-fn said<'a>(line: &'a str, prefix: &str) -> Option<(&'a str, String)> {
+pub(super) fn said<'a>(line: &'a str, prefix: &str) -> Option<(&'a str, String)> {
     let said = line.trim_end_matches('\r').strip_prefix(prefix)?;
     let (word, rest) = said.split_once(' ').unwrap_or((said, ""));
     Some((word, plain(rest)))
@@ -110,12 +110,17 @@ pub fn newest(serial: &[u8]) -> Option<GuestSays> {
 
 /// What the newest boot said in a run folder's serial log. A guest that never wrote a line says nothing.
 pub fn read(run_folder: &Path) -> Option<GuestSays> {
+    newest(&serial_tail(run_folder)?)
+}
+
+/// The end of a run folder's serial log, where the newest boot's lines are.
+pub(super) fn serial_tail(run_folder: &Path) -> Option<Vec<u8>> {
     let mut file = File::open(run_folder.join(SERIAL_LOG)).ok()?;
     let size = file.metadata().ok()?.len();
     file.seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES))).ok()?;
     let mut tail = Vec::new();
     file.take(TAIL_BYTES).read_to_end(&mut tail).ok()?;
-    newest(&tail)
+    Some(tail)
 }
 
 #[cfg(test)]

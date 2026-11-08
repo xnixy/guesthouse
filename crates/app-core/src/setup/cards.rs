@@ -132,17 +132,23 @@ fn support_of(device: u32) -> Support {
 
 /// The card's name in pci.ids, in the brackets if it has them, as those hold the product.
 pub fn card_name(device: u32, names: &Path) -> String {
-    let fallback = || format!("NVIDIA card {device:04x}");
-    let Ok(data) = fs::read(names) else { return fallback() };
+    let name = product_name(NVIDIA_NAMES_START, device, names);
+    name.map_or_else(|| format!("NVIDIA card {device:04x}"), |name| format!("NVIDIA {name}"))
+}
+
+/// A device's product in pci.ids, under the vendor whose list starts with `vendor_start`: what's in the
+/// brackets if its line has them, or else the whole line.
+pub fn product_name(vendor_start: &str, device: u32, names: &Path) -> Option<String> {
+    let data = fs::read(names).ok()?;
     let text = String::from_utf8_lossy(&data);
-    let Some(start) = text.find(NVIDIA_NAMES_START) else { return fallback() };
+    let start = text.find(vendor_start)?;
     let vendor = &text[start + 1..];
     let wanted = format!("\t{device:04x}  ");
-    let lines = vendor.lines().skip(1).take_while(|line| !line.starts_with('1'));
-    let Some(line) = lines.into_iter().find_map(|line| line.strip_prefix(&wanted)) else { return fallback() };
+    let mut lines = vendor.lines().skip(1).take_while(|line| line.starts_with('\t') || line.starts_with('#'));
+    let line = lines.find_map(|line| line.strip_prefix(&wanted))?;
     let bracketed =
         line.find('[').and_then(|start| Some(&line[start + 1..start + line[start..].rfind(']')?]));
-    format!("NVIDIA {}", bracketed.unwrap_or(line))
+    Some(bracketed.unwrap_or(line).to_owned())
 }
 
 fn hex_number(text: &str) -> Option<u32> {

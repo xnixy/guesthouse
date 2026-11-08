@@ -34,6 +34,9 @@ const EPHEMERAL_PORT: u16 = 0;
 /// Its privileges group stays out: it ends QEMU's user network's child at `setsid`, before the
 /// shared folder's program runs, and no new privileges, which the launcher sets, already covers it.
 const QEMU_SANDBOX: &str = "on,obsolete=deny,spawn=allow,resourcecontrol=deny";
+/// The same with no programs started, for a QEMU that has none to start: an AMD card's on native
+/// context, with no shared folder.
+const QEMU_SANDBOX_NO_SPAWN: &str = "on,obsolete=deny,spawn=deny,resourcecontrol=deny";
 
 /// What any QEMU reads. `/proc` and `/sys` give nothing away, as Landlock doesn't let a jailed
 /// process look into one outside its jail.
@@ -161,6 +164,7 @@ impl VmPlan {
             plan.grant(Grant::Write, &self.ram_file).grant(Grant::Write, &self.io_file);
         }
         self.grant_forwarding(&mut plan, devices);
+        self.grant_amd(&mut plan);
         if let Some(folder) = self.shared_folder() {
             plan.grant(Grant::Run, &self.share_program).grant(Grant::Own, folder);
         }
@@ -353,7 +357,10 @@ impl VmPlan {
     pub(super) fn qemu_sandbox_arguments(&self) -> Vec<String> {
         match &self.jail {
             Some(jail) if jail.qemu_sandbox => {
-                vec!["-sandbox".to_owned(), QEMU_SANDBOX.to_owned()]
+                let spawns =
+                    !self.has_amd_gpu() || self.starts_render_server() || self.shared_folder().is_some();
+                let sandbox = if spawns { QEMU_SANDBOX } else { QEMU_SANDBOX_NO_SPAWN };
+                vec!["-sandbox".to_owned(), sandbox.to_owned()]
             }
             _ => Vec::new(),
         }

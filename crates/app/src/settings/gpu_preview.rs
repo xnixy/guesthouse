@@ -1,6 +1,7 @@
 //! Ubuntu's own settings: its GPU, which is a preview, and the way in if the desktop won't start.
 
 use super::Shared;
+use super::gpu_choice::add_gpu_choice;
 use adw::prelude::*;
 use guesthouse_app_core::linux::seed::password_file;
 use guesthouse_app_core::machine::Kind;
@@ -25,6 +26,7 @@ impl GpuPreview {
             saving.save();
         });
         group.add(&gpu);
+        add_gpu_choice(shared, &group);
         let file = password_file(&shared.window.context(), &machine);
         let login = adw::ActionRow::builder()
             .title("Console login")

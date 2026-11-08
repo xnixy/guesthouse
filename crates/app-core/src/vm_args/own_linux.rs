@@ -24,6 +24,8 @@ impl VmPlan {
     fn gpu_or_reason(&self, gpu: &UbuntuBoot) -> Vec<String> {
         match gpu {
             UbuntuBoot::NoGpu { reason_file } => Self::off_reason_arguments(reason_file),
+            // Its screen took the plain one's place, and the rest goes here.
+            UbuntuBoot::Amd(amd) => Self::amd_guest_arguments(amd),
             UbuntuBoot::WithGpu { image, allow_list, sensor_daemon, card } => {
                 let mut arguments = words(&[
                     "-object",

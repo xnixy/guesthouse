@@ -330,8 +330,10 @@ fn no_video_runs_and_the_record_offers_none() {
     for (card, generation, _) in CARDS {
         let record = record(&started(card));
         assert!(!generation.nodes.video_runs);
-        assert_eq!([word(&record, LAYOUT.flags), word(&record, LAYOUT.flags + 4)], [0, 0]);
+        let caps: Vec<u32> = (0..4).map(|index| word(&record, LAYOUT.video_caps + index * 4)).collect();
+        assert_eq!(caps, [0; 4]);
         assert_eq!(record[LAYOUT.decoder_flags], 0);
+        assert_eq!(record[LAYOUT.encoder_flags], 0);
     }
 }
 

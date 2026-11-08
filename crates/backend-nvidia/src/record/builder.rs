@@ -323,8 +323,9 @@ pub fn build<R: Rm>(
         record.word(layout.memory_low + index * 4, size as u32);
     }
 
-    record.words(layout.flags, &generation.video_record_flags.words);
+    record.words(layout.video_caps, &generation.video_record_flags.caps);
     record.put(layout.decoder_flags, &[generation.video_record_flags.decoder]);
+    record.put(layout.encoder_flags, &[generation.video_record_flags.encoder]);
     record.counted_words(layout.classes, &card.classes().map_err(card_failed)?)?;
 
     let (graphics_hertz, memory_hertz) = host.rated_clocks;

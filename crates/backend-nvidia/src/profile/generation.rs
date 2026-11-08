@@ -30,8 +30,11 @@ pub struct EngineNodes {
 /// The record's flags for video. All zero, the guest's video runtimes offer no decoders.
 #[derive(Debug, PartialEq, Eq)]
 pub struct VideoRecordFlags {
-    pub words: [u32; 2],
+    /// What the card's video engines can do, as four words. The guest's runtimes choose the
+    /// decoders and encoders they offer from these.
+    pub caps: [u32; 4],
     pub decoder: u8,
+    pub encoder: u8,
 }
 
 /// What a generation changes.
@@ -78,12 +81,27 @@ const KEPLER_INLINE_TO_MEMORY_B: u32 = 0xA140;
 const FERMI_TWOD_A: u32 = 0x902D;
 const DEFERRED_API: u32 = super::super::rm::classes::DEFERRED_API;
 
-/// With the first word's bit clear, Direct3D 11 offers no video decoders at all. Without the second
-/// word a decoder can be made, but its first frame fails as out of memory. Either bit of the byte is
-/// enough, and with it at zero, making a decoder fails as out of memory.
-const BLACKWELL_VIDEO_FLAG: u32 = 1 << 20;
+/// With this bit of the first word clear, NVENC opens on a Direct3D 11 device but can't set up an
+/// encoder.
+const BLACKWELL_VIDEO_ENCODER_SETUP: u32 = 1 << 24;
+/// With this bit of the second word clear, Direct3D 11 doesn't list the encoder's profile, and NVENC
+/// can't open on a Direct3D 11 device, which is what Sunshine uses.
+const BLACKWELL_VIDEO_ENCODER: u32 = 1 << 26;
+/// With this bit of the third word clear, Direct3D 11 offers no video decoders at all.
+const BLACKWELL_VIDEO_DECODERS: u32 = 1 << 20;
+/// Without the fourth word a decoder can be made, but its first frame fails as out of memory.
 const BLACKWELL_VIDEO_FRAMES: u32 = 0x40_0030;
+const BLACKWELL_VIDEO_CAPS: [u32; 4] = [
+    BLACKWELL_VIDEO_ENCODER_SETUP,
+    BLACKWELL_VIDEO_ENCODER,
+    BLACKWELL_VIDEO_DECODERS,
+    BLACKWELL_VIDEO_FRAMES,
+];
+/// Either bit is enough, and with it at zero, making a decoder fails as out of memory.
 const BLACKWELL_DECODER_FLAGS: u8 = 0x48;
+/// The byte after it, for the encoder. At zero, NVENC opens on a Direct3D 11 device and then fails
+/// to set up an encoder. Bit 5 would do as well as this one.
+const BLACKWELL_ENCODER_FLAGS: u8 = 0x10;
 
 /// Blackwell.
 pub const BLACKWELL: Generation = Generation {
@@ -118,8 +136,9 @@ pub const BLACKWELL: Generation = Generation {
     },
     copy_node_flags: Some(0x1A0),
     video_record_flags: VideoRecordFlags {
-        words: [BLACKWELL_VIDEO_FLAG, BLACKWELL_VIDEO_FRAMES],
+        caps: BLACKWELL_VIDEO_CAPS,
         decoder: BLACKWELL_DECODER_FLAGS,
+        encoder: BLACKWELL_ENCODER_FLAGS,
     },
     depth_kinds: DepthKinds::AsStated,
     run_on_guest_branches: &["617"],
@@ -146,7 +165,7 @@ const TURING_NODES: EngineNodes = EngineNodes {
     jpeg: &[],
     video_runs: false,
 };
-const NO_VIDEO_FLAGS: VideoRecordFlags = VideoRecordFlags { words: [0, 0], decoder: 0 };
+const NO_VIDEO_FLAGS: VideoRecordFlags = VideoRecordFlags { caps: [0; 4], decoder: 0, encoder: 0 };
 
 /// Ada, which keeps Ampere's channel, copy and doorbell classes. Experimental.
 pub const ADA: Generation = Generation {

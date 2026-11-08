@@ -31,6 +31,12 @@ You need an NVIDIA card with the open kernel modules loaded, and the driver vers
 
 The install needs no hands, and the first boot builds everything. If anything about the driver is in doubt the GPU stays off and the VM still boots. The guest gets one plain sentence and the app has the details, as those can hold your paths. As root in the guest, `nvfwd-check` says which parts work.
 
+After the app updates, the guest takes the new scripts and settings by itself. Each driver image carries them, and when a boot finds an image whose scripts differ from the guest's, it installs them the way a fresh setup would and carries on with the new ones. If that fails, the guest keeps what it had and boots as before, and `nvfwd-check` says why. A guest made before 0.2.3 doesn't know to do this yet, so run this once in it, as root, and reboot:
+
+    sudo bash /opt/nv/driver/setup/refresh.sh
+
+That's where the image is mounted on a boot with the GPU. On one without, mount it there first with `sudo mount -o ro LABEL=NVFWD_DRIVER /opt/nv/driver`.
+
 ## A Linux you installed yourself
 
 Any ISO the app doesn't install by itself makes a plain machine, which you install by hand in the viewer. If it's a Linux, its settings have a Linux GPU switch. With it on, the machine starts with the same device, driver image and jail as Ubuntu's, on its own firmware and disk, and with the GPU off it boots as it always did.
@@ -40,7 +46,7 @@ Once, as root in the guest:
     mount -o ro LABEL=NVFWD_DRIVER /mnt
     bash /mnt/setup/setup-own.sh
 
-then reboot. `setup-own.sh` reads `/etc/os-release` and uses dnf, apt, pacman or zypper, so Fedora, Debian, Ubuntu, Arch, openSUSE and the distributions built on them. It refuses anything else, an image-based system like Silverblue, and Secure Boot. It installs the running kernel's headers, a compiler and what our programs need, builds our module and the stand-in for nvidia-modeset, and installs `nvfwd-gpu.service`, which brings the GPU up at each boot as in Ubuntu. With SELinux on, the scripts are labelled as programs and the image is mounted as libraries. It never turns SELinux off. Run it again after updating the app.
+then reboot. `setup-own.sh` reads `/etc/os-release` and uses dnf, apt, pacman or zypper, so Fedora, Debian, Ubuntu, Arch, openSUSE and the distributions built on them. It refuses anything else, an image-based system like Silverblue, and Secure Boot. It installs the running kernel's headers, a compiler and what our programs need, builds our module and the stand-in for nvidia-modeset, and installs `nvfwd-gpu.service`, which brings the GPU up at each boot as in Ubuntu. With SELinux on, the scripts are labelled as programs and the image is mounted as libraries. It never turns SELinux off. After that, new scripts come with each driver image as for Ubuntu, without the packages: setting up again by hand is only needed if a new version wants more of them.
 
 A new kernel needs a new build. Each boot builds for its kernel if it has to, and a hook builds as the kernel arrives, so the first boot doesn't wait: kernel-install on Fedora, the kernel's postinst and header_postinst hooks on Debian and Ubuntu, a pacman hook on Arch. openSUSE has no hook yet, so its first boot on a new kernel takes a minute or two longer. There's no DKMS: what's built depends on the host's driver as much as on the kernel, and the boot already rebuilds for either.
 

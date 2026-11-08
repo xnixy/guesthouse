@@ -109,7 +109,10 @@ impl StandIn {
             card,
             name: "Stand-in GPU".into(),
             video_memory: 8 << 30,
+            gtt_memory: 0,
+            bar_size: 8 << 30,
             node_count: NODE_COUNT,
+            engines: guesthouse_backend::AdapterEngines::all(),
             guest_driver_version: 0,
         };
         Self::with_facts(facts)

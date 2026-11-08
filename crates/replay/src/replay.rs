@@ -69,7 +69,10 @@ fn build_session(recording: &Recording<'_>) -> Result<ReplaySession, BadRecordin
         },
         name: recording.setting("adapter_name")?.to_owned(),
         video_memory: recording.number("card_dedicated")?,
+        gtt_memory: 0,
+        bar_size: recording.number("card_dedicated")?,
         node_count: recording.number("node_count")? as u32,
+        engines: guesthouse_backend::AdapterEngines::all(),
         guest_driver_version: 0,
     };
     let cap = recording.number("video_cap")?;

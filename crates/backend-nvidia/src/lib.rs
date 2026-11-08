@@ -232,7 +232,12 @@ impl<R: Rm> NvidiaBackend<R> {
                 card: pci_card,
                 name,
                 video_memory: u64::from_le_bytes(dedicated),
+                // NVIDIA's parts here report their dedicated memory as fully CPU-visible and do not
+                // separate a GART pool, so these two carry no new NVIDIA behaviour.
+                gtt_memory: 0,
+                bar_size: u64::from_le_bytes(dedicated),
                 node_count,
+                engines: guesthouse_backend::AdapterEngines::all(),
                 guest_driver_version: setup.guest_driver_version.packed(),
             },
             answers: AdapterAnswers::new(inputs, layout),

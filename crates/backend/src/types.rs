@@ -33,6 +33,23 @@ pub struct PciCard {
     pub revision: u8,
 }
 
+/// Which engine families a card offers. A second backend needs this to decide what the guest may be
+/// given, and the copy path needs to know a copy engine exists. A vendor fills in what its card has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AdapterEngines {
+    pub graphics: bool,
+    pub compute: bool,
+    pub copy: bool,
+    pub video: bool,
+}
+
+impl AdapterEngines {
+    /// A card with the full set, which is what NVIDIA's parts report.
+    pub fn all() -> Self {
+        Self { graphics: true, compute: true, copy: true, video: true }
+    }
+}
+
 /// What the guest is told about the card. All of it is found at startup, and none comes from a
 /// table of cards.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,8 +58,16 @@ pub struct AdapterFacts {
     pub name: String,
     /// The card's dedicated memory in bytes.
     pub video_memory: u64,
+    /// System memory the GPU can reach through its GART, in bytes. Zero when the backend does not
+    /// separate it from dedicated memory.
+    pub gtt_memory: u64,
+    /// The CPU-visible window onto video memory, in bytes. On a card without resizable BAR this is
+    /// much smaller than `video_memory`, and the copy path must stay inside it.
+    pub bar_size: u64,
     /// How many engine nodes the guest sees.
     pub node_count: u32,
+    /// Which engine families the card has.
+    pub engines: AdapterEngines,
     /// The guest driver's version as setup read it, packed the way the guest wants it.
     pub guest_driver_version: u64,
 }

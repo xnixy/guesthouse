@@ -108,14 +108,21 @@ impl AmdBackend {
     }
 }
 
-/// Builds the facts the guest is told from the card's own readings. Today [`AdapterFacts`] is thin,
-/// so the engine set, GTT size and BAR size are kept inside the backend; Part B widens the facts.
+/// Builds the facts the guest is told from the card's own readings.
 fn facts_from(info: &DeviceInfo) -> AdapterFacts {
     AdapterFacts {
         card: PciCard { vendor: AMD_VENDOR, device: info.device_id, revision: info.pci_revision },
         name: format!("AMD GPU {:#06x}", info.device_id),
         video_memory: info.vram_total,
+        gtt_memory: info.gtt_total,
+        bar_size: info.visible_vram_total,
         node_count: info.engines.count(),
+        engines: guesthouse_backend::AdapterEngines {
+            graphics: info.engines.graphics,
+            compute: info.engines.compute,
+            copy: info.engines.dma,
+            video: false,
+        },
         guest_driver_version: 0,
     }
 }

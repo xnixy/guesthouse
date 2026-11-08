@@ -1,7 +1,9 @@
 //! An Ubuntu guest on an AMD card builds its Mesa for native context the first time it boots on it,
-//! and each time Ubuntu updates Mesa. The start waits on what the guest says, so the machine's row
-//! shows how far the build is. If native context failed, the VM is started again on Venus, which needs
-//! no build, and the row says why.
+//! and each time Ubuntu updates Mesa. The start waits until the guest says how its GPU is: if native
+//! context failed at once, the VM is started again on Venus, which needs no build, and the row says why.
+//! A build takes the best part of an hour, so the start doesn't wait through one, which would leave the
+//! machine with nothing but Force Off: the row shows its progress from the guest's serial port, and a
+//! build that fails puts the next start on Venus.
 
 use super::{KEY_POLL, STOP_WAIT_SECONDS, Task};
 use crate::failure::Result;
@@ -11,8 +13,8 @@ use crate::linux::guest_says;
 use crate::vm_args::VmPlan;
 use std::time::Duration;
 
-/// The first boot's packages and the build both fit in this, as Ubuntu's install does.
-const SETUP_HOURS: u64 = 2;
+/// The first boot's packages fit in this, before the guest says anything.
+const SAY_MINUTES: u64 = 30;
 /// A guest from before AMD cards says only that it has no NVIDIA GPU. It's given this long after that
 /// to say anything more.
 const OLD_GUEST_SECONDS: u64 = 120;
@@ -24,39 +26,29 @@ const OLD_GUEST: &str = "This guest's own scripts don't know AMD cards, so its d
 /// What came of waiting.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Waited {
-    /// It has its GPU, or the VM went, or the guest is too old to say: nothing more to do.
+    /// It has its GPU, or is building Mesa for it, or the VM went, or the guest is too old to say:
+    /// nothing more to do here.
     Done,
     /// Native context failed, and the VM has to start again on Venus.
     OnVenusNext(String),
 }
 
-fn progress(says: &AmdSays) -> Option<String> {
-    let AmdSays::Building { done, total } = says else { return None };
-    Some(format!("Building Mesa for the AMD GPU in the guest: {done} of {total}"))
-}
-
-/// Waits until the guest says how its GPU went, showing the build's progress as it goes.
+/// Waits until the guest says how its GPU went, or that it's building Mesa for it.
 pub(super) fn wait_for_guest(task: &mut Task, plan: &VmPlan) -> Waited {
     let Some(amd) = plan.amd_boot() else { return Waited::Done };
     let mode = amd.mode;
     task.step(WAITING);
-    let end = task.now() + Duration::from_secs(SETUP_HOURS * 3600);
+    let end = task.now() + Duration::from_secs(SAY_MINUTES * 60);
     let mut quiet_since: Option<Duration> = None;
-    let mut shown = String::new();
     while task.pid().is_some() && task.now() < end {
         let says = amd_says::read(&plan.run_folder);
         if let Some(says) = &says {
             learn(task.context, &task.machine, mode, says);
-            if let Some(text) = progress(says).filter(|text| *text != shown) {
-                task.step(&text);
-                shown = text;
-            }
             match says {
                 AmdSays::Failed { reason } if mode == AmdMode::Native => {
                     return Waited::OnVenusNext(reason.clone());
                 }
-                _ if says.settled() => return Waited::Done,
-                _ => {}
+                _ => return Waited::Done,
             }
         } else if guest_says::read(&plan.run_folder).is_some() {
             let since = *quiet_since.get_or_insert(task.now());
@@ -116,12 +108,25 @@ mod tests {
     }
 
     #[test]
-    fn the_builds_progress_is_shown_and_a_failure_moves_the_machine_to_venus() {
-        assert_eq!(
-            progress(&AmdSays::Building { done: 812, total: 2400 }).unwrap(),
-            "Building Mesa for the AMD GPU in the guest: 812 of 2400"
-        );
-        assert_eq!(progress(&AmdSays::Native { renderer: "radeonsi".into() }), None);
+    fn a_guest_building_mesa_is_left_to_it_and_one_that_says_nothing_is_not_waited_on_forever() {
+        let scratch = Scratch::new();
+        let context = super::super::tests::plain_task_context(&scratch);
+        super::super::tests::with_vm_running(&context);
+        let host = RecordingHost::default();
+        let mut task = Task::new(&context, &host, "start", machine(&context));
+        let wanted = plan(&task, AmdMode::Native);
+        let started = task.now();
+        assert_eq!(wait_for_guest(&mut task, &wanted), Waited::Done);
+        assert!(task.now() - started >= Duration::from_secs(SAY_MINUTES * 60), "it gave up in time");
+        fs::write(wanted.run_folder.join("serial.log"), "guesthouse-amd building 5 5803\n").unwrap();
+        let started = task.now();
+        assert_eq!(wait_for_guest(&mut task, &wanted), Waited::Done);
+        assert_eq!(task.now(), started, "no wait through the build");
+        assert_eq!(amd_mode(&context, &task.machine), AmdMode::Native);
+    }
+
+    #[test]
+    fn a_failure_moves_the_machine_to_venus() {
         let scratch = Scratch::new();
         let context = scratch_context(&scratch);
         let host = RecordingHost::default();

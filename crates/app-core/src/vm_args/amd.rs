@@ -23,7 +23,11 @@ pub const RENDER_SERVER: &str = "virgl_render_server";
 const SHADER_CACHE: &str = "cache";
 /// Where the Vulkan loader finds its drivers, and RADV's manifest among them.
 const VULKAN_DRIVER_FOLDERS: [&str; 2] = ["/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d"];
+/// RADV's manifest is this and QEMU's own architecture. The 32-bit one sits next to it, and the
+/// loader in a 64-bit QEMU can't load the library it names.
 const RADV_MANIFEST_PREFIX: &str = "radeon_icd";
+/// What a distro that builds RADV for one architecture only may call it.
+const RADV_PLAIN_MANIFEST: &str = "radeon_icd.json";
 /// A Linux guest's own setup image, when the user installed it.
 const SETUP_DRIVE: &str = "gsetup";
 
@@ -40,9 +44,8 @@ pub struct AmdBoot {
 /// at nothing, so Venus finds no device rather than another vendor's.
 pub fn radv_manifest(folders: &[&Path]) -> PathBuf {
     let found = folders.iter().find_map(|folder| {
-        let names = crate::machine::sorted_names(folder);
-        let name = names.into_iter().find(|name| name.starts_with(RADV_MANIFEST_PREFIX))?;
-        Some(folder.join(name))
+        let own = format!("{RADV_MANIFEST_PREFIX}.{}.json", std::env::consts::ARCH);
+        [own.as_str(), RADV_PLAIN_MANIFEST].iter().map(|name| folder.join(name)).find(|path| path.exists())
     });
     found.unwrap_or_else(|| PathBuf::from(VULKAN_DRIVER_FOLDERS[0]).join("radeon_icd.none.json"))
 }
@@ -197,6 +200,7 @@ mod tests {
     fn radvs_manifest_is_found_where_the_loader_looks_and_none_names_nothing() {
         let scratch = Scratch::new();
         scratch.write("icd/nvidia_icd.json", "{}");
+        scratch.write("icd/radeon_icd.i686.json", "{}");
         scratch.write("icd/radeon_icd.x86_64.json", "{}");
         let folder = scratch.path("icd");
         assert_eq!(radv_manifest(&[&scratch.path("none"), &folder]), folder.join("radeon_icd.x86_64.json"));

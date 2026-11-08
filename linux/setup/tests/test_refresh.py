@@ -82,6 +82,13 @@ class UbuntuRefresh(unittest.TestCase):
         self.guest.run()
         self.assertFalse(os.path.exists(self.guest.path(BUILT_FOR)))
 
+    def test_a_guest_installed_with_these_scripts_takes_nothing(self):
+        shutil.copy(os.path.join(GUEST, "check.sh"), os.path.join(self.guest.installed, "check.sh"))
+        self.assertEqual(self.guest.run("--if-changed").returncode, 3)
+        self.assertEqual(self.guest.lines("systemctl"), [])
+        self.assertTrue(self.guest.read("var/lib/nvfwd/guest-files").strip())
+        self.assertEqual(self.guest.run("--if-changed").returncode, 3)
+
     def test_a_failed_copy_leaves_the_installed_scripts_alone(self):
         self.guest.fake("cp", 'case "$*" in *guest-files.previous*) mkdir -p "${@: -1}"; exit 1;; esac; exec /usr/bin/cp "$@"')
         self.assertEqual(self.guest.run("--if-changed").returncode, 1)

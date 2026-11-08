@@ -26,6 +26,15 @@ fail() {
     exit 1
 }
 
+# Whether the installed scripts are already these, file for file. A guest whose install brought them
+# has no marker yet, and has nothing to take.
+installed_matches() {
+    local name
+    while IFS= read -r -d '' name; do
+        cmp -s "$here/$name" "$installed/$name" || return 1
+    done < <(cd "$here" && find . -type f ! -path '*/__pycache__/*' -print0)
+}
+
 # Ubuntu's own install: these scripts over a copy of the installed ones, which keeps the files the
 # install's seed brought and the image has no copy of, such as the Xwayland wrapper. Then the settings.
 refresh_ubuntu() {
@@ -41,10 +50,14 @@ refresh_ubuntu() {
 [ "$(id -u)" = 0 ] || { echo "Run it as root." >&2; exit 1; }
 [ -d "$installed" ] || { echo "This guest has no scripts of ours to refresh." >&2; exit 1; }
 new_id=$(guest_files_id "$here") || exit 1
-if [ "${1:-}" = --if-changed ] && [ "$(cat "$guest_files_marker" 2>/dev/null)" = "$new_id" ]; then
-    exit "$unchanged"
-fi
 mkdir -p "$(dirname "$guest_files_marker")"
+if [ "${1:-}" = --if-changed ]; then
+    [ "$(cat "$guest_files_marker" 2>/dev/null)" != "$new_id" ] || exit "$unchanged"
+    if [ ! -e "$guest_files_marker" ] && installed_matches; then
+        echo "$new_id" > "$guest_files_marker"
+        exit "$unchanged"
+    fi
+fi
 rm -rf "$previous"
 # Running scripts keep reading their old files, as these are moved or removed, never written over.
 cp -a "$installed" "$previous" || fail "keeping a copy of the scripts failed"

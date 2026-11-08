@@ -1,0 +1,4 @@
+# For a guest on an AMD card: what says which GPU programs get, and Mesa's Vulkan for AMD.
+mesa-utils
+vulkan-tools
+vulkan-radeon

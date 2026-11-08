@@ -1,0 +1,11 @@
+# Says again how the AMD card's GPU is doing after an update of Mesa, which on Arch has native context.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = mesa
+
+[Action]
+Description = Checking Mesa for the AMD card's GPU...
+When = PostTransaction
+Exec = /usr/lib/nvfwd/amd/mesa-hook.sh

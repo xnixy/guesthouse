@@ -45,12 +45,20 @@ install_firefox() {
 }
 
 enable_services() {
-    systemctl enable "$here/units/nvfwd-gpu.service" "$here/units/nvfwd-desktop.service"
+    systemctl enable "$here/units/nvfwd-gpu.service" "$here/units/nvfwd-desktop.service" \
+        "$here/units/nvfwd-amd.service"
+    systemctl link "$here/units/nvfwd-mesa-build.service"
     systemctl set-default graphical.target
+}
+
+# On an AMD card, Mesa is built again with native context after each of Ubuntu's updates of it.
+install_mesa_hook() {
+    install -m 644 "$here/files/hooks/apt-nvfwd-mesa.conf" /etc/apt/apt.conf.d/90nvfwd-mesa
 }
 
 install_packages
 install_settings
+install_mesa_hook
 wrap_xwayland
 mask_user_sound
 install_firefox

@@ -1,0 +1,5 @@
+# For a guest on an AMD card: what says which GPU programs get, Mesa's Vulkan, and dnf's hook.
+egl-utils
+vulkan-tools
+mesa-vulkan-drivers
+libdnf5-plugin-actions

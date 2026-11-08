@@ -52,7 +52,7 @@ build_mesa_now() {
     if mesa_has_native_context || mesa_is_ours; then
         echo "Mesa $(mesa_version) has native context already."
     elif ! "$installed/amd/mesa-build.sh"; then
-        say_amd "failed $(cat "$amd_state/build-failure" 2>/dev/null || echo the Mesa build failed), see $mesa_log"
+        say_amd "failed $(sed 's/\.$//' "$amd_state/build-failure" 2>/dev/null || echo the Mesa build failed), see $mesa_log"
         echo
         echo "The GPU still works: shut the guest down and start it again, and it goes on with Venus, which needs no build."
         exit 1

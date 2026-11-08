@@ -125,6 +125,13 @@ build_fedora() {
     sed -i "s/^%meson \\\\$/%meson \\\\\n  $option \\\\/" "$spec"
     sed -i -E "s/^(Release:[[:space:]]*.*)$/\1.$build_mark/" "$spec"
     dnf builddep -y "$spec" || refuse "dnf could not install what Mesa $version builds with."
+    # Its Rust crates are asked for as the build starts, which only rpmbuild can say.
+    for _ in 1 2 3; do
+        rpmbuild --define "_topdir $work" -br "$spec" && break
+        dnf builddep -y "$work"/SRPMS/*.buildreqs.nosrc.rpm ||
+            refuse "dnf could not install the crates Mesa $version builds with."
+        rm -f "$work"/SRPMS/*.buildreqs.nosrc.rpm
+    done
     rpmbuild --define "_topdir $work" --nocheck -bb "$spec" 2>&1 | show_progress || refuse "rpmbuild failed."
     for package in "$work"/RPMS/*/*.rpm; do
         name=$(rpm -qp --qf '%{NAME}' "$package")

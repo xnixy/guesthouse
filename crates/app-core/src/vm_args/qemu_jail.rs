@@ -226,13 +226,15 @@ impl VmPlan {
         };
         words.extend(bind("--ro-bind", launcher));
         for (grant, path) in &plan.paths {
-            if IN_THE_BASE.iter().any(|base| path.starts_with(base)) {
+            // A listed folder's devices are bound one at a time, and it's made around them.
+            if *grant == Grant::List || IN_THE_BASE.iter().any(|base| path.starts_with(base)) {
                 continue;
             }
             let kind = match grant {
                 Grant::Read | Grant::Run => "--ro-bind-try",
                 Grant::Write | Grant::Own | Grant::Socket => "--bind-try",
                 Grant::Device => "--dev-bind-try",
+                Grant::List => unreachable!("skipped above"),
             };
             words.extend(bind(kind, path));
         }

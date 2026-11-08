@@ -19,16 +19,20 @@ pub enum Grant {
     Device,
     /// Connect to this unix socket.
     Socket,
+    /// List what's in a folder, and no more: a device's, so it can be found without the others in
+    /// there being opened.
+    List,
 }
 
 impl Grant {
-    const ALL: [(Grant, &str); 6] = [
+    const ALL: [(Grant, &str); 7] = [
         (Grant::Read, "--read"),
         (Grant::Run, "--run"),
         (Grant::Write, "--write"),
         (Grant::Own, "--own"),
         (Grant::Device, "--device"),
         (Grant::Socket, "--socket"),
+        (Grant::List, "--list"),
     ];
 
     fn word(self) -> &'static str {

@@ -439,6 +439,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             address: block.gpu_address,
             small_pages: true,
             gpu_cached: false,
+            readable: true,
+            writable: true,
+            executable: false,
+            memory_type: guesthouse_backend::MapMemoryType::Default,
         })?;
         Ok(space)
     }

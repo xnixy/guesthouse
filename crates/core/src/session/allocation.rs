@@ -314,6 +314,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 small_pages: false,
                 // The daemon's own copies carry no cache invalidates, so its mappings stay uncached.
                 gpu_cached: Some(mapping.space) != own && allocation.gpu_cached,
+                readable: true,
+                writable: true,
+                executable: false,
+                memory_type: guesthouse_backend::MapMemoryType::Default,
             })?;
         }
         allocation.memory = Some(shared);

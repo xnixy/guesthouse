@@ -174,6 +174,10 @@ fn trait_demo(backend: &mut AmdBackend) -> Result<(), String> {
         address: va,
         small_pages: false,
         gpu_cached: false,
+        readable: true,
+        writable: true,
+        executable: false,
+        memory_type: guesthouse_backend::MapMemoryType::Default,
     };
     backend.map(&request).map_err(|error| error.to_string())?;
     let exported = backend.export_memory(memory, size).map_err(|error| error.to_string())?;

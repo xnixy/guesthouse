@@ -124,6 +124,21 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// How the GPU's caches should treat a mapping. A backend whose page tables carry a memory type
+/// reads this; one that does not ignores it, as `gpu_cached` already told it what it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MapMemoryType {
+    /// Leave it to the backend's default for the placement.
+    #[default]
+    Default,
+    /// The GPU may cache it without snooping the CPU.
+    NonCoherent,
+    /// Kept coherent with the CPU.
+    Coherent,
+    /// Not cached by the GPU.
+    Uncached,
+}
+
 /// A mapping to make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MapRequest {
@@ -136,6 +151,12 @@ pub struct MapRequest {
     pub small_pages: bool,
     /// Let the GPU's cache hold host memory mapped here.
     pub gpu_cached: bool,
+    /// Whether the GPU may read, write and run from this mapping. A backend whose page tables carry
+    /// these permissions sets them; one that does not grants its usual access and ignores them.
+    pub readable: bool,
+    pub writable: bool,
+    pub executable: bool,
+    pub memory_type: MapMemoryType,
 }
 
 /// A mapping to remove.

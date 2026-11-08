@@ -255,6 +255,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             address,
             small_pages: true,
             gpu_cached: false,
+            readable: true,
+            writable: true,
+            executable: false,
+            memory_type: guesthouse_backend::MapMemoryType::Default,
         };
         let slot = SlotMemory { memory, size: given, address };
         if let Err(error) = self.backend.map(&map) {

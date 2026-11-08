@@ -82,6 +82,10 @@ fn the_backend_trait_opens_allocates_maps_and_exports() {
         address: va,
         small_pages: false,
         gpu_cached: false,
+        readable: true,
+        writable: true,
+        executable: false,
+        memory_type: guesthouse_backend::MapMemoryType::Default,
     };
     backend.map(&request).unwrap();
     let _fd = backend.export_memory(memory, size).unwrap();

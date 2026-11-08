@@ -245,13 +245,25 @@ impl Backend for AmdBackend {
         let Some(bo) = self.memory.get_mut(&request.memory) else {
             return Err(BackendError::new("mapping memory that does not exist"));
         };
-        // MapRequest carries no read/write/execute or memory type today, so a safe superset is used:
-        // readable, writable and, since an IB must be, executable. Part B adds the real flags.
+        // Honour the request's read/write/execute and memory type, which the core now carries. When
+        // the memory type is left to the backend, the older gpu_cached hint still decides caching.
+        let memory_type = match request.memory_type {
+            guesthouse_backend::MapMemoryType::Default => {
+                if request.gpu_cached {
+                    MemoryType::NonCoherent
+                } else {
+                    MemoryType::Uncached
+                }
+            }
+            guesthouse_backend::MapMemoryType::NonCoherent => MemoryType::NonCoherent,
+            guesthouse_backend::MapMemoryType::Coherent => MemoryType::CacheCoherent,
+            guesthouse_backend::MapMemoryType::Uncached => MemoryType::Uncached,
+        };
         let flags = MapFlags {
-            readable: true,
-            writable: true,
-            executable: true,
-            memory_type: if request.gpu_cached { MemoryType::NonCoherent } else { MemoryType::Uncached },
+            readable: request.readable,
+            writable: request.writable,
+            executable: request.executable,
+            memory_type,
         };
         memory::map(&self.device, bo.handle, request.address, request.offset, request.length, flags)
             .map_err(|error| BackendError::new(format!("GEM_VA map: {error}")))?;

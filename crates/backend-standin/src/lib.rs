@@ -502,7 +502,19 @@ mod tests {
     use super::*;
 
     fn map(space: SpaceId, memory: MemoryId, address: u64, length: u64) -> MapRequest {
-        MapRequest { space, memory, offset: 0, length, address, small_pages: false, gpu_cached: false }
+        MapRequest {
+            space,
+            memory,
+            offset: 0,
+            length,
+            address,
+            small_pages: false,
+            gpu_cached: false,
+            readable: true,
+            writable: true,
+            executable: false,
+            memory_type: guesthouse_backend::MapMemoryType::Default,
+        }
     }
 
     #[test]

@@ -105,8 +105,19 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let base = self.gpu_addresses.take(whole, align, AddressUse::Mapped)?;
         log::debug!("map {handle:#x} at {base:#x}, chosen here, for {mapped:#x}");
         let gpu_cached = allocation.gpu_cached;
-        let map =
-            MapRequest { space, memory, offset: 0, length: mapped, address: base, small_pages, gpu_cached };
+        let map = MapRequest {
+            space,
+            memory,
+            offset: 0,
+            length: mapped,
+            address: base,
+            small_pages,
+            gpu_cached,
+            readable: true,
+            writable: true,
+            executable: false,
+            memory_type: guesthouse_backend::MapMemoryType::Default,
+        };
         if let Err(error) = self.backend.map(&map) {
             log::warn!("mapping {handle:#x}: {error}");
             self.gpu_addresses.give_back(base, whole, align, AddressUse::Mapped);
@@ -151,7 +162,19 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             return Err(BackendError::new("no GPU address range holds this"));
         }
         let gpu_cached = self.allocations[&handle].gpu_cached;
-        let map = MapRequest { space, memory, offset, length, address, small_pages: true, gpu_cached };
+        let map = MapRequest {
+            space,
+            memory,
+            offset,
+            length,
+            address,
+            small_pages: true,
+            gpu_cached,
+            readable: true,
+            writable: true,
+            executable: false,
+            memory_type: guesthouse_backend::MapMemoryType::Default,
+        };
         if self.backend.map(&map).is_ok() {
             return Ok(());
         }
@@ -179,6 +202,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             address,
             small_pages: true,
             gpu_cached,
+            readable: true,
+            writable: true,
+            executable: false,
+            memory_type: guesthouse_backend::MapMemoryType::Default,
         })?;
         self.add_mapping(handle, Mapping { address, first: offset, length, space });
         Ok(())
@@ -392,6 +419,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             address,
             small_pages: true,
             gpu_cached: false,
+            readable: true,
+            writable: true,
+            executable: false,
+            memory_type: guesthouse_backend::MapMemoryType::Default,
         };
         if let Err(error) = self.backend.map(&map) {
             self.gpu_addresses.give_back(address, whole, ALLOCATION_ALIGN, AddressUse::Host);

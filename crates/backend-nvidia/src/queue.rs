@@ -96,6 +96,8 @@ pub(crate) struct LiveQueue {
     list_end: Option<u64>,
     /// A move registered with the GPU, which goes with the next doorbell.
     pending_move: Option<PendingMove>,
+    /// Giving the channel shader local memory is tried once.
+    local_memory_tried: bool,
 }
 
 impl LiveQueue {
@@ -107,6 +109,7 @@ impl LiveQueue {
             position: None,
             list_end: None,
             pending_move: None,
+            local_memory_tried: false,
         }
     }
 }
@@ -133,6 +136,18 @@ fn read_words(host: &dyn HostServices, space: SpaceId, address: u64, count: u32)
         let (words, _) = bytes.as_chunks::<4>();
         words.iter().map(|word| u32::from_le_bytes(*word)).collect()
     })
+}
+
+/// The commands each ring entry of a listing points at, for those that can be read.
+fn command_buffers(host: &dyn HostServices, space: SpaceId, listing: &[u8]) -> Vec<Vec<u32>> {
+    let (entries, _) = listing.as_chunks::<ENTRY_SIZE>();
+    let read = |entry: &[u8; ENTRY_SIZE]| {
+        let entry = RingEntry::parse(*entry);
+        let mut bytes = vec![0; entry.length as usize * 4];
+        (entry.length != 0 && host.read_guest_span(space, entry.address, &mut bytes) == Some(bytes.len()))
+            .then(|| bytes.as_chunks::<4>().0.iter().map(|word| u32::from_le_bytes(*word)).collect())
+    };
+    entries.iter().filter_map(read).collect()
 }
 
 /// The largest power of two entries that fit a mapping, if a channel can count that far.
@@ -226,17 +241,73 @@ impl<R: Rm> NvidiaBackend<R> {
         host.take_gpu_addresses(size as u64, crate::CHANNEL_ADDRESS_ALIGN).ok()
     }
 
-    /// A GPU address for a graphics channel's shader local memory, if this engine runs shaders.
-    fn local_memory_address(&mut self, host: &mut dyn HostServices, engine: Engine) -> Option<u64> {
+    /// Where a new graphics channel's shader local memory goes, and the window it is reached
+    /// through. Nothing until a queue has set the window, as no value is made up for it.
+    fn local_memory_place(&mut self, host: &mut dyn HostServices, engine: Engine) -> Option<(u64, u64)> {
         if engine != Engine::Graphics {
             return None;
         }
+        let Some(window) = self.local_window.window() else {
+            log::debug!("a graphics channel waits for the shader local window before it has a pool");
+            return None;
+        };
         match host.take_gpu_addresses(LOCAL_MEMORY_BYTES, LOCAL_MEMORY_ALIGN) {
-            Ok(address) => Some(address),
+            Ok(address) => Some((address, window)),
             Err(error) => {
                 log::warn!("no address for shader local memory: {error}");
                 None
             }
+        }
+    }
+
+    /// Reads a graphics submission's commands for the shader local window, until a queue sets it.
+    fn watch_local_window(&mut self, host: &dyn HostServices, work: &Work<'_>, listing: &[u8]) {
+        if self.local_window.window().is_some() {
+            return;
+        }
+        for words in command_buffers(host, work.space, listing) {
+            self.local_window.read(work.queue, &words);
+        }
+    }
+
+    /// The entries a submission on a guest's ring adds, read from where the channel runs them.
+    fn ring_listing(host: &dyn HostServices, space: SpaceId, ring: u64, entries: u32, end: u32) -> Vec<u8> {
+        let Some(span) = host.shared_span(space, ring) else { return Vec::new() };
+        let Some(size) = ring_entries_of(span.mapping_length) else { return Vec::new() };
+        let mut listing = vec![0; entries.min(size) as usize * ENTRY_SIZE];
+        for (index, entry) in listing.chunks_mut(ENTRY_SIZE).enumerate() {
+            let position = end.wrapping_sub(entries).wrapping_add(index as u32) % size;
+            host.read_guest(span.guest_address + u64::from(position) * ENTRY_SIZE as u64, entry);
+        }
+        listing
+    }
+
+    /// A pool for a queue's graphics channel that was made before the window was known. It runs
+    /// ahead of the queue's next submission. A queue that named its own pool keeps it.
+    fn give_late_local_memory(&mut self, host: &mut dyn HostServices, queue_id: u32) {
+        let Some(window) = self.local_window.window() else { return };
+        if self.local_window.sets_own_pool(queue_id) {
+            return;
+        }
+        let Some(queue) = self.queues.get_mut(&queue_id) else { return };
+        let channel = match &mut queue.channel {
+            QueueChannel::Ring { channel, .. } => channel,
+            QueueChannel::List(list) => &mut list.channel,
+            QueueChannel::Unusable => return,
+        };
+        if channel.engine() != Engine::Graphics || std::mem::replace(&mut queue.local_memory_tried, true) {
+            return;
+        }
+        let Some(space) = self.spaces.get(&queue.space) else { return };
+        let address = match host.take_gpu_addresses(LOCAL_MEMORY_BYTES, LOCAL_MEMORY_ALIGN) {
+            Ok(address) => address,
+            Err(error) => return log::warn!("no address for shader local memory: {error}"),
+        };
+        match channel.add_late_local_memory(&mut self.device, space, address, window) {
+            Ok(()) => {
+                log::debug!("queue {queue_id:#x} gets its shader local memory ahead of this submission")
+            }
+            Err(error) => log::warn!("no shader local memory: {error}"),
         }
     }
 
@@ -264,13 +335,13 @@ impl<R: Rm> NvidiaBackend<R> {
         };
         let place = ChannelPlace { ring_address, ring_entries, area_address, area_size: AREA_SIZE };
         let engine = self.video_engine(work).map_or(Engine::Graphics, Engine::Video);
-        let local_memory = self.local_memory_address(host, engine);
+        let local_memory = self.local_memory_place(host, engine);
         let Some(space) = self.spaces.get(&work.space) else { return };
         let made = Channel::new(&mut self.device, self.generation, self.host_branch, space, place, engine);
         match made {
             Ok(mut channel) => {
-                if let Some(address) = local_memory
-                    && let Err(error) = channel.add_local_memory(&mut self.device, space, address)
+                if let Some((address, window)) = local_memory
+                    && let Err(error) = channel.add_local_memory(&mut self.device, space, address, window)
                 {
                     log::warn!("no shader local memory: {error}");
                 }
@@ -282,6 +353,7 @@ impl<R: Rm> NvidiaBackend<R> {
                         log::warn!("closing a channel: {}", memory_error(error));
                     }
                 } else if let Some(queue) = self.queues.get_mut(&work.queue) {
+                    queue.local_memory_tried = local_memory.is_some();
                     queue.channel = QueueChannel::Ring { channel, ring_address };
                 }
             }
@@ -376,13 +448,19 @@ impl<R: Rm> NvidiaBackend<R> {
     ) -> Result<u32, WorkStart> {
         self.settle_move(host, work.queue, Instant::now())?;
         let first = end.saturating_sub(entries);
+        if self.video_engine(work).is_none() && self.local_window.window().is_none() {
+            let ring = self.queue_ring(work.queue).unwrap_or(ring_address);
+            let listing = Self::ring_listing(host, work.space, ring, entries, end);
+            self.watch_local_window(host, work, &listing);
+        }
         self.ring_channel(host, work, ring_address, first);
+        self.give_late_local_memory(host, work.queue);
         if let Some(old_ring) = self.queue_ring(work.queue).filter(|known| *known != ring_address) {
             // This submission still ends on the old ring. The move goes with its doorbell.
             self.begin_ring_move(host, work, old_ring, ring_address, entries, end)?;
         }
         let queue = self.queues.get_mut(&work.queue).ok_or(WorkStart::Finished)?;
-        let QueueChannel::Ring { channel, .. } = &queue.channel else {
+        let QueueChannel::Ring { channel, .. } = &mut queue.channel else {
             return Err(WorkStart::Finished);
         };
         let mut invalidated = true;
@@ -391,9 +469,12 @@ impl<R: Rm> NvidiaBackend<R> {
             let size = channel.ring_entries();
             Self::clear_ring_gap(host, work.space, ring_address, size, previous, start, work.may_run);
             if work.may_run {
-                let entry = channel.l2_invalidate_entry();
+                let entry = channel.entry_ahead();
                 invalidated =
                     Self::invalidate_in_gap(host, work.space, ring_address, size, previous, start, entry);
+                if invalidated {
+                    channel.entry_ahead_placed();
+                }
             }
         }
         queue.position = Some(end);
@@ -488,7 +569,8 @@ impl<R: Rm> NvidiaBackend<R> {
         }
         let mut queue = LiveQueue::new(work.space);
         let engine = self.engine_for(work);
-        let local_memory = self.local_memory_address(host, engine);
+        let local_memory = self.local_memory_place(host, engine);
+        queue.local_memory_tried = local_memory.is_some();
         if let (Some(area_address), Some(space)) =
             (self.take_area(host, LIST_AREA), self.spaces.get(&work.space))
         {
@@ -500,8 +582,8 @@ impl<R: Rm> NvidiaBackend<R> {
             };
             match Channel::new(&mut self.device, self.generation, self.host_branch, space, place, engine) {
                 Ok(mut channel) => {
-                    if let Some(address) = local_memory
-                        && let Err(error) = channel.add_local_memory(&mut self.device, space, address)
+                    if let Some((address, window)) = local_memory
+                        && let Err(error) = channel.add_local_memory(&mut self.device, space, address, window)
                     {
                         log::warn!("no shader local memory: {error}");
                     }
@@ -521,9 +603,13 @@ impl<R: Rm> NvidiaBackend<R> {
         work: &Work<'_>,
         listing: &[u8],
     ) -> Result<u32, WorkStart> {
+        if self.engine_for(work) == Engine::Graphics {
+            self.watch_local_window(host, work, listing);
+        }
         if !self.list_channel(host, work) {
             return Err(WorkStart::Finished);
         }
+        self.give_late_local_memory(host, work.queue);
         // A fence that can't be read counts as nothing finished, which only holds work back.
         let finished = host.fence_value(work.fence).unwrap_or(0);
         let queue = self.queues.get_mut(&work.queue).ok_or(WorkStart::Finished)?;
@@ -698,6 +784,7 @@ impl<R: Rm> NvidiaBackend<R> {
 
     pub(crate) fn close(&mut self, handle: u32) {
         self.guest_rings.remove(&handle);
+        self.local_window.forget(handle);
         let Some(queue) = self.queues.remove(&handle) else { return };
         if let Some(space) = self.spaces.get(&queue.space)
             && let Err(error) = queue.channel.close(&mut self.device, space)

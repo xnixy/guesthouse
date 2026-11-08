@@ -13,6 +13,7 @@ pub use area::Area;
 pub use copy::{COPY_AREA_EXTRA, COPY_WINDOW, CopyChannel};
 pub use list::{LIST_AREA, ListChannel, ListFull};
 
+use crate::local_window::{COMPUTE_SUBCHANNEL, SET_LOCAL_MEMORY_ADDRESS, SET_LOCAL_MEMORY_WINDOW};
 use crate::profile::{Generation, HostBranch};
 use crate::pushbuffer::{increasing, ring_entry};
 use crate::rm::classes::{
@@ -84,21 +85,18 @@ const VIDEO_CLASS_PARAMS: usize = 12;
 const SET_OBJECT: u32 = 0;
 const SCHEDULE_ENABLED: [u8; 3] = [1, 0, 0];
 
-/// The compute class is the second object on a graphics channel, so it is subchannel 1.
-const COMPUTE_SUBCHANNEL: u32 = 1;
 /// Bytes of shader local memory a graphics channel starts with. A launch that needs more than the
 /// channel has is failed by the GPU.
 pub const LOCAL_MEMORY_BYTES: u64 = 32 << 20;
 /// The pool's GPU address is aligned to this.
 pub const LOCAL_MEMORY_ALIGN: u64 = 2 << 20;
-/// Where a shader's local addresses sit, until the guest sets its own window.
-const LOCAL_MEMORY_WINDOW: u64 = 0x7fff_0100_0000;
 /// How many SMs share the pool. The guest replaces this when it sends its own count.
 const LOCAL_MEMORY_SMS: u32 = 0x100;
 const SET_LOCAL_MEMORY_SIZE: u32 = 0x2E4;
 const SET_LOCAL_MEMORY_SMS: u32 = 0x2EC;
-const SET_LOCAL_MEMORY_ADDRESS: u32 = 0x790;
-const SET_LOCAL_MEMORY_WINDOW: u32 = 0x7B0;
+/// A pool given to a channel that is already running goes here, with its own cache invalidate
+/// after it. Well past the prelude, which is a few dozen words.
+const LATE_POOL: usize = PRELUDE + 0x800;
 
 fn put32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
@@ -162,6 +160,8 @@ pub struct Channel {
     prelude_words: u32,
     /// Shader local memory, mapped into the channel's address space.
     local_memory: Option<(Handle, u64, u64)>,
+    /// Words at [`LATE_POOL`] that the next submission still has to run.
+    late_pool_words: Option<u32>,
 }
 
 /// Drops every line of host memory from the GPU's L2, with a system membar either side.
@@ -283,20 +283,58 @@ impl Channel {
             setup_words,
             prelude_words: words.len() as u32,
             local_memory: None,
+            late_pool_words: None,
         })
     }
 
     /// Maps a shader local-memory pool and names it in the prelude, ahead of the cache invalidate.
-    /// Graphics channels only. A channel that never gets one has a pool of nothing, and a compute
-    /// launch that needs local memory is failed.
+    /// Only before the prelude has been handed out. Graphics channels only. A channel that never
+    /// gets one has a pool of nothing, and a compute launch that needs local memory is failed.
+    /// `window` is where the guest's driver puts shaders' local addresses.
     pub fn add_local_memory<R: Rm>(
         &mut self,
         device: &mut Device<R>,
         space: &AddressSpace,
         address: u64,
+        window: u64,
     ) -> Result<(), RmError> {
+        let Some(extra) = self.map_local_memory(device, space, address, window)? else { return Ok(()) };
+        let mut words = self.area.load_words(PRELUDE, self.prelude_words as usize);
+        let at = self.setup_words as usize;
+        words.splice(at..at, extra.iter().copied());
+        self.area.store_words(PRELUDE, &words);
+        self.setup_words += extra.len() as u32;
+        self.prelude_words = words.len() as u32;
+        Ok(())
+    }
+
+    /// The same for a channel that is already running. The prelude and the invalidate stay as they
+    /// are, as the GPU may still be reading them, and the pool goes ahead of the next submission.
+    pub fn add_late_local_memory<R: Rm>(
+        &mut self,
+        device: &mut Device<R>,
+        space: &AddressSpace,
+        address: u64,
+        window: u64,
+    ) -> Result<(), RmError> {
+        let Some(mut words) = self.map_local_memory(device, space, address, window)? else { return Ok(()) };
+        words.extend(l2_invalidate_words());
+        self.area.store_words(LATE_POOL, &words);
+        self.late_pool_words = Some(words.len() as u32);
+        Ok(())
+    }
+
+    /// Allocates and maps the pool, and gives the methods that name it. `None` if this channel
+    /// takes no pool.
+    fn map_local_memory<R: Rm>(
+        &mut self,
+        device: &mut Device<R>,
+        space: &AddressSpace,
+        address: u64,
+        window: u64,
+    ) -> Result<Option<Vec<u32>>, RmError> {
         if self.engine != Engine::Graphics || self.local_memory.is_some() {
-            return Ok(());
+            return Ok(None);
         }
         let (handle, given) = device.alloc_video_memory(LOCAL_MEMORY_BYTES)?;
         let mapped = device.map(
@@ -314,16 +352,14 @@ impl Channel {
             let _ = device.free(handle);
             return Err(error);
         }
-        let extra = local_memory_methods(address, given);
-        let mut words = self.area.load_words(PRELUDE, self.prelude_words as usize);
-        let at = self.setup_words as usize;
-        words.splice(at..at, extra.iter().copied());
-        self.area.store_words(PRELUDE, &words);
-        self.setup_words += extra.len() as u32;
-        self.prelude_words = words.len() as u32;
         self.local_memory = Some((handle, address, given));
         log::info!("shader local memory {given:#x} bytes at {address:#x}");
-        Ok(())
+        Ok(Some(local_memory_methods(address, given, window)))
+    }
+
+    /// Whether this channel has a pool, in its prelude or still to come.
+    pub fn has_local_memory(&self) -> bool {
+        self.local_memory.is_some()
     }
 
     pub fn engine(&self) -> Engine {
@@ -356,10 +392,24 @@ impl Channel {
         ring_entry(self.area_address + PRELUDE as u64, self.prelude_words)
     }
 
-    /// The ring entry that runs the L2 invalidate, to go ahead of a submission.
+    /// The ring entry that runs the L2 invalidate.
     pub fn l2_invalidate_entry(&self) -> u64 {
         let address = self.area_address + PRELUDE as u64 + u64::from(self.setup_words) * WORD_SIZE;
         ring_entry(address, self.prelude_words - self.setup_words)
+    }
+
+    /// The ring entry to go ahead of a submission: the L2 invalidate, with a pool given late the
+    /// first time. Call [`Self::entry_ahead_placed`] once the entry is on the ring.
+    pub fn entry_ahead(&self) -> u64 {
+        match self.late_pool_words {
+            Some(words) => ring_entry(self.area_address + LATE_POOL as u64, words),
+            None => self.l2_invalidate_entry(),
+        }
+    }
+
+    /// The entry from [`Self::entry_ahead`] is on the ring, so a late pool has been sent.
+    pub fn entry_ahead_placed(&mut self) {
+        self.late_pool_words = None;
     }
 
     /// Keeps a move to another ring for the GPU to make when this channel reaches the method
@@ -415,9 +465,8 @@ impl Channel {
 }
 
 /// The compute methods that point a channel at its local-memory pool.
-fn local_memory_methods(address: u64, size: u64) -> Vec<u32> {
+fn local_memory_methods(address: u64, size: u64, window: u64) -> Vec<u32> {
     let subchannel = COMPUTE_SUBCHANNEL;
-    let window = LOCAL_MEMORY_WINDOW;
     let mut words = Vec::with_capacity(11);
     words.extend([
         increasing(subchannel, SET_LOCAL_MEMORY_ADDRESS, 2),
@@ -459,9 +508,12 @@ fn map_doorbell_once<R: Rm>(device: &mut Device<R>, generation: &Generation) -> 
 mod tests {
     use super::*;
     use crate::profile::{BLACKWELL, HOST_615};
+    use crate::pushbuffer::RingEntry;
     use crate::rm::fake::{Call, FakeRm};
 
     const AREA_ADDRESS: u64 = 0x800_0000;
+    /// A made-up window, as a guest's driver would set it.
+    const WINDOW: u64 = 0x1234_5600_0000;
 
     fn device() -> (Device<FakeRm>, AddressSpace) {
         let mut device = Device::open(FakeRm::new(), &HOST_615).unwrap();
@@ -530,10 +582,10 @@ mod tests {
         let mut channel = channel(&mut device, &space, Engine::Graphics);
         let invalidate = channel.l2_invalidate_entry() >> 42;
         let address = 0x5000_0000;
-        channel.add_local_memory(&mut device, &space, address).unwrap();
+        channel.add_local_memory(&mut device, &space, address, WINDOW).unwrap();
         let words = channel.area().load_words(PRELUDE, channel.prelude_words as usize);
         assert!(words.windows(2).any(|pair| pair == [0, address as u32]), "{words:x?}");
-        let window = [(LOCAL_MEMORY_WINDOW >> 32) as u32, LOCAL_MEMORY_WINDOW as u32];
+        let window = [(WINDOW >> 32) as u32, WINDOW as u32];
         assert!(words.windows(2).any(|pair| pair == window), "{words:x?}");
         assert_eq!(channel.l2_invalidate_entry() >> 42, invalidate);
         let mapped = device.rm.calls.iter().any(|call| {
@@ -544,11 +596,48 @@ mod tests {
     }
 
     #[test]
+    fn a_late_pool_runs_once_ahead_of_the_next_submission_and_leaves_the_prelude_alone() {
+        let (mut device, space) = device();
+        let mut channel = channel(&mut device, &space, Engine::Graphics);
+        let (prelude, invalidate) = (channel.prelude_entry(), channel.l2_invalidate_entry());
+        let prelude_words = channel.area().load_words(PRELUDE, channel.prelude_words as usize);
+        assert_eq!(channel.entry_ahead(), invalidate);
+        let address = 0x5000_0000;
+        channel.add_late_local_memory(&mut device, &space, address, WINDOW).unwrap();
+        assert!(channel.has_local_memory());
+        assert_eq!((channel.prelude_entry(), channel.l2_invalidate_entry()), (prelude, invalidate));
+        assert_eq!(channel.area().load_words(PRELUDE, channel.prelude_words as usize), prelude_words);
+
+        let ahead = RingEntry::parse(channel.entry_ahead().to_le_bytes());
+        let words = channel.area().load_words((ahead.address - AREA_ADDRESS) as usize, ahead.length as usize);
+        assert_eq!(
+            words[..3],
+            [increasing(COMPUTE_SUBCHANNEL, SET_LOCAL_MEMORY_ADDRESS, 2), 0, address as u32]
+        );
+        assert!(words.windows(2).any(|pair| pair == [(WINDOW >> 32) as u32, WINDOW as u32]), "{words:x?}");
+        assert!(words.ends_with(&l2_invalidate_words()), "the late pool still drops the L2");
+        channel.entry_ahead_placed();
+        assert_eq!(channel.entry_ahead(), invalidate);
+        channel.close(&mut device, &space).unwrap();
+    }
+
+    #[test]
+    fn a_channel_takes_one_pool_only() {
+        let (mut device, space) = device();
+        let mut channel = channel(&mut device, &space, Engine::Graphics);
+        channel.add_local_memory(&mut device, &space, 0x5000_0000, WINDOW).unwrap();
+        let calls = device.rm.calls.len();
+        channel.add_late_local_memory(&mut device, &space, 0x5200_0000, WINDOW).unwrap();
+        assert_eq!(device.rm.calls.len(), calls);
+        assert_eq!(channel.entry_ahead(), channel.l2_invalidate_entry());
+    }
+
+    #[test]
     fn a_closed_channel_gives_its_local_memory_back() {
         let (mut device, space) = device();
         let mut channel = channel(&mut device, &space, Engine::Graphics);
         let address = 0x5000_0000;
-        channel.add_local_memory(&mut device, &space, address).unwrap();
+        channel.add_local_memory(&mut device, &space, address, WINDOW).unwrap();
         let (pool, _, _) = channel.local_memory.unwrap();
         channel.close(&mut device, &space).unwrap();
         let calls = &device.rm.calls;
@@ -567,7 +656,7 @@ mod tests {
         let before = channel.area().load_words(PRELUDE, channel.prelude_words as usize);
         let address = 0x5000_0000;
         device.rm.refuse_map_at = Some(address);
-        assert!(channel.add_local_memory(&mut device, &space, address).is_err());
+        assert!(channel.add_local_memory(&mut device, &space, address, WINDOW).is_err());
         assert_eq!(channel.area().load_words(PRELUDE, channel.prelude_words as usize), before);
         assert!(channel.local_memory.is_none());
         assert!(matches!(device.rm.calls.last(), Some(Call::Free { .. })), "the pool's memory is freed");
@@ -579,7 +668,9 @@ mod tests {
         let mut channel = channel(&mut device, &space, Engine::Copy);
         let before = channel.area().load_words(PRELUDE, channel.prelude_words as usize);
         let calls = device.rm.calls.len();
-        channel.add_local_memory(&mut device, &space, 0x5000_0000).unwrap();
+        channel.add_local_memory(&mut device, &space, 0x5000_0000, WINDOW).unwrap();
+        channel.add_late_local_memory(&mut device, &space, 0x5000_0000, WINDOW).unwrap();
+        assert_eq!(channel.entry_ahead(), channel.l2_invalidate_entry());
         assert_eq!(channel.area().load_words(PRELUDE, channel.prelude_words as usize), before);
         assert_eq!(device.rm.calls.len(), calls, "nothing is allocated or mapped");
     }

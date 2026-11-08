@@ -1010,3 +1010,101 @@ fn no_random_message_panics_the_backend() {
         let _ = session.poll(if round % FUZZ_ROUNDS_TO_TIME_OUT == 0 { now + FAR_FUTURE } else { now });
     }
 }
+
+/// A list of `words` commands at `commands`, in the submission's own private data.
+fn list_of(commands: u64, words: u32) -> Vec<u8> {
+    let mut private = vec![0; 0x84];
+    set_u32(&mut private, 0x14, 1);
+    set_u32(&mut private, 0x0C, 0x84);
+    private.extend_from_slice(&ring_entry(commands, words).to_le_bytes());
+    private
+}
+
+fn pools_mapped(session: &Guest) -> usize {
+    let pool = guesthouse_backend_nvidia::channel::LOCAL_MEMORY_BYTES;
+    let calls = &session.backend().device().rm.calls;
+    calls.iter().filter(|call| matches!(call, Call::MapDma(map) if map.length == pool)).count()
+}
+
+#[test]
+fn a_pool_waits_for_the_window_a_guest_sets_and_then_reaches_every_graphics_channel() {
+    const GUEST_WINDOW: u64 = 0x1234_5600_0000;
+    let mut session = guest();
+    let (commands, command_memory) = shared_allocation(&mut session, 0x1000);
+    let (with_window, window_memory) = shared_allocation(&mut session, 0x1000);
+    let window_words = [increasing(1, 0x7B0, 2), (GUEST_WINDOW >> 32) as u32, GUEST_WINDOW as u32];
+    for (at, word) in window_words.iter().enumerate() {
+        session.memory_mut().write_u32(window_memory + at as u64 * 4, *word).unwrap();
+    }
+    session.memory_mut().write_u32(command_memory, 0).unwrap();
+    let graphics = context(&mut session, 0);
+    let (early, _) = queue(&mut session, graphics);
+    let (setter, _) = queue(&mut session, graphics);
+
+    send(&mut session, &submission(early, 1, &list_of(commands, 1)));
+    assert_eq!(pools_mapped(&session), 0, "no window has been set, so no pool is made up");
+
+    send(&mut session, &submission(setter, 1, &list_of(with_window, 3)));
+    assert_eq!(pools_mapped(&session), 1, "the queue that set it has a pool in its prelude");
+    let setter_ring = session.backend().ring_of_list_queue(setter).unwrap();
+    let early_ring = session.backend().ring_of_list_queue(early).unwrap();
+    assert!(setter_ring[0].length > early_ring[0].length);
+
+    send(&mut session, &submission(early, 2, &list_of(commands, 1)));
+    assert_eq!(pools_mapped(&session), 2, "the queue made first gets one late");
+    let early_ring = session.backend().ring_of_list_queue(early).unwrap();
+    let (first_ahead, late, third) = (early_ring[1], early_ring[4], early_ring.len());
+    assert!(late.length > first_ahead.length, "the late pool runs ahead of the next list");
+
+    send(&mut session, &submission(early, 3, &list_of(commands, 1)));
+    let early_ring = session.backend().ring_of_list_queue(early).unwrap();
+    assert_eq!(early_ring[third], first_ahead, "and only once");
+    assert_eq!(pools_mapped(&session), 2);
+}
+
+#[test]
+fn a_queue_with_its_own_pool_is_given_none() {
+    let mut session = guest();
+    let (own, own_memory) = shared_allocation(&mut session, 0x1000);
+    let words = [increasing(1, 0x790, 2), 1, 0, increasing(1, 0x7B0, 2), 0x1234, 0x5600_0000];
+    for (at, word) in words.iter().enumerate() {
+        session.memory_mut().write_u32(own_memory + at as u64 * 4, *word).unwrap();
+    }
+    let graphics = context(&mut session, 0);
+    let (queue, _) = queue(&mut session, graphics);
+    send(&mut session, &submission(queue, 1, &list_of(own, 0)));
+    send(&mut session, &submission(queue, 2, &list_of(own, words.len() as u32)));
+    send(&mut session, &submission(queue, 3, &list_of(own, 0)));
+    assert_eq!(pools_mapped(&session), 0);
+}
+
+#[test]
+fn on_a_guests_ring_the_window_is_read_and_a_late_pool_goes_in_the_gap() {
+    let mut session = guest();
+    let (early_ring, early_memory) = shared_allocation(&mut session, 0x10000);
+    let (setter_ring, setter_memory) = shared_allocation(&mut session, 0x10000);
+    let (with_window, window_memory) = shared_allocation(&mut session, 0x1000);
+    let window_words = [increasing(1, 0x7B0, 2), 0x1234, 0x5600_0000];
+    for (at, word) in window_words.iter().enumerate() {
+        session.memory_mut().write_u32(window_memory + at as u64 * 4, *word).unwrap();
+    }
+    let graphics = context(&mut session, 0);
+    let (early, _) = queue(&mut session, graphics);
+    let (setter, _) = queue(&mut session, graphics);
+
+    send(&mut session, &submission(early, 1, &ring_private(1, 2, early_ring)));
+    assert_eq!(pools_mapped(&session), 0);
+    let entry = ring_entry(with_window, window_words.len() as u32);
+    session.memory_mut().write_u64(setter_memory + 8, entry).unwrap();
+    send(&mut session, &submission(setter, 1, &ring_private(1, 2, setter_ring)));
+    assert_eq!(pools_mapped(&session), 1, "the submission that set the window brings a pool with it");
+    let prelude = |memory| session.memory().read_u64(memory).unwrap() >> 42;
+    assert!(prelude(setter_memory) > prelude(early_memory));
+
+    send(&mut session, &submission(early, 2, &ring_private(1, 6, early_ring)));
+    assert_eq!(pools_mapped(&session), 2);
+    send(&mut session, &submission(early, 3, &ring_private(1, 9, early_ring)));
+    let late = session.memory().read_u64(early_memory + 4 * 8).unwrap() >> 42;
+    let invalidate = session.memory().read_u64(early_memory + 7 * 8).unwrap() >> 42;
+    assert!(late > invalidate && invalidate > 0, "the late pool goes once, then the invalidate alone");
+}

@@ -15,6 +15,7 @@ pub mod fake_guest;
 mod guest_clock;
 pub mod inf;
 mod list_repair;
+mod local_window;
 mod peek;
 pub mod private_data;
 pub mod profile;
@@ -142,6 +143,8 @@ pub struct NvidiaBackend<R> {
     pub(crate) guest_rings: HashMap<u32, GuestRing>,
     /// Rings asked for, which queues can move to.
     pub(crate) ring_moves: RingMoves,
+    /// Where shaders' local addresses sit, from the first queue that set it.
+    pub(crate) local_window: local_window::LocalWindow,
     /// The memory made last, which the private data finished next belongs to.
     last_memory: Option<MemoryId>,
     /// The host's live readings, if it has any.
@@ -239,6 +242,7 @@ impl<R: Rm> NvidiaBackend<R> {
             peek_page: None,
             guest_rings: HashMap::new(),
             ring_moves: RingMoves::default(),
+            local_window: local_window::LocalWindow::default(),
             last_memory: None,
             sensors: None,
             card_uuid,

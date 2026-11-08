@@ -134,7 +134,7 @@ impl ListChannel {
         finished: u64,
     ) -> Result<u32, ListFull> {
         self.reclaim(finished);
-        // The list, the L2 invalidate ahead of it and the release after it.
+        // The list, the entry ahead of it and the release after it.
         let needed = entries.len().div_ceil(ENTRY_SIZE) as u32 + 2;
         if needed > RING_ENTRIES - 1 {
             return Err(ListFull::TooLong);
@@ -142,7 +142,8 @@ impl ListChannel {
         if needed > self.free_entries() {
             return Err(ListFull::ForNow);
         }
-        self.append(self.channel.l2_invalidate_entry());
+        self.append(self.channel.entry_ahead());
+        self.channel.entry_ahead_placed();
         for entry in entries.chunks(ENTRY_SIZE) {
             let mut bytes = [0; ENTRY_SIZE];
             bytes[..entry.len()].copy_from_slice(entry);

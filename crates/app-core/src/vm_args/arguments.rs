@@ -92,17 +92,8 @@ impl VmPlan {
             "ich9-intel-hda",
             "-device",
             &format!("hda-output,audiodev={sound_id}"),
-            "-vga",
-            "std",
-            "-global",
-            &format!("VGA.xres={width}"),
-            "-global",
-            &format!("VGA.yres={height}"),
-            "-global",
-            &format!("VGA.vgamem_mb={}", self.vga_memory_mib()),
-            "-display",
-            "dbus,p2p=yes",
         ]));
+        arguments.extend(self.screen_arguments(width, height));
         if self.passes_unix_sockets() {
             arguments.extend(self.monitors_on_descriptors());
         } else {
@@ -127,6 +118,25 @@ impl VmPlan {
             "ide-hd,bus=ahci.0,drive=hd0,bootindex=1",
         ]));
         arguments
+    }
+
+    /// The plain screen, or for a Linux on an AMD card, the GL screen in its place.
+    fn screen_arguments(&self, width: u64, height: u64) -> Vec<String> {
+        if let Some(amd) = self.amd_boot() {
+            return Self::amd_screen_arguments(amd, Some((width, height)));
+        }
+        words(&[
+            "-vga",
+            "std",
+            "-global",
+            &format!("VGA.xres={width}"),
+            "-global",
+            &format!("VGA.yres={height}"),
+            "-global",
+            &format!("VGA.vgamem_mb={}", self.vga_memory_mib()),
+            "-display",
+            "dbus,p2p=yes",
+        ])
     }
 
     fn cdrom(id: &str, file: &str) -> String {
@@ -254,6 +264,7 @@ impl VmPlan {
         let mut environment =
             self.jail.as_ref().map(|jail| self.jailed_environment(jail)).unwrap_or_default();
         environment.extend(self.share.iter().map(|folder| ("SHARE".to_owned(), folder.clone())));
+        environment.extend(self.amd_environment());
         environment
     }
 

@@ -24,6 +24,9 @@ impl FrameRoute {
     pub fn of(machine: &Machine) -> Self {
         if machine.has_gpu() {
             Self::FrameSocket
+        } else if machine.amd_card().is_some() {
+            // QEMU's display reads the AMD card's frames back for the viewer.
+            Self::QemuDisplay
         } else if machine.wants_forwarded_gpu() || machine.own_linux_gpu() {
             Self::Forwarded
         } else {
@@ -130,6 +133,8 @@ mod tests {
         assert_eq!(FrameRoute::now(&own, &back_to_plain), FrameRoute::QemuDisplay);
         let windows = Machine { kind: Kind::Windows, ..plain };
         assert_eq!(FrameRoute::now(&windows, &back_to_plain), FrameRoute::FrameSocket);
+        let on_amd = Machine { amd_gpu: "0000:7c:00.0".into(), ..own.clone() };
+        assert_eq!(FrameRoute::now(&on_amd, &running), FrameRoute::QemuDisplay);
     }
 
     #[test]

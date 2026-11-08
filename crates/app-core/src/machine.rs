@@ -159,6 +159,11 @@ pub struct Machine {
     /// the file when on, so an older build can still read it.
     #[serde(default = "default_on", skip_serializing_if = "is_on")]
     pub sound: bool,
+    /// For a Linux guest's GPU, the PCI address of the AMD card it runs on. Empty is the NVIDIA card,
+    /// forwarded, and a guest never has both. Left out of the file when empty, so an older build can
+    /// still read it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub amd_gpu: String,
 }
 
 impl Machine {
@@ -192,6 +197,7 @@ impl Machine {
             start_without_jail: false,
             linux_gpu: false,
             sound: true,
+            amd_gpu: String::new(),
         }
     }
 
@@ -230,6 +236,12 @@ impl Machine {
     /// goes on the GPU where the guest can put it there, and stays on QEMU's display where it can't.
     pub fn own_linux_gpu(&self) -> bool {
         self.kind == Kind::Plain && self.linux_gpu
+    }
+
+    /// The AMD card a Linux guest's GPU is to be, by its PCI address, if it has the GPU and it's AMD's.
+    pub fn amd_card(&self) -> Option<&str> {
+        let linux_gpu = self.wants_forwarded_gpu() || self.own_linux_gpu();
+        Some(self.amd_gpu.as_str()).filter(|pci| linux_gpu && !pci.is_empty())
     }
 
     /// Whether its disk and firmware file live in its folder, so deleting that takes them too.
@@ -565,6 +577,20 @@ mod tests {
         let read: Machine = serde_json::from_str(&serde_json::to_string(&with_gpu).unwrap()).unwrap();
         assert!(read.own_linux_gpu() && !read.wants_forwarded_gpu() && !read.has_gpu());
         assert!(read.summary().starts_with("Plain VM, ") && read.summary().contains("Linux GPU preview"));
+    }
+
+    #[test]
+    fn an_amd_card_is_only_a_linux_guests_gpu_and_an_older_build_still_reads_a_machine_with_none() {
+        let ubuntu = Machine { kind: Kind::Linux, ..sample() };
+        assert!(!serde_json::to_string(&ubuntu).unwrap().contains("amd_gpu"), "the default stays out");
+        let on_amd = Machine { amd_gpu: "0000:7c:00.0".into(), ..ubuntu };
+        let read: Machine = serde_json::from_str(&serde_json::to_string(&on_amd).unwrap()).unwrap();
+        assert_eq!(read.amd_card(), Some("0000:7c:00.0"));
+        assert_eq!(Machine { gpu_preview: false, ..read.clone() }.amd_card(), None);
+        assert_eq!(Machine { kind: Kind::Windows, ..read.clone() }.amd_card(), None);
+        let plain = Machine { kind: Kind::Plain, ..read };
+        assert_eq!(plain.amd_card(), None, "a plain machine has no Linux GPU until it's turned on");
+        assert_eq!(Machine { linux_gpu: true, ..plain }.amd_card(), Some("0000:7c:00.0"));
     }
 
     #[test]

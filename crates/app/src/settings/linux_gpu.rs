@@ -1,6 +1,7 @@
 //! The forwarded GPU for a plain machine that holds a Linux the user installed. It's a preview, and
 //! the guest needs setting up once from the driver image the app then attaches.
 
+use super::gpu_choice::add_gpu_choice;
 use super::{Shared, is_off};
 use adw::prelude::*;
 use guesthouse_app_core::machine::Kind;
@@ -16,13 +17,14 @@ const VM_MUST_BE_OFF: &str = "The VM must be off to change this.";
 pub struct LinuxGpu {
     group: Option<adw::PreferencesGroup>,
     switch: Option<adw::SwitchRow>,
+    card: Option<adw::ComboRow>,
 }
 
 impl LinuxGpu {
     pub fn new(shared: &Shared, page: &adw::PreferencesPage) -> Self {
         let machine = shared.machine.borrow().clone();
         if machine.kind != Kind::Plain {
-            return Self { group: None, switch: None };
+            return Self { group: None, switch: None, card: None };
         }
         let group = adw::PreferencesGroup::builder().title("Linux GPU").build();
         page.add(&group);
@@ -33,6 +35,7 @@ impl LinuxGpu {
             saving.save();
         });
         group.add(&switch);
+        let card = add_gpu_choice(shared, &group);
         let setup = adw::ActionRow::builder()
             .title("Setting up the guest")
             .subtitle(SETUP)
@@ -40,13 +43,16 @@ impl LinuxGpu {
             .subtitle_selectable(true)
             .build();
         group.add(&setup);
-        Self { group: Some(group), switch: Some(switch) }
+        Self { group: Some(group), switch: Some(switch), card }
     }
 
     pub fn set_status(&self, status: &Status) {
         let (Some(group), Some(switch)) = (&self.group, &self.switch) else { return };
         let off = is_off(status);
         switch.set_sensitive(off);
+        if let Some(card) = &self.card {
+            card.set_sensitive(off);
+        }
         group.set_description((!off).then_some(VM_MUST_BE_OFF));
     }
 }

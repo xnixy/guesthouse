@@ -4,6 +4,7 @@
 mod disk;
 mod display;
 mod forwards;
+mod gpu_choice;
 mod gpu_preview;
 mod hardware;
 mod jail;

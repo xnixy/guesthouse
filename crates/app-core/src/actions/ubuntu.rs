@@ -1,23 +1,28 @@
 //! Installing and starting an Ubuntu guest. If the host can't honestly offer its driver, the guest
 //! boots without the GPU and is told why.
 
+use super::amd_start::{Waited, stop_for_venus, wait_for_guest};
 use super::{KEY_POLL, Task, plan_for, start_if_there_is_room};
 use crate::disk_image::disk_size_gib;
 use crate::failure::{Failure, Result};
 use crate::iso::kernel_package;
 use crate::jailing::{decide, gpu_refusal};
 use crate::library::make_disk;
+use crate::linux::amd::{amd_card, amd_mode};
+use crate::linux::amd_image::amd_setup_image;
 use crate::linux::card::forwarded_card;
 use crate::linux::driver_host::LoaderHost;
 use crate::linux::driver_image::{Outcome, prepare};
-use crate::linux::forwarding::forwarding_problem;
-use crate::linux::gpu_off::{GUEST_NO_CARD, GUEST_NO_IMAGE, GUEST_NO_JAIL, GUEST_TURNED_OFF, GpuOff};
+use crate::linux::forwarding::{amd_problem, forwarding_problem};
+use crate::linux::gpu_off::{
+    GUEST_NO_AMD_CARD, GUEST_NO_CARD, GUEST_NO_IMAGE, GUEST_NO_JAIL, GUEST_TURNED_OFF, GpuOff,
+};
 use crate::linux::layout::ALLOW_LIST;
 use crate::linux::seed::make_seed;
 use crate::linux::{guest_sources, sensor_daemon};
 use crate::network::{Protocol, port_taken};
 use crate::start_checks::start_problems;
-use crate::vm_args::{Boot, INSTALL_LOG, UbuntuBoot, UbuntuInstall, VmPlan, ssh_port};
+use crate::vm_args::{AmdBoot, Boot, INSTALL_LOG, UbuntuBoot, UbuntuInstall, VmPlan, ssh_port};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -127,6 +132,15 @@ pub(super) fn gpu_boot(task: &mut Task) -> Result<UbuntuBoot> {
     if !task.machine.gpu_preview {
         return refused(task, GpuOff::new(GUEST_TURNED_OFF, GUEST_TURNED_OFF));
     }
+    if let Some(pci) = task.machine.amd_card().map(str::to_owned) {
+        return match amd_boot(task, &pci) {
+            Ok(amd) => Ok(UbuntuBoot::Amd(amd)),
+            Err(off) => {
+                task.error = format!("Starting without the GPU: {}", off.detail);
+                refused(task, off)
+            }
+        };
+    }
     let sources = guest_sources(context);
     let allow_list = sources.join(ALLOW_LIST);
     if let Some(off) = forwarding_problem(&context.paths.qemu, &allow_list) {
@@ -156,6 +170,34 @@ pub(super) fn gpu_boot(task: &mut Task) -> Result<UbuntuBoot> {
     }
 }
 
+/// The AMD card chosen for the machine, on native context unless the guest said that failed. A Linux
+/// the user installed gets the scripts it sets itself up from.
+fn amd_boot(task: &Task, pci: &str) -> std::result::Result<AmdBoot, GpuOff> {
+    let context = task.context;
+    if let Some(off) = amd_problem(&context.paths.qemu) {
+        return Err(off);
+    }
+    let Some(card) = amd_card(context, pci) else {
+        let detail = format!(
+            "The AMD card at {pci} isn't in this PC now. Choose the GPU again in the machine's settings."
+        );
+        return Err(GpuOff::new(GUEST_NO_AMD_CARD, detail));
+    };
+    let setup_image = match task.machine.own_linux_gpu() {
+        true => Some(setup_image(context).map_err(|failure| {
+            GpuOff::new(GUEST_NO_IMAGE, format!("The setup image could not be made: {}", failure.0))
+        })?),
+        false => None,
+    };
+    Ok(AmdBoot { card, mode: amd_mode(context, &task.machine), setup_image })
+}
+
+fn setup_image(context: &crate::context::Context) -> Result<PathBuf> {
+    let folder = context.paths.store.join("linux-driver");
+    fs::create_dir_all(&folder)?;
+    amd_setup_image(&guest_sources(context), &folder)
+}
+
 /// Anything that goes wrong making the image is a reason to lose the GPU, and never the VM.
 fn or_refused(prepared: Result<Outcome>) -> Outcome {
     prepared.unwrap_or_else(|failure| {
@@ -180,16 +222,28 @@ pub fn start(task: &mut Task) -> Result<()> {
             "Port {port} on this PC is in use by another program, and Ubuntu's SSH needs it. Set SSH_PORT to another one."
         )));
     }
+    let plan = start_vm(task)?;
+    // On an AMD card the guest may have Mesa to build, and if native context fails it goes to Venus.
+    if let Waited::OnVenusNext(reason) = wait_for_guest(task, &plan) {
+        stop_for_venus(task, &reason)?;
+        let plan = start_vm(task)?;
+        wait_for_guest(task, &plan);
+    }
+    Ok(())
+}
+
+fn start_vm(task: &mut Task) -> Result<VmPlan> {
     let boot = gpu_boot(task)?;
     let plan = jailed(task, plan_for(task.context, &task.machine, Boot::Ubuntu(boot)))?;
     task.step("Starting the VM");
-    task.host.start(&plan, &task.machine)
+    task.host.start(&plan, &task.machine)?;
+    Ok(plan)
 }
 
 /// The forwarded GPU only goes to a jailed QEMU, as on Windows. A PC that can't jail it starts the
 /// guest without the GPU and says why, unless the machine may start without a jail.
 pub(super) fn jailed(task: &mut Task, plan: VmPlan) -> Result<VmPlan> {
-    if !plan.has_forwarded_gpu() {
+    if !plan.has_forwarded_gpu() && !plan.has_amd_gpu() {
         return Ok(plan);
     }
     match decide(task.context, &task.machine, &plan, &(task.context.jail_offer)(&plan)) {

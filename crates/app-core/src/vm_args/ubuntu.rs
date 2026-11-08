@@ -91,6 +91,7 @@ impl VmPlan {
     fn with_gpu_arguments(&self, boot: &UbuntuBoot) -> Vec<String> {
         match boot {
             UbuntuBoot::NoGpu { reason_file } => Self::off_reason_arguments(reason_file),
+            UbuntuBoot::Amd(amd) => Self::amd_guest_arguments(amd),
             UbuntuBoot::WithGpu { image, allow_list, sensor_daemon, card } => {
                 let mut arguments = self.forwarding_arguments(image, allow_list, sensor_daemon, card);
                 arguments.extend(words(&[
@@ -178,13 +179,12 @@ impl VmPlan {
             // For a captured mouse, which moves it with no position to keep.
             "-device",
             RELATIVE_MOUSE,
-            "-vga",
-            "std",
-            "-display",
-            "dbus,p2p=yes",
-            "-serial",
-            &format!("file:{}", self.in_run_folder(SERIAL_LOG)),
         ]));
+        arguments.extend(match boot {
+            UbuntuBoot::Amd(amd) => Self::amd_screen_arguments(amd, None),
+            _ => words(&["-vga", "std", "-display", "dbus,p2p=yes"]),
+        });
+        arguments.extend(words(&["-serial", &format!("file:{}", self.in_run_folder(SERIAL_LOG))]));
         arguments.extend(self.monitors());
         arguments.extend(self.with_gpu_arguments(boot));
         arguments.extend(self.qemu_sandbox_arguments());
@@ -204,6 +204,11 @@ impl VmPlan {
     /// guest's own values.
     pub(super) fn address_layout(&self) -> Vec<String> {
         match self.boot {
+            // Mesa's radeonsi can fall over in QEMU's last moments, and a core of it would hold the
+            // guest's memory, so a QEMU on an AMD card leaves none.
+            Boot::Ubuntu(UbuntuBoot::Amd(_)) | Boot::OwnLinux { gpu: UbuntuBoot::Amd(_), .. } => {
+                words(&["prlimit", "--core=0"])
+            }
             Boot::Ubuntu(_) | Boot::OwnLinux { gpu: UbuntuBoot::WithGpu { .. }, .. } => {
                 words(&["setarch", "x86_64", "-L"])
             }

@@ -160,6 +160,7 @@ pub fn create(context: &Context, new: &NewMachine) -> Result<Machine> {
         installing: installs,
         tpm: windows,
         mac: unused_mac(context),
+        amd_gpu: crate::linux::amd::default_linux_gpu(context),
         ..Machine::new(&id, new.name.trim(), &disk.to_string_lossy(), &firmware)
     };
     if let Some(problem) = create_problems(context, &machine, new.disk_gib)?.into_iter().next() {

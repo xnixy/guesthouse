@@ -36,7 +36,7 @@ if mesa_is_ours || mesa_has_native_context || { [ "$mode" = native ] && is_nativ
     exit 0
 fi
 if ! "$here/mesa-build.sh"; then
-    reason=$(cat "$amd_state/build-failure" 2>/dev/null)
+    reason=$(sed 's/\.$//' "$amd_state/build-failure" 2>/dev/null)
     say_amd "failed ${reason:-the Mesa build failed}, see $mesa_log"
     exit 0
 fi

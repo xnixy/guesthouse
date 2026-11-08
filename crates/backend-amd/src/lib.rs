@@ -1,0 +1,341 @@
+//! The AMD backend's host-execution side.
+//!
+//! This is the half of AMD support that is open and testable today: turning a guest's GPU work into
+//! real work on the host's AMD card through the open `amdgpu` kernel driver's DRM ioctls. It opens
+//! the render node, reads the card's facts, makes and maps buffers, and submits a command buffer
+//! that completes on an eventfd. None of it needs a Windows guest or any closed AMD code.
+//!
+//! The other half, the guest-protocol side, is the private WDDM blobs the guest's driver sends and
+//! expects back. That is not here. The trait methods that serve it ([`Backend::describe_allocation`],
+//! [`Backend::finish_allocation_data`], [`Backend::escape`], the staging copies and so on) are
+//! placeholders, marked below, waiting on the protocol layouts.
+//!
+//! Where the backend trait is shaped for NVIDIA and does not fit amdgpu, the mismatch is called out
+//! at the method. The chief one is submission: amdgpu's `DRM_AMDGPU_CS` is a blocking ioctl whose
+//! completion arrives on an event source, not a doorbell the trait rings. The real submission path
+//! lives in [`submit`] and is proven by the `amd-probe` binary, not by [`Backend::start_work`].
+
+mod device;
+mod info;
+mod ioctl;
+mod memory;
+mod submit;
+
+pub use device::{Device, Mapping};
+pub use info::{DeviceInfo, EngineSet, HW_IP_DMA, HW_IP_GFX, read_device_info, read_gpu_clock};
+pub use ioctl::AMD_VENDOR;
+pub use memory::{CpuAccess, DOMAIN_GTT, DOMAIN_VRAM, GemHandle, MapFlags, MemoryType};
+pub use submit::{Context, Syncobj, sdma_write_ib, submit, wait_eventfd};
+
+// The buffer calls under harness-facing names, so a proof binary can drive the card without the
+// trait. They are the same functions the trait methods use.
+pub use memory::{
+    adopt_userptr as adopt_buffer, close as close_buffer, create as create_buffer, export as export_buffer,
+    map as map_buffer, unmap as unmap_buffer,
+};
+
+use guesthouse_backend::{
+    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, DriverFound, DriverSurvey, GpuRange,
+    GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
+    RegistryValue, Setup, SpaceId, StagingCopy, StagingStart, Status, UnmapRequest, VendorQuery, Work,
+    WorkStart,
+};
+use std::collections::{BTreeMap, HashMap};
+use std::os::fd::OwnedFd;
+use std::time::Instant;
+
+/// How this backend names the host driver's branch. There is no Windows-style branch here: the host
+/// side is the Linux kernel's amdgpu.
+const HOST_BRANCH: &str = "amdgpu";
+
+/// One buffer object the backend is holding, and where it sits in the GPU's address space.
+#[derive(Debug)]
+struct Bo {
+    handle: GemHandle,
+    /// The address it was last mapped at, so release can take it back. One mapping is tracked, which
+    /// is all the allocate-then-map path needs.
+    mapped: Option<(SpaceId, u64, u64)>,
+}
+
+/// A GPU address space. On amdgpu every space is backed by the one open render node's VM, so the
+/// ranges and mappings are tracked here in software to catch collisions the way the core expects,
+/// while the hardware sees a single VM. True per-guest isolation needs one open file per space and a
+/// buffer import on map; that is noted for the protocol work.
+#[derive(Debug, Default)]
+struct Space {
+    ranges: Vec<GpuRange>,
+    mappings: BTreeMap<u64, u64>,
+}
+
+/// See the crate documentation.
+pub struct AmdBackend {
+    device: Device,
+    facts: AdapterFacts,
+    next_id: u64,
+    memory: HashMap<MemoryId, Bo>,
+    spaces: HashMap<SpaceId, Space>,
+}
+
+impl std::fmt::Debug for AmdBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AmdBackend").field("facts", &self.facts).finish_non_exhaustive()
+    }
+}
+
+impl AmdBackend {
+    /// Opens the card directly, for the standalone harness. `open` is the trait's door; this is the
+    /// same work without a survey.
+    pub fn open_card(address: Option<&str>) -> Result<Self, Refusal> {
+        let device =
+            Device::open(address).map_err(|error| Refusal(format!("opening the AMD card: {error}")))?;
+        let facts = facts_from(device.info());
+        Ok(Self { device, facts, next_id: 1, memory: HashMap::new(), spaces: HashMap::new() })
+    }
+
+    /// The full device readings, richer than [`AdapterFacts`], for the harness and the report.
+    pub fn device_info(&self) -> &DeviceInfo {
+        self.device.info()
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    fn new_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
+/// Builds the facts the guest is told from the card's own readings. Today [`AdapterFacts`] is thin,
+/// so the engine set, GTT size and BAR size are kept inside the backend; Part B widens the facts.
+fn facts_from(info: &DeviceInfo) -> AdapterFacts {
+    AdapterFacts {
+        card: PciCard { vendor: AMD_VENDOR, device: info.device_id, revision: info.pci_revision },
+        name: format!("AMD GPU {:#06x}", info.device_id),
+        video_memory: info.vram_total,
+        node_count: info.engines.count(),
+        guest_driver_version: 0,
+    }
+}
+
+impl Backend for AmdBackend {
+    fn supports(card: &PciCard) -> bool {
+        card.vendor == AMD_VENDOR
+    }
+
+    fn survey(setup: &Setup) -> Result<DriverSurvey, Refusal> {
+        // The host side is the Linux amdgpu driver; the guest side will be AMD's Adrenalin. Their
+        // branches can never match the way two NVIDIA drivers do, so `decide_start`'s branch rule
+        // does not fit AMD and will need a tested-pair table (noted in the plan). For the skeleton,
+        // the survey reports what it can without opening the card.
+        let host = DriverFound { version: "kernel".into(), branch: HOST_BRANCH.into() };
+        let guest = DriverFound {
+            version: setup.guest_driver_version.to_string(),
+            branch: setup.guest_branch.clone(),
+        };
+        Ok(DriverSurvey {
+            host,
+            guest,
+            host_branch_known: true,
+            guest_branch_known: false,
+            host_version_tested: false,
+            mixed_branches_tested: false,
+            card: CardLabel::Experimental,
+        })
+    }
+
+    fn open(setup: &Setup, _survey: &DriverSurvey) -> Result<Self, Refusal> {
+        let address = setup.card_address.as_ref().map(|address| address.to_string());
+        let mut backend = Self::open_card(address.as_deref())?;
+        backend.facts.guest_driver_version = setup.guest_driver_version.packed();
+        Ok(backend)
+    }
+
+    fn facts(&self) -> &AdapterFacts {
+        &self.facts
+    }
+
+    fn allocate_video_memory(
+        &mut self,
+        size: u64,
+        _kind: MemoryKind,
+    ) -> Result<(MemoryId, u64), BackendError> {
+        // On an APU the whole of VRAM is CPU-visible, so a CPU-reachable VRAM buffer is ordinary.
+        // The size-only signature is too thin: it cannot say VRAM versus GTT, CPU access or export
+        // intent. Part B drives this from `AllocationShape` instead.
+        let handle = memory::create(
+            &self.device,
+            size,
+            self.device.info().va_alignment,
+            DOMAIN_VRAM,
+            CpuAccess::Required,
+        )
+        .map_err(|error| BackendError::new(format!("GEM_CREATE: {error}")))?;
+        let id = MemoryId(self.new_id());
+        self.memory.insert(id, Bo { handle, mapped: None });
+        Ok((id, size))
+    }
+
+    fn adopt_host_pages(&mut self, host_address: u64, size: u64) -> Result<MemoryId, BackendError> {
+        let handle = memory::adopt_userptr(&self.device, host_address, size, false)
+            .map_err(|error| BackendError::new(format!("GEM_USERPTR: {error}")))?;
+        let id = MemoryId(self.new_id());
+        self.memory.insert(id, Bo { handle, mapped: None });
+        Ok(id)
+    }
+
+    fn release_memory(&mut self, memory: MemoryId) {
+        if let Some(bo) = self.memory.remove(&memory) {
+            if let Some((space, address, size)) = bo.mapped {
+                let _ = memory::unmap(&self.device, bo.handle, address, size);
+                if let Some(space) = self.spaces.get_mut(&space) {
+                    space.mappings.remove(&address);
+                }
+            }
+            memory::close(&self.device, bo.handle);
+        }
+    }
+
+    fn preserve_contents(
+        &mut self,
+        _host: &mut dyn HostServices,
+        _own_space: SpaceId,
+        _from: MemoryId,
+        _to: MemoryId,
+        _size: u64,
+    ) -> Result<(), BackendError> {
+        // A move would be an SDMA linear copy between the two buffers, waited on like a submission.
+        // Not needed to prove the host path, so left for the submission work that follows.
+        Err(BackendError::new("AMD backend does not move allocations yet"))
+    }
+
+    fn create_address_space(&mut self, ranges: &[GpuRange]) -> Result<SpaceId, BackendError> {
+        let space = SpaceId(self.new_id());
+        self.spaces.insert(space, Space { ranges: ranges.to_vec(), mappings: BTreeMap::new() });
+        Ok(space)
+    }
+
+    fn destroy_address_space(&mut self, space: SpaceId) {
+        self.spaces.remove(&space);
+    }
+
+    fn map(&mut self, request: &MapRequest) -> Result<(), BackendError> {
+        let Some(space) = self.spaces.get_mut(&request.space) else {
+            return Err(BackendError::new("this address space is closed"));
+        };
+        if !space.ranges.iter().any(|range| range.contains(request.address)) {
+            return Err(BackendError::new("no range holds this address"));
+        }
+        let overlaps = {
+            let before = space.mappings.range(..request.address.saturating_add(request.length)).next_back();
+            before.is_some_and(|(&start, &size)| start.saturating_add(size) > request.address)
+        };
+        if overlaps {
+            return Err(BackendError::new("these addresses are taken"));
+        }
+        let Some(bo) = self.memory.get_mut(&request.memory) else {
+            return Err(BackendError::new("mapping memory that does not exist"));
+        };
+        // MapRequest carries no read/write/execute or memory type today, so a safe superset is used:
+        // readable, writable and, since an IB must be, executable. Part B adds the real flags.
+        let flags = MapFlags {
+            readable: true,
+            writable: true,
+            executable: true,
+            memory_type: if request.gpu_cached { MemoryType::NonCoherent } else { MemoryType::Uncached },
+        };
+        memory::map(&self.device, bo.handle, request.address, request.offset, request.length, flags)
+            .map_err(|error| BackendError::new(format!("GEM_VA map: {error}")))?;
+        space.mappings.insert(request.address, request.length);
+        bo.mapped = Some((request.space, request.address, request.length));
+        Ok(())
+    }
+
+    fn unmap(&mut self, unmap: &UnmapRequest) -> Result<(), BackendError> {
+        let Some(bo) = self.memory.get_mut(&unmap.memory) else {
+            return Err(BackendError::new("unmapping memory that does not exist"));
+        };
+        memory::unmap(&self.device, bo.handle, unmap.address, unmap.length)
+            .map_err(|error| BackendError::new(format!("GEM_VA unmap: {error}")))?;
+        if let Some(space) = self.spaces.get_mut(&unmap.space) {
+            space.mappings.remove(&unmap.address);
+        }
+        bo.mapped = None;
+        Ok(())
+    }
+
+    fn describe_allocation(&mut self, private: &[u8]) -> AllocationShape {
+        // The real shape comes from the guest driver's private data, whose layout is the closed gap.
+        // Until that is known, only a size is read, so the core can keep its books.
+        let size = private.first_chunk::<8>().map_or(4096, |bytes| u64::from_le_bytes(*bytes)).max(4096);
+        AllocationShape { size, exact_size: size, surface: None, gpu_cached: false, kind: MemoryKind::PLAIN }
+    }
+
+    fn finish_allocation_data(&mut self, _private: &mut [u8], _size: u64) {
+        // What amdgpu's KMD would write back into the allocation's private data is part of the closed
+        // protocol. Nothing is written until that layout is known.
+    }
+
+    fn finish_queue_data(
+        &mut self,
+        _queue: u32,
+        _private: &mut [u8],
+        _serial: u32,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn escape(&mut self, _process: u32, _data: &mut [u8], _books: &GuestBooks<'_>) {
+        // AMD's escapes carry a subfunction (ATI_LHESCAPE_HDR) and expect a status; the trait's
+        // escape hook has neither yet. This is guest-protocol work.
+    }
+
+    fn adapter_answer(&mut self, _query: &VendorQuery<'_>, _out: &mut Vec<u8>) -> Option<Status> {
+        None
+    }
+
+    fn registry_value(&mut self, _name: &RegistryName) -> Option<RegistryValue> {
+        None
+    }
+
+    fn gpu_clock(&mut self) -> Result<u64, BackendError> {
+        self.device.gpu_clock().map_err(|error| BackendError::new(format!("timestamp: {error}")))
+    }
+
+    fn export_memory(&mut self, memory: MemoryId, _size: u64) -> Result<OwnedFd, BackendError> {
+        let bo = self
+            .memory
+            .get(&memory)
+            .ok_or_else(|| BackendError::new("exporting memory that does not exist"))?;
+        memory::export(&self.device, bo.handle)
+            .map_err(|error| BackendError::new(format!("PRIME export: {error}")))
+    }
+
+    fn context_allowed(&mut self, node: u32, _client_hint: u32) -> bool {
+        node < self.facts.node_count
+    }
+
+    fn start_work(&mut self, _host: &mut dyn HostServices, _work: &Work<'_>) -> WorkStart {
+        // amdgpu submission is a blocking ioctl that signals a sync object, not a doorbell the core
+        // rings, and completion arrives on an eventfd, not in fence memory. The trait has no event
+        // source, so the real path is `submit::submit` plus `Syncobj::arm_eventfd`, proven by the
+        // `amd-probe` binary. Part B adds the completion-event variant this would return.
+        WorkStart::Finished
+    }
+
+    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) {}
+
+    fn close_queue(&mut self, _queue: u32) {}
+
+    fn start_staging_copy(&mut self, _host: &mut dyn HostServices, _copy: &StagingCopy) -> StagingStart {
+        // The copy-to-screen path wants the tiling hooks and a BAR-size-aware route; not part of the
+        // host-execution proof.
+        StagingStart::Finished(Status::UNSUCCESSFUL)
+    }
+
+    fn poll_staging_copy(&mut self, _host: &mut dyn HostServices, _now: Instant) -> Option<Status> {
+        Some(Status::UNSUCCESSFUL)
+    }
+}

@@ -1,0 +1,25 @@
+[package]
+name = "guesthouse-backend-amd"
+description = "The AMD host-execution side: the host's open amdgpu driver, reached through its DRM ioctls. The guest-protocol side is not here yet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+guesthouse-backend.workspace = true
+guesthouse-messages.workspace = true
+# ioctl and mmap, which the standard library does not offer. Same as the NVIDIA backend.
+libc = "0.2"
+# The facade, as in the core.
+log = "0.4"
+
+[[bin]]
+# The standalone proof: opens the iGPU, allocates, maps, submits a tiny copy, and reads the result
+# back through an eventfd. It needs a real AMD render node and never goes near a guest.
+name = "amd-probe"
+path = "src/bin/amd_probe.rs"
+
+[lints]
+workspace = true

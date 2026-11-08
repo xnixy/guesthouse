@@ -4,6 +4,7 @@
 set -uo pipefail
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "$here/common.sh"
+. "$here/amd/amd-common.sh"
 kernel=$(uname -r)
 target=$root/lib/modules/$kernel/updates/nvfwd
 build_log=$log_folder/build.log
@@ -100,6 +101,8 @@ refresh_from_image() {
 # Links from an earlier boot must not outlive it, whatever this boot decides.
 "$here/link-driver.sh" unlink
 udevadm settle --timeout=30
+# On an AMD card's GPU there's nothing of NVIDIA's to bring up, and amd-up.sh says how that one went.
+[ -z "$(amd_mode)" ] || exit 0
 device_present || gpu_off "$(host_reason)"
 # Already there when this run follows a refresh of the scripts.
 [ -n "${NVFWD_REFRESHED:-}" ] || mount_image || gpu_off "the host offered no driver image"

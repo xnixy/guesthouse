@@ -1,0 +1,2 @@
+# Builds Mesa again with native context after the distro updates it, on a guest on an AMD card.
+post_transaction:mesa-vulkan-drivers:in::/usr/lib/nvfwd/amd/mesa-hook.sh

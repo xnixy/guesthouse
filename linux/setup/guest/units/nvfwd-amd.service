@@ -1,0 +1,14 @@
+[Unit]
+Description=Say how the AMD card's GPU is doing, and build Mesa for it if it has to be
+After=local-fs.target systemd-udevd.service
+Before=nvfwd-desktop.service display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/nvfwd/amd/amd-up.sh
+TimeoutStartSec=2min
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

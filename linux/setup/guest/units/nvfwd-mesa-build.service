@@ -1,0 +1,12 @@
+[Unit]
+Description=Build Mesa with native context for the AMD card
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/nvfwd/amd/mesa-service.sh
+# Mesa's build takes a while on a few cores, and the desktop goes on meanwhile.
+TimeoutStartSec=4h
+Nice=10
+StandardOutput=journal+console

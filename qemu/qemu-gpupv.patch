@@ -8254,3 +8254,475 @@ index 982e31c..dac3812 100644
 -- 
 2.56.0
 
+From ee5316a48ce9622f47a07a905b3f2804ce41a01c Mon Sep 17 00:00:00 2001
+From: xnixy <x@ruxn.com>
+Date: Sun, 8 Nov 2026 14:06:53 -0800
+Subject: [PATCH 29/29] ui/dbus: read GL scanouts back for a listener that takes
+ no dmabufs
+
+A listener that only offers Unix.Map gets nothing from a GL display: the
+scanouts are dmabufs and textures, and only a Win32 listener had a way to
+read them. With virtio-gpu on a host GPU, that is every frame.
+
+When the display is GL and the listener has Unix.Map but not
+ScanoutDMABUF2, read each scanout back into a shared memfd surface on the
+display's own render node context: blit the texture into a framebuffer of
+the surface's size, flipped if its origin is the top, and glReadPixels the
+damaged rectangle into the mapping. The listener gets ScanoutMap when the
+size or the scanout changes and UpdateMap for each update, as for a 2D
+console. If ScanoutMap is refused, the pixels go as Scanout and Update.
+
+When the guest drops back to its 2D surface, the console surface is mapped
+as before.
+---
+ ui/dbus-listener.c | 328 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 328 insertions(+)
+
+diff --git a/ui/dbus-listener.c b/ui/dbus-listener.c
+index 2e2f6ba..28173ed 100644
+--- a/ui/dbus-listener.c
++++ b/ui/dbus-listener.c
+@@ -43,6 +43,14 @@
+ #endif
+ #include "trace.h"
+ 
++/*
++ * A listener that maps a shared surface but takes no dmabufs still gets GL
++ * scanouts: they are read back into a surface of our own and sent as a map.
++ */
++#if defined(CONFIG_OPENGL) && defined(CONFIG_GBM) && !defined(WIN32)
++#define DBUS_GL_READBACK
++#endif
++
+ static void dbus_gfx_switch(DisplayChangeListener *dcl,
+                             struct DisplaySurface *new_surface);
+ 
+@@ -88,6 +96,20 @@ struct _DBusDisplayListener {
+     QemuDBusDisplay1ListenerUnixScanoutDMABUF2 *scanout_dmabuf_v2_proxy;
+ #endif
+ 
++#ifdef DBUS_GL_READBACK
++    bool reads_back;
++    /* a GL scanout is being read back, rather than the console's surface */
++    bool gl_scanout;
++    bool gl_y0_top;
++    /* the listener refused our map, so the frames go as bytes */
++    bool read_map_refused;
++    int gl_x;
++    int gl_y;
++    egl_fb gl_fb;
++    egl_fb read_fb;
++    DisplaySurface *read_ds;
++#endif
++
+     guint dbus_filter;
+     guint32 display_serial_to_discard;
+     guint32 cursor_serial_to_discard;
+@@ -114,11 +136,266 @@ static void ddl_discard_cursor_messages(DBusDisplayListener *ddl)
+     g_atomic_int_set(&ddl->cursor_serial_to_discard, serial);
+ }
+ 
++#ifdef DBUS_GL_READBACK
++/*
++ * Framebuffers are not shared between contexts, so all the readback work
++ * happens in the render node's own context, whichever one was current.
++ */
++static EGLContext ddl_readback_begin(void)
++{
++    EGLContext current = eglGetCurrentContext();
++
++    if (current != qemu_egl_rn_ctx) {
++        eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
++                       qemu_egl_rn_ctx);
++    }
++    return current;
++}
++
++static void ddl_readback_end(EGLContext previous)
++{
++    if (previous != qemu_egl_rn_ctx) {
++        eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
++                       previous);
++    }
++}
++
++static bool ddl_send_read_map(DBusDisplayListener *ddl)
++{
++    g_autoptr(GError) err = NULL;
++    g_autoptr(GUnixFDList) fd_list = g_unix_fd_list_new();
++    DisplaySurface *ds = ddl->read_ds;
++
++    ddl_discard_display_messages(ddl);
++    if (g_unix_fd_list_append(fd_list, ds->share_handle, &err) != 0) {
++        error_report("Failed to setup readback fdlist: %s", err->message);
++        return false;
++    }
++    if (!qemu_dbus_display1_listener_unix_map_call_scanout_map_sync(
++            ddl->map_proxy,
++            g_variant_new_handle(0),
++            ds->share_handle_offset,
++            surface_width(ds),
++            surface_height(ds),
++            surface_stride(ds),
++            surface_format(ds),
++            G_DBUS_CALL_FLAGS_NONE,
++            DBUS_DEFAULT_TIMEOUT,
++            fd_list,
++            NULL,
++            NULL,
++            &err)) {
++        error_report("Failed to call ScanoutMap: %s", err->message);
++        return false;
++    }
++    return true;
++}
++
++/* For a listener that refused the map, the frame goes as bytes. */
++static void ddl_send_read_scanout(DBusDisplayListener *ddl)
++{
++    DisplaySurface *ds = ddl->read_ds;
++    GVariant *v_data;
++
++    ddl_discard_display_messages(ddl);
++    v_data = g_variant_new_from_data(
++        G_VARIANT_TYPE("ay"), surface_data(ds),
++        surface_stride(ds) * surface_height(ds), TRUE,
++        (GDestroyNotify)pixman_image_unref, pixman_image_ref(ds->image));
++    qemu_dbus_display1_listener_call_scanout(
++        ddl->proxy, surface_width(ds), surface_height(ds), surface_stride(ds),
++        surface_format(ds), v_data,
++        G_DBUS_CALL_FLAGS_NONE, DBUS_DEFAULT_TIMEOUT, NULL, NULL, NULL);
++}
++
++static void ddl_send_read_update(DBusDisplayListener *ddl,
++                                 int x, int y, int w, int h)
++{
++    DisplaySurface *ds = ddl->read_ds;
++    int stride = surface_stride(ds);
++    uint8_t *rect = g_malloc(w * 4 * h);
++    GVariant *v_data;
++
++    for (int row = 0; row < h; row++) {
++        memcpy(rect + row * w * 4,
++               surface_data(ds) + (y + row) * stride + x * 4, w * 4);
++    }
++    v_data = g_variant_new_from_data(G_VARIANT_TYPE("ay"), rect, w * 4 * h,
++                                     TRUE, g_free, rect);
++    qemu_dbus_display1_listener_call_update(
++        ddl->proxy, x, y, w, h, w * 4, surface_format(ds), v_data,
++        G_DBUS_CALL_FLAGS_NONE, DBUS_DEFAULT_TIMEOUT, NULL, NULL, NULL);
++}
++
++/*
++ * Copies a part of the scanout to our surface, the right way up, and says
++ * which part that was. False if there was nothing to copy.
++ */
++static bool ddl_copy_rect(DBusDisplayListener *ddl,
++                          int *x, int *y, int *w, int *h)
++{
++    DisplaySurface *ds = ddl->read_ds;
++    EGLContext previous;
++    int width, height, stride;
++    GLint top, bottom;
++
++    if (!ddl->gl_scanout || !ds) {
++        return false;
++    }
++    width = surface_width(ds);
++    height = surface_height(ds);
++    stride = surface_stride(ds);
++    *x = MAX(*x, 0);
++    *y = MAX(*y, 0);
++    *w = MIN(*w, width - *x);
++    *h = MIN(*h, height - *y);
++    if (*w <= 0 || *h <= 0) {
++        return false;
++    }
++    /* flipped as egl-headless flips it */
++    top = ddl->gl_y0_top ? ddl->gl_y + height : ddl->gl_y;
++    bottom = ddl->gl_y0_top ? ddl->gl_y : ddl->gl_y + height;
++
++    previous = ddl_readback_begin();
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, ddl->gl_fb.framebuffer);
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, ddl->read_fb.framebuffer);
++    glViewport(0, 0, width, height);
++    glBlitFramebuffer(ddl->gl_x, top, ddl->gl_x + width, bottom,
++                      0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, ddl->read_fb.framebuffer);
++    glReadBuffer(GL_COLOR_ATTACHMENT0_EXT);
++    glPixelStorei(GL_PACK_ROW_LENGTH, stride / 4);
++    glReadPixels(*x, *y, *w, *h, GL_BGRA, GL_UNSIGNED_BYTE,
++                 surface_data(ds) + *y * stride + *x * 4);
++    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
++    ddl_readback_end(previous);
++    return true;
++}
++
++static void ddl_read_rect(DBusDisplayListener *ddl, int x, int y, int w, int h)
++{
++    if (!ddl_copy_rect(ddl, &x, &y, &w, &h)) {
++        return;
++    }
++    if (ddl->read_map_refused) {
++        ddl_send_read_update(ddl, x, y, w, h);
++        return;
++    }
++    qemu_dbus_display1_listener_unix_map_call_update_map(
++        ddl->map_proxy, x, y, w, h,
++        G_DBUS_CALL_FLAGS_NONE, DBUS_DEFAULT_TIMEOUT, NULL, NULL, NULL);
++}
++
++static void ddl_readback_scanout(DBusDisplayListener *ddl, GLuint texture,
++                                 bool y0_top,
++                                 uint32_t backing_width,
++                                 uint32_t backing_height,
++                                 uint32_t x, uint32_t y,
++                                 uint32_t w, uint32_t h)
++{
++    bool new_size = !ddl->read_ds ||
++        surface_width(ddl->read_ds) != w ||
++        surface_height(ddl->read_ds) != h;
++    /* the listener has to hear of our surface, as it may be on the console's */
++    bool announce = new_size || !ddl->gl_scanout;
++    EGLContext previous = ddl_readback_begin();
++    int rx = 0, ry = 0, rw = w, rh = h;
++
++    egl_fb_setup_for_tex(&ddl->gl_fb, backing_width, backing_height,
++                         texture, false);
++    if (new_size) {
++        g_clear_pointer(&ddl->read_ds, qemu_free_displaysurface);
++        ddl->read_ds = qemu_create_displaysurface(w, h);
++        egl_fb_destroy(&ddl->read_fb);
++        egl_fb_setup_new_tex(&ddl->read_fb, w, h);
++    }
++    ddl_readback_end(previous);
++    ddl->gl_y0_top = y0_top;
++    ddl->gl_x = x;
++    ddl->gl_y = y;
++    ddl->gl_scanout = true;
++    /* the console's surface has to be mapped again before it's shown */
++    ddl->ds_share = SHARE_KIND_NONE;
++
++    if (!announce) {
++        ddl_read_rect(ddl, 0, 0, w, h);
++        return;
++    }
++    ddl_copy_rect(ddl, &rx, &ry, &rw, &rh);
++    if (!ddl->read_map_refused && !ddl_send_read_map(ddl)) {
++        ddl->read_map_refused = true;
++    }
++    if (ddl->read_map_refused) {
++        ddl_send_read_scanout(ddl);
++        return;
++    }
++    qemu_dbus_display1_listener_unix_map_call_update_map(
++        ddl->map_proxy, 0, 0, w, h,
++        G_DBUS_CALL_FLAGS_NONE, DBUS_DEFAULT_TIMEOUT, NULL, NULL, NULL);
++}
++
++static void ddl_readback_dmabuf(DBusDisplayListener *ddl, QemuDmaBuf *dmabuf)
++{
++    EGLContext previous = ddl_readback_begin();
++    GLuint texture;
++
++    egl_dmabuf_import_texture(dmabuf);
++    texture = qemu_dmabuf_get_texture(dmabuf);
++    ddl_readback_end(previous);
++    if (!texture) {
++        error_report("%s: failed to import the scanout's dmabuf", __func__);
++        return;
++    }
++    ddl_readback_scanout(ddl, texture, qemu_dmabuf_get_y0_top(dmabuf),
++                         qemu_dmabuf_get_backing_width(dmabuf),
++                         qemu_dmabuf_get_backing_height(dmabuf),
++                         qemu_dmabuf_get_x(dmabuf),
++                         qemu_dmabuf_get_y(dmabuf),
++                         qemu_dmabuf_get_width(dmabuf),
++                         qemu_dmabuf_get_height(dmabuf));
++}
++
++/* A page flip releases the buffer it left, after the new one is set up. */
++static void ddl_readback_release(DBusDisplayListener *ddl, QemuDmaBuf *dmabuf)
++{
++    GLuint texture = qemu_dmabuf_get_texture(dmabuf);
++    EGLContext previous;
++
++    if (!texture) {
++        return;
++    }
++    previous = ddl_readback_begin();
++    if (ddl->gl_fb.texture == texture) {
++        egl_fb_destroy(&ddl->gl_fb);
++        ddl->gl_scanout = false;
++    }
++    egl_dmabuf_release_texture(dmabuf);
++    ddl_readback_end(previous);
++}
++
++static void ddl_readback_fini(DBusDisplayListener *ddl)
++{
++    EGLContext previous;
++
++    if (!ddl->reads_back) {
++        return;
++    }
++    previous = ddl_readback_begin();
++    egl_fb_destroy(&ddl->gl_fb);
++    egl_fb_destroy(&ddl->read_fb);
++    ddl_readback_end(previous);
++    g_clear_pointer(&ddl->read_ds, qemu_free_displaysurface);
++}
++#endif /* DBUS_GL_READBACK */
++
+ #ifdef CONFIG_OPENGL
+ static void dbus_scanout_disable(DisplayChangeListener *dcl)
+ {
+     DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
+ 
++#ifdef DBUS_GL_READBACK
++    ddl->gl_scanout = false;
++#endif
+     ddl_discard_display_messages(ddl);
+ 
+     qemu_dbus_display1_listener_call_disable(
+@@ -255,6 +532,17 @@ static void dbus_call_update_gl(DisplayChangeListener *dcl,
+ 
+     trace_dbus_update_gl(x, y, w, h);
+ 
++#ifdef DBUS_GL_READBACK
++    if (ddl->reads_back) {
++        if (ddl->gl_scanout) {
++            ddl_read_rect(ddl, x, y, w, h);
++        } else if (ddl->ds) {
++            dbus_gfx_update(dcl, x, y, w, h);
++        }
++        return;
++    }
++#endif
++
+     glFlush();
+ #ifdef CONFIG_GBM
+     qemu_console_hw_gl_block(ddl->dcl.con, true);
+@@ -400,6 +688,12 @@ static void dbus_scanout_dmabuf(DisplayChangeListener *dcl,
+ {
+     DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
+ 
++#ifdef DBUS_GL_READBACK
++    if (ddl->reads_back) {
++        ddl_readback_dmabuf(ddl, dmabuf);
++        return;
++    }
++#endif
+     if (ddl->scanout_dmabuf_v2_proxy) {
+         dbus_scanout_dmabuf_v2(ddl, dmabuf);
+     } else {
+@@ -591,6 +885,15 @@ static void dbus_scanout_texture(DisplayChangeListener *dcl,
+ {
+     trace_dbus_scanout_texture(tex_id, backing_y_0_top,
+                                backing_width, backing_height, x, y, w, h);
++#ifdef DBUS_GL_READBACK
++    DBusDisplayListener *reading = container_of(dcl, DBusDisplayListener, dcl);
++
++    if (reading->reads_back) {
++        ddl_readback_scanout(reading, tex_id, backing_y_0_top, backing_width,
++                             backing_height, x, y, w, h);
++        return;
++    }
++#endif
+ #ifdef CONFIG_GBM
+     g_autoptr(QemuDmaBuf) dmabuf = NULL;
+     int fd[DMABUF_MAX_PLANES], num_planes;
+@@ -686,6 +989,14 @@ static void dbus_cursor_dmabuf(DisplayChangeListener *dcl,
+ static void dbus_release_dmabuf(DisplayChangeListener *dcl,
+                                 QemuDmaBuf *dmabuf)
+ {
++#ifdef DBUS_GL_READBACK
++    DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
++
++    if (ddl->reads_back) {
++        ddl_readback_release(ddl, dmabuf);
++        return;
++    }
++#endif
+     dbus_scanout_disable(dcl);
+ }
+ #endif /* GBM */
+@@ -862,6 +1173,16 @@ static void dbus_gl_gfx_switch(DisplayChangeListener *dcl,
+ 
+     ddl->ds = new_surface;
+     ddl->ds_share = SHARE_KIND_NONE;
++#ifdef DBUS_GL_READBACK
++    /* the console's own surface is mapped as it is, with no GL */
++    if (ddl->reads_back) {
++        if (ddl->ds && !ddl->gl_scanout) {
++            dbus_gfx_update(dcl, 0, 0, surface_width(ddl->ds),
++                            surface_height(ddl->ds));
++        }
++        return;
++    }
++#endif
+     if (ddl->ds) {
+         int width = surface_width(ddl->ds);
+         int height = surface_height(ddl->ds);
+@@ -958,6 +1279,9 @@ dbus_display_listener_dispose(GObject *object)
+     DBusDisplayListener *ddl = DBUS_DISPLAY_LISTENER(object);
+ 
+     qemu_console_unregister_listener(&ddl->dcl);
++#ifdef DBUS_GL_READBACK
++    ddl_readback_fini(ddl);
++#endif
+     g_clear_object(&ddl->conn);
+     g_clear_pointer(&ddl->bus_name, g_free);
+     g_clear_object(&ddl->proxy);
+@@ -1272,6 +1596,10 @@ dbus_display_listener_new(const char *bus_name,
+     trace_dbus_can_share_map(ddl->can_share_map);
+     dbus_display_listener_setup_d3d11(ddl);
+     dbus_display_listener_setup_scanout_dmabuf_v2(ddl);
++#ifdef DBUS_GL_READBACK
++    ddl->reads_back = display_opengl && ddl->map_proxy &&
++        !ddl->scanout_dmabuf_v2_proxy;
++#endif
+ 
+     con = qemu_console_lookup_by_index(dbus_display_console_get_index(console));
+     assert(con);
+-- 
+2.56.0
+
+From 744000abf01095f94435b1e300e95e1913a9941c Mon Sep 17 00:00:00 2001
+From: xnixy <x@ruxn.com>
+Date: Sun, 8 Nov 2026 14:07:38 -0800
+Subject: [PATCH 30/30] hw/pci: make -vga virtio the GL device on a GL display
+
+-vga virtio always made virtio-vga, which has no 3D. The GL device can only
+come from -device, which puts it after the machine's own devices, so the
+NIC and everything after it move to other addresses than a guest installed
+with -vga std has seen.
+
+When the display is GL and the GL device is built in, make virtio-vga-gl
+in the VGA's place. Its properties can be set with -global as for any
+other -vga.
+---
+ hw/pci/pci.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/hw/pci/pci.c b/hw/pci/pci.c
+index d319160..ff1077c 100644
+--- a/hw/pci/pci.c
++++ b/hw/pci/pci.c
+@@ -2137,6 +2137,13 @@ PCIDevice *pci_vga_init(PCIBus *bus)
+     case VGA_VMWARE:
+         return pci_create_simple(bus, -1, "vmware-svga");
+     case VGA_VIRTIO:
++        /*
++         * On a GL display, the GL device, in the same place on the bus as
++         * any other -vga, so the devices after it keep their addresses.
++         */
++        if (display_opengl && object_class_by_name("virtio-vga-gl")) {
++            return pci_create_simple(bus, -1, "virtio-vga-gl");
++        }
+         return pci_create_simple(bus, -1, "virtio-vga");
+     case VGA_NONE:
+     default: /* Other non-PCI types. Checking for unsupported types is already
+-- 
+2.56.0
+

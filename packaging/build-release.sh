@@ -5,7 +5,8 @@
 # Usage: packaging/build-release.sh [--out FOLDER] [--display-driver FOLDER] [STAGE...]
 #
 # The stages run in this order, and with none named all of them do:
-#   qemu      QEMU, its firmware blobs, and the libraries it needs from the build system
+#   qemu      virglrenderer, then QEMU, its firmware blobs, and the libraries it needs from the build
+#             system
 #   bundled   guesthouse-VERSION-bundled-source.tar, the source of those libraries and blobs
 #   app       the app, the daemon and their helpers
 #   payload   guesthouse-VERSION-x86_64.tar.xz
@@ -30,6 +31,14 @@ QEMU_UPSTREAM=${QEMU_UPSTREAM:-https://gitlab.com/qemu-project/qemu.git}
 # the source of each in roms/, which a clone leaves empty.
 QEMU_RELEASE_URL=https://download.qemu.org/qemu-${QEMU_TAG#v}.tar.xz
 QEMU_RELEASE_SHA256=5a8289c7940dc77d3873c81a6c29ba3afe1446fc9d36e77fa1658cdbecb84b22
+# The distros' virglrenderer has no AMD native context, so QEMU gets its own, from upstream's source.
+VIRGL_TAG=virglrenderer-1.3.0
+VIRGL_COMMIT=ca50e008863837e094747a69974dde3ae148aeaa
+VIRGL_UPSTREAM=${VIRGL_UPSTREAM:-https://gitlab.freedesktop.org/virgl/virglrenderer.git}
+# Venus for the fallback, and native context for AMD's cards. Video stays off, as nothing here uses it.
+VIRGL_OPTIONS='-Dplatforms=egl -Dvenus=true -Ddrm-renderers=amdgpu-experimental -Dvideo=false -Dtests=false
+  -Dbuildtype=release'
+VIRGL_SERVER=virgl_render_server
 APP_ID=io.github.xnixy.Guesthouse
 ARCH=x86_64
 DISPLAY_DRIVER=${GUESTHOUSE_DISPLAY_DRIVER:-}
@@ -42,7 +51,9 @@ DRIVER_SETUP='sign-and-install.ps1 install-take-over.ps1 take-over-display.ps1'
 DRIVER_FILES='vdd_settings.xml LICENSE LICENSE-MS-PL'
 
 # These stay the host's. The C library can't be mixed, and PipeWire's client must match its server.
-HOST_LIBRARIES='^(linux-vdso|ld-linux|libc|libm|libdl|libpthread|librt|libresolv|libgcc_s|libpipewire-0\.3)[.-]'
+# OpenGL is the host's too: GBM and EGL are Mesa's, which has to match the host's kernel driver, and
+# libdrm and libepoxy go with it. What these need in turn is theirs to find, so none of it is bundled.
+HOST_LIBRARIES='^(linux-vdso|ld-linux|libc|libm|libdl|libpthread|librt|libresolv|libgcc_s|libpipewire-0\.3|libepoxy|libgbm|libdrm|libdrm_amdgpu|libEGL|libGL|libGLX|libGLdispatch|libOpenGL|libvulkan)[.-]'
 
 REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OUT=$REPO/build/release
@@ -99,6 +110,37 @@ qemu_tree() {
     fi
 }
 
+# The source bundle carries virglrenderer's tree too, and a clone fetches one.
+virgl_tree() {
+    if [ -d "$REPO/virglrenderer-source" ]; then
+        printf '%s' "$REPO/virglrenderer-source"
+    else
+        printf '%s' "$OUT/virglrenderer-source"
+    fi
+}
+
+fetch_virgl() {
+    VIRGL_TREE=$(virgl_tree)
+    [ ! -d "$VIRGL_TREE" ] || return 0
+    git clone -q --depth 1 --branch "$VIRGL_TAG" "$VIRGL_UPSTREAM" "$VIRGL_TREE.new"
+    [ "$(git -C "$VIRGL_TREE.new" rev-parse HEAD)" = "$VIRGL_COMMIT" ] ||
+        die "$VIRGL_TAG is not the commit it should be"
+    mv "$VIRGL_TREE.new" "$VIRGL_TREE"
+}
+
+# Installed into a folder of the build's, which QEMU's configure finds it in. The library names the
+# render server's place there, and the app tells it the real one.
+build_virgl() {
+    fetch_virgl
+    VIRGL_PREFIX=$OUT/virgl
+    [ -f "$VIRGL_PREFIX/lib/pkgconfig/virglrenderer.pc" ] && return 0
+    build=$OUT/virgl-build
+    [ ! -d "$build" ] || rm -rf "${build:?}"
+    # shellcheck disable=SC2086 # the options are words on purpose
+    meson setup "$build" "$VIRGL_TREE" --prefix="$VIRGL_PREFIX" --libdir=lib $VIRGL_OPTIONS
+    ninja -C "$build" install
+}
+
 # From upstream, at the exact commit.
 fetch_qemu() {
     QEMU_TREE=$(qemu_tree)
@@ -118,7 +160,8 @@ configure_qemu() {
     [ ! -f "$build/build.ninja" ] || return 0
     mkdir -p "$build"
     # shellcheck disable=SC2046 # the file holds one flag a line, and none has a space in it
-    (cd "$build" && "$QEMU_TREE/configure" $(cat "$REPO/packaging/qemu-configure-flags") \
+    (cd "$build" && PKG_CONFIG_PATH="$VIRGL_PREFIX/lib/pkgconfig" \
+        "$QEMU_TREE/configure" $(cat "$REPO/packaging/qemu-configure-flags") \
         '--extra-ldflags=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib')
 }
 
@@ -141,6 +184,36 @@ library_package() {
     fi
 }
 
+# What a program or library asks for by name.
+needed_names() {
+    readelf -d "$1" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'
+}
+
+# The libraries to bundle: what the program needs and what those need in turn, but nothing that only
+# the host's own libraries need, as theirs must come from where they do. Prints a name and a path a line.
+bundled_closure() {
+    resolved=$OUT/stage/resolved.txt
+    ldd "$1" | awk '$2 == "=>" && $3 ~ /^\// { print $1, $3 }' >"$resolved"
+    queue=$(needed_names "$1")
+    seen=" "
+    while [ -n "$queue" ]; do
+        set -- $queue
+        name=$1
+        shift
+        queue=$*
+        case $seen in *" $name "*) continue ;; esac
+        seen="$seen$name "
+        if printf '%s\n' "$name" | grep -Eq "$HOST_LIBRARIES"; then
+            continue
+        fi
+        path=$(awk -v name="$name" '$1 == name { print $2; exit }' "$resolved")
+        [ -n "$path" ] || die "$name isn't on this system, and the program needs it"
+        printf '%s %s\n' "$name" "$path"
+        queue="$queue $(needed_names "$path" | tr '\n' ' ')"
+    done
+    rm -f "$resolved"
+}
+
 # Libraries are copied under their sonames, which is what the loader asks for. This reads the program
 # where it was built, as a staged one finds the libraries of the last run through its rpath.
 bundle_libraries() {
@@ -155,17 +228,18 @@ bundle_libraries() {
 #
 # Library, package, its version, and the source package it was built from:
 EOF
-    ldd "$program" | awk '$2 == "=>" && $3 ~ /^\// { print $1, $3 }' | while read -r name path; do
-        if printf '%s\n' "$name" | grep -Eq "$HOST_LIBRARIES"; then
-            continue
-        fi
+    bundled_closure "$program" | while read -r name path; do
         cp -L "$path" "$folder/$name"
         chmod u+w "$folder/$name"
-        printf '%s %s\n' "$name" "$(library_package "$path" || echo unknown)" >>"$list"
+        case $path in
+            "$VIRGL_PREFIX"/*) printf '%s %s\n' "$name" "virglrenderer $VIRGL_TAG, built here from upstream" >>"$list" ;;
+            *) printf '%s %s\n' "$name" "$(library_package "$path" || echo unknown)" >>"$list" ;;
+        esac
     done
 }
 
 stage_qemu() {
+    build_virgl
     fetch_qemu
     configure_qemu
     build_qemu
@@ -175,6 +249,8 @@ stage_qemu() {
     [ ! -f "$OUT/qemu-build/hw/misc/nvfwd/nvfwd-sensord" ] ||
         cp "$OUT/qemu-build/hw/misc/nvfwd/nvfwd-sensord" "$target/"
     bundle_libraries "$OUT/qemu-build/qemu-system-$ARCH" "$target/lib"
+    # Venus starts it. It needs only the host's GBM and the C library.
+    cp "$VIRGL_PREFIX/libexec/$VIRGL_SERVER" "$target/"
     # The build folder holds what was generated, like the keymaps, and the source the rest.
     cp -R "$QEMU_TREE/pc-bios/." "$OUT/stage/qemu/pc-bios/"
     cp -RL "$OUT/qemu-build/pc-bios/." "$OUT/stage/qemu/pc-bios/"
@@ -208,6 +284,9 @@ libraries/  Ubuntu 24.04's source packages for the libraries in qemu/build/lib, 
             they were built from: each .dsc with its original source and Ubuntu's changes. debian/rules
             in each is how it was built. To unpack one: dpkg-source -x NAME_VERSION.dsc
 
+virglrenderer/  Upstream's $VIRGL_TAG, unmodified, which libvirglrenderer.so.1 and virgl_render_server
+            in qemu/build are built from, with the options in recipes/build-release.sh.
+
 firmware/   QEMU's own release of $QEMU_TAG, unmodified. Its pc-bios/ holds the firmware in qemu/pc-bios,
             and roms/ the source of it, with the recipes in roms/Makefile.
 
@@ -230,6 +309,9 @@ stage_bundled() {
     mkdir -p "$bundle/libraries" "$bundle/firmware" "$bundle/recipes"
     fetch_library_sources "$bundle/libraries"
     fetch_firmware_source "$bundle/firmware"
+    fetch_virgl
+    mkdir -p "$bundle/virglrenderer"
+    tar -C "$VIRGL_TREE" --exclude=.git -cf - . | tar -C "$bundle/virglrenderer" -xf -
     cp "$REPO/packaging/Containerfile.qemu" "$REPO/packaging/qemu-configure-flags" \
         "$REPO/packaging/build-release.sh" "$bundle/recipes/"
     write_sources_note >"$bundle/SOURCES.txt"
@@ -356,6 +438,8 @@ stage_source() {
     mkdir -p "$bundle/qemu-source"
     git -C "$REPO" archive HEAD | tar -C "$bundle" -xf -
     tar -C "$(qemu_tree)" --exclude=.git --exclude=__pycache__ -cf - . | tar -C "$bundle/qemu-source" -xf -
+    mkdir -p "$bundle/virglrenderer-source"
+    tar -C "$(virgl_tree)" --exclude=.git -cf - . | tar -C "$bundle/virglrenderer-source" -xf -
     # The crates are linked into the programs, and carry their licences with them here.
     (cd "$REPO" && cargo vendor --locked --quiet "$bundle/vendor" >/dev/null)
     mkdir -p "$bundle/.cargo"

@@ -1,9 +1,13 @@
 # Where QEMU and the libraries that go with it are built. They need the glibc of the system they're
 # built on, so this stays the oldest system a release runs on: Ubuntu 24.04, with 2.39. The package
 # lists stay, with source packages in them, as a release carries the source of what it bundles.
+# OpenGL's libraries are the host's at run time, and only their headers are needed here: Mesa's GBM and
+# EGL, libepoxy and libdrm. meson and the YAML module are for virglrenderer, which is built from its
+# own source.
 FROM docker.io/library/ubuntu:24.04
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends gcc g++ make ninja-build python3 python3-venv git \
       ca-certificates curl dpkg-dev bzip2 xz-utils pkg-config flex bison libglib2.0-dev \
-      libpixman-1-dev zlib1g-dev libfdt-dev libslirp-dev libpipewire-0.3-dev libusb-1.0-0-dev libseccomp-dev
+      libpixman-1-dev zlib1g-dev libfdt-dev libslirp-dev libpipewire-0.3-dev libusb-1.0-0-dev libseccomp-dev \
+      libepoxy-dev libgbm-dev libdrm-dev meson python3-yaml

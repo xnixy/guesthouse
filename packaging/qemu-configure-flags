@@ -12,8 +12,8 @@
 --disable-werror
 --disable-gtk
 --disable-sdl
---disable-opengl
---disable-virglrenderer
+--enable-opengl
+--enable-virglrenderer
 --disable-spice
 --disable-curses
 --disable-modules

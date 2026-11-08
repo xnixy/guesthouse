@@ -116,6 +116,8 @@ In theory this route isn't tied to the 5090 the way the Windows one is. It forwa
 
 Delay is where it's behind. A simple app takes about 20 to 30 ms from key press to picture, against about 11.5 on the host, and Godot takes 40 to 100 ms, more on Vulkan than OpenGL.
 
+An AMD card, built in or not, can give a Linux guest its 3D too, through virtio-gpu's native context: the guest runs Mesa's radeonsi and RADV on the real card. Ubuntu sets itself up for it, and a Linux you install yourself has a setup script. See [`linux/`](linux/README.md#an-amd-card).
+
 ### Keys in the viewer
 
 - **Ctrl+Alt+M** captures the mouse, and again lets it go.

@@ -5,12 +5,15 @@
 //! the kernel would and nothing is written back. The compute runtime's AQL and SDMA submissions
 //! have no private data of this kind.
 
-use super::bytes::{dword, qword};
+use super::adapter_info::SUBMISSION_CHECKSUM_VERSION;
+use super::bytes::{dword, index_xor_sum, qword};
 
 const HEADER_SIZE: usize = 8;
 const CLIENT: usize = 0x00;
 const RECORD_COUNT: usize = 0x04;
-/// Client ids run from one to this.
+/// Client ids run from one to this. Two is the D3D runtime's. The kernel driver asks that its first
+/// record be a [`CHECKSUM`] only on a condition it reads from its own state, not from the
+/// submission, so that rule isn't checked here.
 const LAST_CLIENT: u32 = 10;
 /// With no records and nothing past the header, this client id marks an empty submission.
 const EMPTY_SUBMISSION_CLIENT: u32 = 0xAA;
@@ -44,8 +47,15 @@ const WDDM2_INFO_LENGTH: u32 = 0x48;
 /// The guest's checksum of the submission.
 const CHECKSUM: u32 = 5;
 const CHECKSUM_LENGTH: u32 = 0x40;
+/// The guest's [`index_xor_sum`]. Zero is taken unchecked.
+const CHECKSUM_VALUE: usize = 0x08;
+/// Bytes the version-0 sum covers past the record's own [`CHECKSUM_LENGTH`], from the record's
+/// start. The sum runs over a quarter of that many dwords, which is medium confidence.
+const CHECKSUM_COVERED: usize = 0x0C;
 const CHECKSUM_VERSION: usize = 0x10;
-const LAST_CHECKSUM_VERSION: u32 = 1;
+/// Version 0 sums the submission's own bytes from the record on. Version 1 sums a list the kernel
+/// gathers from the DMA buffer records, which is taken unchecked here.
+const CHECKSUM_OVER_BYTES: u32 = 0;
 /// Work for several engines at once.
 const GANG: u32 = 6;
 const GANG_VERSION: usize = 0x08;
@@ -99,7 +109,7 @@ fn check_record(record: &[u8], opcode: u32) -> Result<(), Refused> {
         WDDM2_INFO => exact(WDDM2_INFO_LENGTH),
         CHECKSUM => {
             exact(CHECKSUM_LENGTH)?;
-            if field(CHECKSUM_VERSION)? > LAST_CHECKSUM_VERSION {
+            if field(CHECKSUM_VERSION)? > SUBMISSION_CHECKSUM_VERSION {
                 return Err(Refused("the checksum version is unknown"));
             }
             Ok(())
@@ -120,6 +130,23 @@ fn check_record(record: &[u8], opcode: u32) -> Result<(), Refused> {
         UNCHECKED => Ok(()),
         _ => Err(Refused("the opcode is unknown")),
     }
+}
+
+/// Checks a version-0 checksum. `rest` is the submission from the checksum record to its end, and
+/// the record itself has been checked.
+fn check_sum(rest: &[u8]) -> Result<(), Refused> {
+    let field = |at: usize| dword(rest, at).expect("inside a checked record");
+    let stored = field(CHECKSUM_VALUE);
+    if field(CHECKSUM_VERSION) != CHECKSUM_OVER_BYTES || stored == 0 {
+        return Ok(());
+    }
+    let covered = (field(CHECKSUM_COVERED) as usize).checked_add(CHECKSUM_LENGTH as usize);
+    let covered = covered.filter(|&covered| covered <= rest.len());
+    let covered = covered.ok_or(Refused("the checksum covers more than was sent"))?;
+    if index_xor_sum(rest, covered / 4, CHECKSUM_VALUE) != stored {
+        return Err(Refused("the checksum doesn't match"));
+    }
+    Ok(())
 }
 
 /// Checks a submission's private data as the kernel driver would.
@@ -145,6 +172,9 @@ pub fn check(data: &[u8]) -> Result<Submission, Refused> {
         let end = at.checked_add(length).filter(|&end| length >= RECORD_HEADER_SIZE && end <= data.len());
         let end = end.ok_or(Refused("a record runs past the end"))?;
         check_record(&data[at..end], opcode)?;
+        if opcode == CHECKSUM {
+            check_sum(&data[at..])?;
+        }
         opcodes.push(opcode);
         at = end;
     }
@@ -166,6 +196,19 @@ mod tests {
     fn checksum() -> Vec<u8> {
         let mut data = record(CHECKSUM, CHECKSUM_LENGTH);
         put_dword(&mut data, CHECKSUM_VERSION, 1);
+        data
+    }
+
+    /// A submission led by a version-0 checksum over itself and every record after it.
+    fn summed(client: u32, records: &[Vec<u8>]) -> Vec<u8> {
+        let mut first = record(CHECKSUM, CHECKSUM_LENGTH);
+        let after: usize = records.iter().map(Vec::len).sum();
+        put_dword(&mut first, CHECKSUM_COVERED, after as u32);
+        let mut all = vec![first];
+        all.extend_from_slice(records);
+        let mut data = submission(client, &all);
+        let sum = index_xor_sum(&data[HEADER_SIZE..], (CHECKSUM_LENGTH as usize + after) / 4, CHECKSUM_VALUE);
+        put_dword(&mut data, HEADER_SIZE + CHECKSUM_VALUE, sum);
         data
     }
 
@@ -207,6 +250,50 @@ mod tests {
             [checksum(), dma_buffer(0x1_0000), record(INDIRECT_BUFFER, 0x40), record(WDDM2_INFO, 0x48)];
         let submission = check(&submission(1, &records)).unwrap();
         assert_eq!(submission.opcodes, [CHECKSUM, DMA_BUFFER, INDIRECT_BUFFER, WDDM2_INFO]);
+    }
+
+    #[test]
+    fn a_version_0_checksum_is_checked_over_the_records_it_covers() {
+        let data = summed(2, &[dma_buffer(0x1_0000), record(INDIRECT_BUFFER, 0x40)]);
+        assert!(check(&data).is_ok());
+        let mut changed = data.clone();
+        let last = changed.len() - 4;
+        changed[last] ^= 1;
+        assert_eq!(refused(&changed), "the checksum doesn't match");
+        let mut too_far = data;
+        let covered = dword(&too_far, HEADER_SIZE + CHECKSUM_COVERED).unwrap();
+        put_dword(&mut too_far, HEADER_SIZE + CHECKSUM_COVERED, covered + 4);
+        assert_eq!(refused(&too_far), "the checksum covers more than was sent");
+    }
+
+    #[test]
+    fn a_zero_or_version_1_checksum_is_not_summed() {
+        let mut zero = summed(2, &[dma_buffer(0x1_0000)]);
+        put_dword(&mut zero, HEADER_SIZE + CHECKSUM_VALUE, 0);
+        assert!(check(&zero).is_ok());
+        let mut gathered = summed(2, &[dma_buffer(0x1_0000)]);
+        put_dword(&mut gathered, HEADER_SIZE + CHECKSUM_VERSION, 1);
+        assert!(check(&gathered).is_ok());
+    }
+
+    #[test]
+    fn the_checksum_version_is_bounded_by_what_the_adapter_block_publishes() {
+        let mut newest = checksum();
+        put_dword(&mut newest, CHECKSUM_VERSION, SUBMISSION_CHECKSUM_VERSION);
+        assert!(check(&submission(1, &[newest.clone()])).is_ok());
+        put_dword(&mut newest, CHECKSUM_VERSION, SUBMISSION_CHECKSUM_VERSION + 1);
+        assert_eq!(refused(&submission(1, &[newest])), "the checksum version is unknown");
+    }
+
+    #[test]
+    fn a_mapping_update_takes_twenty_bytes_a_mapping() {
+        assert_eq!(mapping_update(2).len(), 0x34 + 2 * 20);
+        assert!(check(&submission(1, &[mapping_update(2)])).is_ok());
+        // Four bytes a mapping, as one earlier reading had it, is refused.
+        let mut narrow = record(MAPPING_UPDATE, 0x34 + 2 * 4);
+        put_dword(&mut narrow, MAPPING_UPDATE_INNER, MAPPING_UPDATE_INNER_SIZE);
+        put_dword(&mut narrow, MAPPING_UPDATE_COUNT, 2);
+        assert_eq!(refused(&submission(1, &[narrow])), "a record has the wrong length");
     }
 
     #[test]

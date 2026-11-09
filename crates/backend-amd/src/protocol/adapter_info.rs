@@ -23,7 +23,15 @@ pub const QUERY_TYPE: u32 = 0;
 pub const BLOCK_SIZE: usize = 0x3A00;
 
 // The block's start. Fixed values.
-/// The surface descriptor size the kernel expects in allocation private data.
+/// The block's version, major and minor. The guest's user-mode driver keeps a copy and doesn't
+/// check either, but these are what AMD's own kernel driver says.
+const MAJOR_VERSION: usize = 0x000;
+const MINOR_VERSION: usize = 0x004;
+const BLOCK_VERSION: (u32, u32) = (1, 2);
+// VersionFlags at 0x008 stays zero. Its one known bit says the virtual-memory alignments and IOMMU
+// flags further on are filled in, and they aren't.
+/// The surface descriptor size the kernel expects in allocation private data. The guest steps
+/// through its descriptors by this size only when [`FEATURE_SURFACE_STRIDE_GIVEN`] is set.
 const SURFACE_DESCRIPTOR_SIZE: usize = 0x00C;
 const SYSTEM_FLAGS: usize = 0x208;
 /// The guest runs in a virtual machine. The secure-VM, IOMMU, Thunderbolt and USB4 bits stay clear.
@@ -52,14 +60,20 @@ const MIN_PITCH_ALIGN_PIXELS: u32 = 256;
 
 // The first GPU's own block. From DEV_INFO and MEMORY unless said otherwise.
 const CHIP_ID: usize = 0xA00;
+/// amdgpu's AMDGPU_FAMILY_* number, which is the numbering the guest compares against.
 const FAMILY: usize = 0xA04;
-/// INFO's external_rev, which is the closest the host has.
+/// A stepping inside the family, not the PCI revision. The guest buckets it by ranges that match
+/// amdgpu's external_rev bases per chip, so INFO's external_rev goes here. Medium confidence.
 const EMULATED_REVISION: usize = 0xA08;
-/// From sysfs, as INFO has no subsystem.
+// GfxEngineID at 0xA10 stays zero. The guest copies it and compares it with nothing, and no
+// numbering for it is known.
+/// From sysfs, as INFO has no subsystem. One dword; the guest splits it nowhere, so the config-space
+/// packing, vendor in the low half, is unconfirmed.
 const SUBSYSTEM_ID: usize = 0xA0C;
 const LOCAL_VISIBLE_HEAP: usize = 0xA14;
 const LOCAL_INVISIBLE_HEAP: usize = 0xA1C;
-/// In hertz. INFO gives kilohertz.
+/// Taken as hertz, as INFO gives kilohertz. Unconfirmed: neither the guest nor the kernel driver
+/// scales it, so its unit isn't shown.
 const COUNTER_FREQUENCY: usize = 0xA24;
 const ENGINE_CLOCK_MHZ: usize = 0xA28;
 const MEMORY_CLOCK_MHZ: usize = 0xA2A;
@@ -77,20 +91,26 @@ const GB_ADDR_CONFIG: usize = 0xC00;
 /// The high half of the render backend disable word: one bit per render backend that is off.
 const DISABLED_RB_MASK: usize = 0xC06;
 const CE_RAM_SIZE: usize = 0xC08;
-/// Eight 16-bit masks of active units, two arrays per shader engine for four engines. A unit is a
-/// compute unit before GFX10 and a workgroup processor from GFX10 on.
+/// 16-bit masks of active units, two per shader engine, one for each array, with room for four
+/// engines. The guest copies [`SHADER_ENGINES`] times four bytes of them. A unit is a compute unit
+/// before GFX10 and a workgroup processor from GFX10 on.
 const ACTIVE_UNITS: usize = 0xC20;
 /// The units kept on all the time, laid out the same way.
 const ALWAYS_ON_UNITS: usize = 0xC30;
 const GRAPHICS_FLAGS: usize = 0xC44;
 /// The counts from [`MAX_VGPRS`] on are filled in.
 const GRAPHICS_COUNTS_VALID: u32 = 1 << 0;
+/// [`ACTIVE_UNITS`] and [`ALWAYS_ON_UNITS`] are filled in. Without it, or the per-engine state
+/// arrays this block leaves empty, the guest reads no unit masks at all.
+const UNIT_MASKS_VALID: u32 = 1 << 2;
 /// [`TILE_STEERING_OVERRIDE`] is filled in.
 const TILE_STEERING_VALID: u32 = 1 << 4;
 const MAX_VGPRS: usize = 0xC58;
 const WAVEFRONT_SIZE: usize = 0xC5C;
 const SHADER_ENGINES: usize = 0xC60;
 const RB_PER_ENGINE: usize = 0xC64;
+/// Arrays in each engine, not in all of them: the guest walks the masks by this and the engine
+/// count as two bounds.
 const ARRAYS_PER_ENGINE: usize = 0xC68;
 const CUS_PER_ARRAY: usize = 0xC6C;
 const TCC_BLOCKS: usize = 0xC74;
@@ -102,11 +122,29 @@ const TILE_STEERING_OVERRIDE: usize = 0xCE0;
 
 /// The software features the kernel offers the guest. Fixed.
 const SOFTWARE_FEATURES: usize = 0x2E00;
+/// Allocation private data may hold more than one surface descriptor.
+const FEATURE_SEVERAL_SURFACES: u32 = 1 << 2;
 /// Allocation private data may carry the second information block after its surface descriptors.
 const FEATURE_ALLOCATION_SECOND_BLOCK: u32 = 1 << 3;
+/// The guest steps through surface descriptors by [`SURFACE_DESCRIPTOR_SIZE`]. Clear, it uses a
+/// smaller fixed size that doesn't match the descriptors the kernel checks.
+const FEATURE_SURFACE_STRIDE_GIVEN: u32 = 1 << 20;
+/// Bit 1, render status, stays clear: nothing here answers for it. Further bits the guest tests
+/// (13, 17, 22, 23, 24) stay clear too, as what each one promises isn't known.
+const FEATURES: u32 =
+    FEATURE_SEVERAL_SURFACES | FEATURE_ALLOCATION_SECOND_BLOCK | FEATURE_SURFACE_STRIDE_GIVEN;
 
 /// The sum the guest checks the block against, kept in the block. See [`index_xor_sum`].
 const CHECKSUM: usize = 0x2E20;
+
+// DriverStorePath at 0x3128 stays zero. The guest takes an empty path and goes on, and a host path
+// means nothing in the guest. The private and shared apertures from 0x2D54 stay zero as well: the
+// guest's user-mode driver doesn't read them.
+
+/// The newest submission checksum the kernel takes, which bounds the version a submission's
+/// checksum record may give. One is AMD's own default.
+const CHECKSUM_VERSION: usize = 0x35E0;
+pub const SUBMISSION_CHECKSUM_VERSION: u32 = 1;
 
 /// The family union's arrays have room for four shader engines with two arrays each.
 const ENGINES_IN_BLOCK: usize = 4;
@@ -129,6 +167,8 @@ pub fn answer(query: &VendorQuery<'_>, info: &DeviceInfo, out: &mut Vec<u8>) -> 
 /// The whole block for this card.
 pub fn build(info: &DeviceInfo) -> Vec<u8> {
     let mut block = vec![0u8; BLOCK_SIZE];
+    put_dword(&mut block, MAJOR_VERSION, BLOCK_VERSION.0);
+    put_dword(&mut block, MINOR_VERSION, BLOCK_VERSION.1);
     put_dword(&mut block, SURFACE_DESCRIPTOR_SIZE, SURFACE_SIZE as u32);
     put_dword(&mut block, SYSTEM_FLAGS, SYSTEM_IN_VIRTUAL_MACHINE);
     put_dword(&mut block, GPU_COUNT, 1);
@@ -136,7 +176,8 @@ pub fn build(info: &DeviceInfo) -> Vec<u8> {
     fill_firmware(&mut block, info);
     fill_first_gpu(&mut block, info);
     fill_graphics(&mut block, &info.details);
-    put_dword(&mut block, SOFTWARE_FEATURES, FEATURE_ALLOCATION_SECOND_BLOCK);
+    put_dword(&mut block, SOFTWARE_FEATURES, FEATURES);
+    put_dword(&mut block, CHECKSUM_VERSION, SUBMISSION_CHECKSUM_VERSION);
     let sum = index_xor_sum(&block, BLOCK_SIZE / 4, CHECKSUM);
     put_dword(&mut block, CHECKSUM, sum);
     block
@@ -220,7 +261,7 @@ fn fill_graphics(block: &mut [u8], details: &CardDetails) {
     put_masks(block, ACTIVE_UNITS, &unit_masks(&details.cu_bitmap, gfx_major));
     put_masks(block, ALWAYS_ON_UNITS, &unit_masks(&details.always_on_cu_bitmap, gfx_major));
 
-    let mut flags = GRAPHICS_COUNTS_VALID;
+    let mut flags = GRAPHICS_COUNTS_VALID | UNIT_MASKS_VALID;
     if gfx_major >= FIRST_GFX_WITH_WGPS && details.tile_steering_override != 0 {
         flags |= TILE_STEERING_VALID;
         put_dword(block, TILE_STEERING_OVERRIDE, details.tile_steering_override);
@@ -352,8 +393,42 @@ mod tests {
     fn the_guest_is_told_it_is_in_a_virtual_machine_and_may_send_the_second_block() {
         let block = build(&small_card());
         assert_eq!(dword_at(&block, SYSTEM_FLAGS), SYSTEM_IN_VIRTUAL_MACHINE);
-        assert_eq!(dword_at(&block, SOFTWARE_FEATURES), FEATURE_ALLOCATION_SECOND_BLOCK);
+        let features = dword_at(&block, SOFTWARE_FEATURES);
+        assert_ne!(features & FEATURE_ALLOCATION_SECOND_BLOCK, 0);
+        assert_ne!(features & FEATURE_SEVERAL_SURFACES, 0);
         assert_eq!(dword_at(&block, SURFACE_DESCRIPTOR_SIZE), SURFACE_SIZE as u32);
+    }
+
+    #[test]
+    fn the_block_gives_its_version() {
+        let block = build(&small_card());
+        assert_eq!((dword_at(&block, MAJOR_VERSION), dword_at(&block, MINOR_VERSION)), (1, 2));
+        assert_eq!(dword_at(&block, 0x008), 0);
+    }
+
+    #[test]
+    fn the_guest_steps_through_descriptors_by_the_size_the_kernel_checks() {
+        let block = build(&small_card());
+        assert_ne!(dword_at(&block, SOFTWARE_FEATURES) & FEATURE_SURFACE_STRIDE_GIVEN, 0);
+        assert_eq!(dword_at(&block, SURFACE_DESCRIPTOR_SIZE), 0x120);
+    }
+
+    #[test]
+    fn submissions_may_use_either_checksum_version() {
+        let block = build(&small_card());
+        assert_eq!(dword_at(&block, CHECKSUM_VERSION), 1);
+        assert_eq!(dword_at(&block, CHECKSUM_VERSION), SUBMISSION_CHECKSUM_VERSION);
+    }
+
+    #[test]
+    fn the_driver_store_path_and_the_apertures_are_left_empty() {
+        let block = build(&small_card());
+        let driver_store_path = 0x3128..0x3128 + 0x64;
+        assert!(block[driver_store_path].iter().all(|&byte| byte == 0));
+        let apertures = 0x2D54..0x2DA0;
+        assert!(block[apertures].iter().all(|&byte| byte == 0));
+        let engine_id = 0xA10;
+        assert_eq!(dword_at(&block, engine_id), 0);
     }
 
     #[test]
@@ -370,13 +445,41 @@ mod tests {
         assert_eq!(dword_at(&block, FIRMWARE_ME), 7);
         assert_eq!(dword_at(&block, FIRMWARE_MEC), 9);
         assert_eq!(dword_at(&block, RB_PER_ENGINE), 2);
-        assert_eq!(dword_at(&block, GRAPHICS_FLAGS), GRAPHICS_COUNTS_VALID | TILE_STEERING_VALID);
+        assert_eq!(
+            dword_at(&block, GRAPHICS_FLAGS),
+            GRAPHICS_COUNTS_VALID | UNIT_MASKS_VALID | TILE_STEERING_VALID
+        );
+        assert_eq!(dword_at(&block, EMULATED_REVISION), 0x9);
     }
 
     #[test]
     fn a_render_backend_that_is_off_shows_in_the_disable_mask() {
         let block = build(&small_card());
         assert_eq!(u16::from_le_bytes([block[DISABLED_RB_MASK], block[DISABLED_RB_MASK + 1]]), 0b10);
+    }
+
+    #[test]
+    fn the_unit_masks_sit_two_to_an_engine_and_arrays_are_counted_per_engine() {
+        let mut info = small_card();
+        let mut bitmap = [[0; 4]; 4];
+        bitmap[0][0] = 0b0011;
+        bitmap[0][1] = 0b1111;
+        bitmap[1][0] = 0b1100;
+        bitmap[1][1] = 0b0000;
+        info.details.cu_bitmap = bitmap;
+        info.details.shader_engines = 2;
+        info.details.arrays_per_engine = 2;
+        let block = build(&info);
+        // The guest copies four bytes an engine: engine 0's two arrays, then engine 1's.
+        let words: Vec<u16> = (0..4)
+            .map(|index| {
+                u16::from_le_bytes([block[ACTIVE_UNITS + index * 2], block[ACTIVE_UNITS + index * 2 + 1]])
+            })
+            .collect();
+        assert_eq!(words, [0b01, 0b11, 0b10, 0b00]);
+        assert_eq!(dword_at(&block, SHADER_ENGINES), 2);
+        assert_eq!(dword_at(&block, ARRAYS_PER_ENGINE), 2);
+        assert_ne!(dword_at(&block, GRAPHICS_FLAGS) & UNIT_MASKS_VALID, 0);
     }
 
     #[test]

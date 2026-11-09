@@ -285,7 +285,9 @@ impl Backend for RecordedAnswers {
         }
     }
 
-    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) {}
+    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<(), BackendError> {
+        Ok(())
+    }
 
     fn close_queue(&mut self, _queue: u32) {}
 

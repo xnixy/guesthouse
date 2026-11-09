@@ -533,8 +533,10 @@ impl<R: Rm + OpenRm> Backend for NvidiaBackend<R> {
         self.start_work_on_gpu(host, work)
     }
 
-    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) {
+    /// Writing a doorbell can't fail.
+    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<(), BackendError> {
         self.ring(queue, doorbell);
+        Ok(())
     }
 
     fn close_queue(&mut self, queue: u32) {

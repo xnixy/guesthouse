@@ -329,7 +329,17 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     }
 
     fn ring(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) {
-        self.backend.ring_doorbell(queue, doorbell);
+        if let Err(error) = self.backend.ring_doorbell(queue, doorbell) {
+            log::warn!("queue {queue:#x} couldn't start its work: {error}");
+            if let Some(record) = self.queues.get_mut(&queue) {
+                record.failed = true;
+            }
+            // Nothing will run, so stand in for the GPU where the guest would notice.
+            if let Err(error) = self.memory.write_u64(fence, value) {
+                log::warn!("standing in for a failed doorbell: {error}");
+            }
+            return;
+        }
         self.timings.mark(Stage::Rung);
         self.pending.push(Pending::Watch { queue, fence, value, rung: Instant::now() });
     }

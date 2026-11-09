@@ -1435,6 +1435,26 @@ mod queues {
     }
 
     #[test]
+    fn a_doorbell_that_fails_stands_in_at_the_fence_and_stops_the_queue() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        session.backend_mut().fail_rings = true;
+        let context = create_context(&mut session, 0);
+        let (queue, _, fence) = create_queue(&mut session, context);
+        submit(&mut session, queue, 3);
+        assert_eq!(session.memory().read_u64(fence).unwrap(), 3);
+        assert!(session.queues[&queue].failed);
+        assert!(session.backend().doorbells.is_empty());
+        session.backend_mut().fail_rings = false;
+        let mut request = message(Command::SubmitToHardwareQueue, 0x50);
+        set_u32(&mut request, 0x18, queue);
+        set_u64(&mut request, 0x20, 4);
+        send(&mut session, &request);
+        assert!(session.backend().doorbells.is_empty(), "a failed queue runs nothing more");
+        assert_eq!(session.memory().read_u64(fence).unwrap(), 4);
+    }
+
+    #[test]
     fn a_gate_holds_doorbells_until_its_fence_moves() {
         let mut session = session();
         session.backend_mut().run_work = true;

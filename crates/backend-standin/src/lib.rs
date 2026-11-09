@@ -73,6 +73,8 @@ pub struct StandIn {
     /// Set to refuse every allocation's, context's and queue's private data, as a vendor's driver
     /// would refuse data it can't read.
     pub refuse_private_data: bool,
+    /// Set to make every doorbell fail, as a submission call can.
+    pub fail_rings: bool,
     /// Addresses taken through [`HostServices`] by the first submission.
     pub channel_address: Option<u64>,
     /// Copies stay under way until a test sets `copy_done`.
@@ -140,6 +142,7 @@ impl StandIn {
             memory_starts: HashMap::new(),
             refuse_exports: false,
             refuse_private_data: false,
+            fail_rings: false,
             channel_address: None,
             slow_copies: false,
             copy_done: false,
@@ -431,8 +434,12 @@ impl Backend for StandIn {
         WorkStart::Started { doorbell: work.fence_value, work: self.work_per_submission }
     }
 
-    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) {
+    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<(), BackendError> {
+        if self.fail_rings {
+            return Err(BackendError::new("the stand-in was told to fail its doorbells"));
+        }
         self.doorbells.push((queue, doorbell));
+        Ok(())
     }
 
     fn close_queue(&mut self, queue: u32) {

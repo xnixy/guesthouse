@@ -175,8 +175,10 @@ pub trait Backend: Sized {
     /// and the backend has done what the guest would otherwise wait for, except the queue's fence.
     fn start_work(&mut self, host: &mut dyn HostServices, work: &Work<'_>) -> WorkStart;
 
-    /// Lets prepared work run. The core delays this while a queue waits on a fence.
-    fn ring_doorbell(&mut self, queue: u32, doorbell: u64);
+    /// Lets prepared work run. The core delays this while a queue waits on a fence. A backend whose
+    /// submission is a call that can fail says so here: nothing then runs, the core stands in for the
+    /// GPU at the queue's fence, and the queue stops as if [`WorkStart::QueueFailed`] had come back.
+    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<(), BackendError>;
 
     /// A hardware queue has gone, so whatever backs it can go too.
     fn close_queue(&mut self, queue: u32);

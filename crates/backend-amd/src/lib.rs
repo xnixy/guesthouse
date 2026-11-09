@@ -381,7 +381,10 @@ impl Backend for AmdBackend {
         WorkStart::Finished
     }
 
-    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) {}
+    /// Where the command submission will go: amdgpu's CS call is the doorbell, and it can fail.
+    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<(), BackendError> {
+        Ok(())
+    }
 
     fn close_queue(&mut self, _queue: u32) {}
 

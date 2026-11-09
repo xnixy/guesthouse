@@ -70,8 +70,8 @@ pub struct StandIn {
     pub memory_starts: HashMap<MemoryId, Vec<u8>>,
     /// Set to make every export fail.
     pub refuse_exports: bool,
-    /// Set to refuse every allocation's and context's private data, as a vendor's driver would refuse
-    /// data it can't read.
+    /// Set to refuse every allocation's, context's and queue's private data, as a vendor's driver
+    /// would refuse data it can't read.
     pub refuse_private_data: bool,
     /// Addresses taken through [`HostServices`] by the first submission.
     pub channel_address: Option<u64>,
@@ -384,6 +384,9 @@ impl Backend for StandIn {
         private: &mut [u8],
         serial: u32,
     ) -> Result<(), BackendError> {
+        if self.refuse_private_data {
+            return Err(BackendError::new("the stand-in was told to refuse"));
+        }
         if let Some(first) = private.first_mut() {
             *first = serial as u8;
         }

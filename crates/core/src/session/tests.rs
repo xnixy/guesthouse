@@ -1338,6 +1338,24 @@ mod queues {
     use super::*;
 
     #[test]
+    fn a_queue_the_vendor_refuses_leaves_nothing_behind() {
+        let mut session = session();
+        let context = create_context(&mut session, 0);
+        session.backend_mut().refuse_private_data = true;
+        let mut request = message(Command::CreateHardwareQueue, 0x48);
+        set_u32(&mut request, 0x38, context);
+        set_u32(&mut request, 0x40, 4);
+        let reply = send(&mut session, &request);
+        assert_ne!(u32_at(&reply, 0), Ok(SUCCESS));
+        assert!(session.queues.is_empty());
+        assert!(session.queue_progress.is_empty());
+        assert!(session.context_queues.values().all(Vec::is_empty));
+        session.backend_mut().refuse_private_data = false;
+        create_queue(&mut session, context);
+        assert_eq!(session.queues.len(), 1);
+    }
+
+    #[test]
     fn the_context_answer_is_its_message_with_a_handle() {
         let mut session = session();
         let context = create_context(&mut session, 3);

@@ -18,9 +18,13 @@ pub const DEFAULT_MAC: &str = "52:54:00:12:34:56";
 /// The second NIC's, which only ever sits on the VM's private link.
 pub const CONTROL_MAC: &str = "52:54:00:67:68:01";
 pub const DEFAULT_BRIDGE: &str = "br0";
-/// Makes a tap as root, for a QEMU that runs as this user. Fedora keeps it in the first of these, and
-/// Debian, Ubuntu and Arch in the second.
-const BRIDGE_HELPERS: [&str; 2] = ["/usr/libexec/qemu-bridge-helper", "/usr/lib/qemu/qemu-bridge-helper"];
+/// Where install.sh puts Guesthouse's own bridge helper, setuid root. It says the same.
+pub const OWN_BRIDGE_HELPER: &str = "/usr/local/libexec/guesthouse/qemu-bridge-helper";
+/// Makes a tap as root, for a QEMU that runs as this user. Guesthouse's own comes first. A build of the
+/// repo has none, and then it's the distribution's: Fedora keeps it in the second of these, and Debian,
+/// Ubuntu and Arch in the third.
+const BRIDGE_HELPERS: [&str; 3] =
+    [OWN_BRIDGE_HELPER, "/usr/libexec/qemu-bridge-helper", "/usr/lib/qemu/qemu-bridge-helper"];
 /// The kernel's limit on an interface's name.
 const MOST_BRIDGE_NAME: usize = 15;
 const FIRST_FREE_PORT_FILE: &str = "/proc/sys/net/ipv4/ip_unprivileged_port_start";
@@ -31,7 +35,7 @@ fn first_that_exists<'a>(places: &[&'a str], exists: impl Fn(&str) -> bool) -> &
     places.iter().copied().find(|place| exists(place)).unwrap_or(places[0])
 }
 
-/// Where this PC keeps the helper. If it has none, the bridge check says so about the usual place.
+/// Where this PC keeps the helper. If it has none, the bridge check says so about Guesthouse's own.
 pub fn bridge_helper() -> &'static str {
     first_that_exists(&BRIDGE_HELPERS, |place| Path::new(place).exists())
 }
@@ -291,7 +295,13 @@ mod tests {
         assert_eq!(first_that_exists(&BRIDGE_HELPERS, debian), "/usr/lib/qemu/qemu-bridge-helper");
         let fedora = |place: &str| place.starts_with("/usr/libexec/");
         assert_eq!(first_that_exists(&BRIDGE_HELPERS, fedora), "/usr/libexec/qemu-bridge-helper");
-        assert_eq!(first_that_exists(&BRIDGE_HELPERS, |_| false), BRIDGE_HELPERS[0]);
+        assert_eq!(first_that_exists(&BRIDGE_HELPERS, |_| false), OWN_BRIDGE_HELPER);
+    }
+
+    #[test]
+    fn guesthouse_s_own_helper_comes_before_the_distribution_s() {
+        let installed = |place: &str| place == OWN_BRIDGE_HELPER || place.starts_with("/usr/libexec/");
+        assert_eq!(first_that_exists(&BRIDGE_HELPERS, installed), OWN_BRIDGE_HELPER);
     }
 
     fn tcp(host: u16, guest: u16) -> Forward {

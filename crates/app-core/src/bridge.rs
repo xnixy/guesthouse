@@ -1,14 +1,14 @@
 //! What the host needs for a bridged machine, and what to tell the user to do about it.
 
-use crate::network::{bridge_helper, bridge_name_problem};
+use crate::network::{OWN_BRIDGE_HELPER, bridge_helper, bridge_name_problem};
 use crate::text::shell_quote;
 use rustix::fs::{Mode, stat};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const FILE_CAPABILITIES: &str = "security.capability";
-/// Debian, Ubuntu and Mint ship the helper without setuid, on purpose. This gives it the one right it
-/// needs to make a tap, rather than root.
+/// Debian, Ubuntu and Mint ship their helper without setuid, on purpose. For a build of the repo, which
+/// has no helper of its own, this gives theirs the one right it needs to make a tap, rather than root.
 const HELPER_RIGHT: &str = "cap_net_admin+ep";
 /// How deep QEMU's helper follows includes before this stops looking.
 const MOST_INCLUDES: u32 = 8;
@@ -18,6 +18,8 @@ const MOST_INCLUDES: u32 = 8;
 pub struct BridgeHost {
     pub net: PathBuf,
     pub helper: PathBuf,
+    /// The one install.sh sets up. Only the installer mends that.
+    pub own_helper: PathBuf,
     pub config: PathBuf,
     pub routes: PathBuf,
     pub firewall: PathBuf,
@@ -28,6 +30,7 @@ impl Default for BridgeHost {
         Self {
             net: "/sys/class/net".into(),
             helper: bridge_helper().into(),
+            own_helper: OWN_BRIDGE_HELPER.into(),
             config: "/etc/qemu/bridge.conf".into(),
             routes: "/proc/net/route".into(),
             firewall: "/proc/sys/net/bridge/bridge-nf-call-iptables".into(),
@@ -46,9 +49,9 @@ impl BridgeHost {
                 .is_ok_and(|size| size > 0)
     }
 
-    /// Installed, but not able to make a tap for this user yet.
+    /// A distribution's, installed but not able to make a tap for this user yet.
     fn helper_needs_right(&self) -> bool {
-        self.helper.exists() && !self.helper_can_run()
+        self.helper != self.own_helper && self.helper.exists() && !self.helper_can_run()
     }
 
     /// As the helper decides: something must allow the bridge, and a deny always wins. `None` if some
@@ -76,15 +79,15 @@ impl BridgeHost {
         } else if ports.is_ok_and(|mut ports| ports.next().is_none()) {
             found.push(format!("Nothing is connected to {bridge}, so it does not reach the network."));
         }
+        // Guesthouse's installer puts its own helper in, so either way the installer is the fix.
         if !self.helper.exists() {
             found.push(format!(
-                "{} is missing. It comes in the package qemu-common, or qemu-system-common on Debian, \
-                 Ubuntu and Mint.",
+                "{} is missing. Run Guesthouse's installer again, which puts it there.",
                 self.helper.display()
             ));
-        } else if self.helper_needs_right() {
+        } else if !self.helper_can_run() {
             found.push(format!(
-                "{} cannot run as root. Debian, Ubuntu and Mint ship it that way.",
+                "{} cannot run as root. Run Guesthouse's installer again, which puts in one that can.",
                 self.helper.display()
             ));
         }
@@ -197,6 +200,7 @@ mod tests {
         BridgeHost {
             net: scratch.path("net"),
             helper: scratch.write("helper", ""),
+            own_helper: scratch.path("own-helper"),
             config: scratch.path("bridge.conf"),
             routes: scratch.path("route"),
             firewall: scratch.path("firewall"),
@@ -284,10 +288,10 @@ mod tests {
     }
 
     #[test]
-    fn a_helper_shipped_without_setuid_gets_its_right() {
+    fn a_distribution_s_helper_without_setuid_gets_its_right() {
         let scratch = Scratch::new();
         let host = host(&scratch);
-        assert!(problems(&host).contains("Debian, Ubuntu and Mint ship it that way"));
+        assert!(problems(&host).contains("cannot run as root. Run Guesthouse's installer again"));
         assert!(!problems(&host).contains("missing"));
         let setcap = format!("sudo setcap cap_net_admin+ep {}", host.helper.display());
         assert!(host.commands("br0", Some("eno2"), true).contains(&setcap));
@@ -300,12 +304,23 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_helper_names_the_package_for_each_family() {
+    fn a_missing_helper_sends_you_to_the_installer() {
         let scratch = Scratch::new();
         let host = BridgeHost { helper: scratch.path("nowhere"), ..host(&scratch) };
         let said = problems(&host);
-        assert!(said.contains("is missing") && said.contains("qemu-system-common"));
+        assert!(said.contains("is missing. Run Guesthouse's installer again"));
         assert!(!said.contains("cannot run as root"));
         assert!(!host.commands("br0", Some("eno2"), true).contains("setcap"), "nothing to give a right to");
+    }
+
+    #[test]
+    fn only_the_installer_mends_guesthouse_s_own_helper() {
+        let scratch = Scratch::new();
+        let mut host = host(&scratch);
+        host.own_helper = host.helper.clone();
+        assert!(problems(&host).contains("cannot run as root. Run Guesthouse's installer again"));
+        assert!(!host.commands("br0", Some("eno2"), true).contains("setcap"));
+        fs::set_permissions(&host.helper, fs::Permissions::from_mode(0o4755)).unwrap();
+        assert!(!problems(&host).contains("cannot run as root"), "set up as install.sh leaves it");
     }
 }

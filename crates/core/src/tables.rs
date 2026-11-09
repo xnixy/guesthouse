@@ -47,6 +47,14 @@ pub struct Allocation {
     pub kind: MemoryKind,
 }
 
+impl Allocation {
+    /// Whether system memory is behind it: the guest's own pages, or the shared pages a lock moved
+    /// it to.
+    pub fn in_system_memory(&self) -> bool {
+        self.view.is_some() || self.guest_address.is_some()
+    }
+}
+
 /// A hardware queue, or the queue the host makes for a context that has none.
 #[derive(Debug, Clone)]
 pub struct Queue {

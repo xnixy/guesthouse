@@ -2040,6 +2040,29 @@ mod address_reuse {
     }
 
     #[test]
+    fn a_mapping_address_that_held_locked_memory_stays_out_of_video_memory() {
+        let mut session = session();
+        let (resource, handle) = allocate(&mut session, private(0x1000));
+        let (first, _) = map(&mut session, handle, 0, 0, 0);
+        assert_eq!(lock(&mut session, handle).0, SUCCESS);
+        destroy(&mut session, resource, &[]);
+        let (_, handle) = allocate(&mut session, private(0x1000));
+        assert_ne!(map(&mut session, handle, 0, 0, 0).0, first);
+    }
+
+    #[test]
+    fn a_mapping_address_goes_back_to_the_memory_it_held_when_a_process_closes() {
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x1000));
+        let (first, _) = map(&mut session, handle, 0, 0, 0);
+        assert_eq!(lock(&mut session, handle).0, SUCCESS);
+        send(&mut session, &message(Command::DestroyProcess, HEADER_SIZE));
+        submit(&mut session, 0x999, 1);
+        let (_, handle) = allocate(&mut session, private(0x1000));
+        assert_ne!(map(&mut session, handle, 0, 0, 0).0, first);
+    }
+
+    #[test]
     fn a_closed_process_gives_back_its_reservations_and_mappings() {
         let mut session = session();
         let reserved = reserve(&mut session, 0x10000);

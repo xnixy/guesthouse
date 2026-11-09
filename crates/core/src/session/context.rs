@@ -89,6 +89,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     fn close_mappings(&mut self, handle: u32, space: SpaceId) {
         let allocation = self.allocations.get_mut(&handle).expect("the caller found it");
         let Some(memory) = allocation.memory else { return };
+        let system_memory = allocation.in_system_memory();
         let (closing, kept) = std::mem::take(&mut allocation.mappings)
             .into_iter()
             .partition(|mapping: &crate::tables::Mapping| mapping.space == space);
@@ -98,7 +99,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             if let Err(error) = self.backend.unmap(&unmap) {
                 log::warn!("closing an address space: {error}");
             }
-            self.give_back_mapping(mapping.address);
+            self.give_back_mapping(mapping.address, system_memory);
         }
     }
 

@@ -26,6 +26,13 @@ pub struct FreedAllocation {
     pub shared: Option<(u64, u64)>,
 }
 
+impl FreedAllocation {
+    /// As [`crate::tables::Allocation::in_system_memory`].
+    pub fn in_system_memory(&self) -> bool {
+        self.view.is_some() || self.shared.is_some()
+    }
+}
+
 /// An action, and the queue positions it waits for.
 #[derive(Debug)]
 pub struct Deferred {

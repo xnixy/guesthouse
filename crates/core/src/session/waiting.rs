@@ -116,7 +116,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                     log::warn!("unmapping freed memory: {error}");
                 }
             }
-            self.give_back_mapping(mapping.address);
+            self.give_back_mapping(mapping.address, freed.in_system_memory());
         }
         self.backend.release_memory(freed.memory);
         if let Some(view) = freed.view {

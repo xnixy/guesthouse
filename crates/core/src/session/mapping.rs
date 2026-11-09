@@ -102,7 +102,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         };
         let align = if size >= LARGE_PAGES_FROM { LARGE_ALIGN } else { ALLOCATION_ALIGN };
         let whole = align_up(size, ALLOCATION_ALIGN);
-        let base = self.gpu_addresses.take(whole, align, AddressUse::Mapped)?;
+        let usage = AddressUse::mapped(allocation.in_system_memory());
+        let base = self.gpu_addresses.take(whole, align, usage)?;
         log::debug!("map {handle:#x} at {base:#x}, chosen here, for {mapped:#x}");
         let gpu_cached = allocation.gpu_cached;
         let map = MapRequest {
@@ -120,7 +121,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         };
         if let Err(error) = self.backend.map(&map) {
             log::warn!("mapping {handle:#x}: {error}");
-            self.gpu_addresses.give_back(base, whole, align, AddressUse::Mapped);
+            self.gpu_addresses.give_back(base, whole, align, usage);
             map_answer(0, Status::UNSUCCESSFUL, out);
             return Ok(());
         }
@@ -140,10 +141,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         allocation.mappings.push(mapping);
     }
 
-    /// Frees the addresses of a mapping that has gone, if the host chose them.
-    pub(crate) fn give_back_mapping(&mut self, address: u64) {
+    /// Frees the addresses of a mapping that has gone, if the host chose them. `system_memory` says
+    /// what was behind it at the end, which a first lock can have changed since it was mapped.
+    pub(crate) fn give_back_mapping(&mut self, address: u64, system_memory: bool) {
         if let Some((size, align)) = self.mapped_addresses.remove(&address) {
-            self.gpu_addresses.give_back(address, size, align, AddressUse::Mapped);
+            self.gpu_addresses.give_back(address, size, align, AddressUse::mapped(system_memory));
         }
     }
 

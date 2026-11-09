@@ -3,9 +3,12 @@
 //!
 //! The code packs a service, a subfunction and a client: `(service << 24) | (subfunction << 8) |
 //! client`. The kernel driver rewrites a few codes before it dispatches them, and answers in the
-//! header's ulEscapeReturnCode. No subfunction's own payload is known yet, so every escape that is
-//! framed right is answered as failed, which the guest's driver can fall back from. One answered as
-//! done would leave the guest reading a payload nobody filled in.
+//! header's ulEscapeReturnCode, where the guest's user-mode driver takes only zero as done.
+//!
+//! No subfunction's own payload is known yet, so every escape that is framed right is answered as
+//! failed. One answered as done would leave the guest reading a payload nobody filled in. The guest
+//! goes on past most failures, but not past those in [`NEEDED_AT_START`], so those are told apart
+//! for the log: until their replies are known, a guest stops at the first of them.
 
 use super::bytes::{dword, put_dword};
 
@@ -35,8 +38,19 @@ const MOVED_TO_SERVICE_3: [u32; 2] = [0x26, 0x3E];
 const SERVICE_1: u32 = 1;
 const SERVICE_3: u32 = 3;
 
-/// ulEscapeReturnCode for a failed escape. Zero is done.
+/// ulEscapeReturnCode for a failed escape. Zero is done, and the guest takes any other value as a
+/// failure.
 const RETURN_FAILED: u32 = 2;
+
+/// The user-mode driver's client number, in the code's low byte.
+pub const USER_MODE_CLIENT: u32 = 3;
+/// Service 3 subfunctions the graphics user-mode driver sends at start and can't go on without. One
+/// asks for a reply of six qwords after the header's fixed part, one hands the kernel a block of
+/// fields, and one's failure sends the caller to its error return.
+const NEEDED_AT_START: [u32; 3] = [0x5D, 0x62, 0x6C];
+/// Service 3 subfunctions it sends at start and goes on without, skipping their result. The two
+/// service 1 subfunctions moved to service 3 are among them.
+const OPTIONAL_AT_START: [u32; 4] = [0x5B, 0x5E, 0x26, 0x3E];
 
 /// Why an escape can't be read, for the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +76,16 @@ impl EscapeCode {
 
     pub fn is_dispatched(&self) -> bool {
         DISPATCHED_SERVICES.contains(&self.service)
+    }
+
+    /// Whether the guest's driver stops when this escape fails.
+    pub fn needed_by_the_guest(&self) -> bool {
+        self.service == SERVICE_3 && NEEDED_AT_START.contains(&self.subfunction)
+    }
+
+    /// Whether the guest's driver sends this at start and goes on when it fails.
+    pub fn optional_for_the_guest(&self) -> bool {
+        self.service == SERVICE_3 && OPTIONAL_AT_START.contains(&self.subfunction)
     }
 }
 
@@ -143,6 +167,24 @@ mod tests {
         assert_eq!(answer(&mut data).unwrap().subfunction, 1);
         assert_eq!(dword(&data, RETURN_CODE), Some(RETURN_FAILED));
         assert_eq!(data[HEADER_SIZE..], payload_before[..]);
+    }
+
+    #[test]
+    fn the_escapes_the_guest_cant_do_without_are_told_apart() {
+        for code in [0x0300_5D03, 0x0300_6C03, 0x0300_6203] {
+            let code = EscapeCode::from_code(code);
+            assert_eq!(code.client, USER_MODE_CLIENT);
+            assert!(code.needed_by_the_guest());
+            assert!(!code.optional_for_the_guest());
+        }
+        for code in [0x0300_5B03, 0x0300_5E03, 0x0100_2603, 0x0100_3E03] {
+            let code = EscapeCode::from_code(code);
+            assert!(code.optional_for_the_guest());
+            assert!(!code.needed_by_the_guest());
+        }
+        // The same subfunction under another service is something else.
+        assert!(!EscapeCode::from_code(0x0200_5D03).needed_by_the_guest());
+        assert!(!EscapeCode::from_code(0x0100_5B03).optional_for_the_guest());
     }
 
     #[test]

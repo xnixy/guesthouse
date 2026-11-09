@@ -13,6 +13,7 @@
 #   source    guesthouse-VERSION-source.tar.xz, and SHA256SUMS
 #
 # check-driver isn't one of these: it only looks at what --display-driver names, and builds nothing.
+# library-sources isn't either: it's the first part of bundled, the libraries' source packages, on their own.
 #
 # Everything built here only runs on this system's glibc or a newer one, so a release doesn't run this
 # directly: packaging/build-in-images.sh runs each stage in its own image. On its own it builds for
@@ -281,17 +282,90 @@ stage_qemu() {
     say "QEMU is in $target"
 }
 
+# The files a .dsc lists with their sha256, one "SHA256 NAME" a line, from its Checksums-Sha256 block.
+dsc_files() {
+    awk '/^Checksums-Sha256:/ { block = 1; next } block && /^ / { print $1, $3; next } { block = 0 }' "$1"
+}
+
+# What the image's own apt lists say the .dsc's sha256 is. They come from the signed index, so a .dsc that
+# matches can be trusted for the hashes it lists.
+dsc_sha256() { # source package, version, .dsc file name
+    apt-cache showsrc --only-source "$1" 2>/dev/null | awk -v version="$2" -v file="$3" '
+        /^Package:/ { this = 0 } $1 == "Version:" { this = ($2 == version) }
+        /^Checksums-Sha256:/ { block = this; next } block && /^ / { if ($3 == file) print $1; next } { block = 0 }' |
+        head -n 1
+}
+
+has_sha256() { # file, sha256
+    [ -f "$1" ] && [ "$(sha256sum "$1" | cut -d ' ' -f 1)" = "$2" ]
+}
+
+# A source package that's already in the folder, from an earlier build, needs no download. Every file has
+# to be there with the hash the archive gave it.
+sources_present() { # folder, source package, version
+    dsc=${2}_${3#*:}.dsc
+    want=$(dsc_sha256 "$2" "$3" "$dsc")
+    [ -n "$want" ] && has_sha256 "$1/$dsc" "$want" || return 1
+    dsc_files "$1/$dsc" | {
+        listed=0
+        while read -r sha256 file; do
+            has_sha256 "$1/$file" "$sha256" || exit 1
+            listed=1
+        done
+        [ "$listed" = 1 ]
+    }
+}
+
+# apt-get says why a download failed. If it couldn't get through, the version may well still be there.
+download_source() { # folder, package=version
+    said=$(mktemp)
+    if (cd "$1" && apt-get source -q --download-only --only-source "$2") >"$said" 2>&1; then
+        cat "$said"
+        rm -f "$said"
+        return 0
+    fi
+    cat "$said"
+    if grep -qiE 'unable to connect|could not connect|connection failed|connection timed out|temporary failure resolving|could not resolve' "$said"; then
+        rm -f "$said"
+        die "couldn't reach the archive for $2. It may still have it, so try again when the archive answers."
+    fi
+    rm -f "$said"
+    die "the archive has no $2 any more. Remove the qemu image and build again."
+}
+
 # The exact versions the bundled libraries were built from, with Ubuntu's patches and packaging. An
-# archive stops listing an old version soon after a new one, and then a newer image is the answer.
+# archive stops listing an old version soon after a new one, and then a newer image is the answer. What's
+# already in the folder with the right hashes is used as it is, and anything else there is removed, so
+# the bundle holds exactly these.
 fetch_library_sources() {
+    kept=$(mktemp)
     awk '$3 != "" && $4 == "source" { print $5 "=" $6 }' "$OUT/stage/LIBRARIES.txt" | sort -u |
         while read -r wanted; do
-            (cd "$1" && apt-get source -q --download-only --only-source "$wanted") ||
-                die "the archive has no $wanted any more. Remove the qemu image and build again."
             name=${wanted%%=*}
             version=${wanted#*=}
-            [ -f "$1/${name}_${version#*:}.dsc" ] || die "$wanted didn't arrive."
+            dsc=${name}_${version#*:}.dsc
+            if sources_present "$1" "$name" "$version"; then
+                say "reusing $wanted, as it's here already with the right hashes"
+            else
+                download_source "$1" "$wanted"
+            fi
+            [ -f "$1/$dsc" ] || die "$wanted didn't arrive."
+            printf '%s\n' "$dsc" >>"$kept"
+            dsc_files "$1/$dsc" | cut -d ' ' -f 2 >>"$kept"
         done
+    for file in "$1"/* "$1"/.[!.]*; do
+        [ -e "$file" ] || continue
+        grep -qxF "${file##*/}" "$kept" || rm -rf "$file"
+    done
+    rm -f "$kept"
+}
+
+# Only the libraries' sources, into bundled-source/libraries, where the bundled stage will find them.
+stage_library_sources() {
+    command -v apt-get >/dev/null 2>&1 || die "this stage runs in the image from Containerfile.qemu."
+    [ -f "$OUT/stage/LIBRARIES.txt" ] || die "the qemu stage comes first."
+    mkdir -p "$OUT/bundled-source/libraries"
+    fetch_library_sources "$OUT/bundled-source/libraries"
 }
 
 fetch_firmware_source() {
@@ -329,7 +403,8 @@ stage_bundled() {
     [ -f "$OUT/stage/LIBRARIES.txt" ] || die "the qemu stage comes first."
     name=guesthouse-$(release_version)-bundled-source
     bundle=$OUT/bundled-source
-    [ ! -d "$bundle" ] || rm -rf "${bundle:?}"
+    # The libraries' sources stay, as fetch_library_sources checks each one and reuses what's right.
+    [ ! -d "$bundle" ] || find "$bundle" -mindepth 1 -maxdepth 1 ! -name libraries -exec rm -rf {} +
     mkdir -p "$bundle/libraries" "$bundle/firmware" "$bundle/recipes"
     fetch_library_sources "$bundle/libraries"
     fetch_firmware_source "$bundle/firmware"
@@ -489,6 +564,7 @@ run_stage() {
         payload) stage_payload ;;
         source) stage_source ;;
         check-driver) check_display_driver ;;
+        library-sources) stage_library_sources ;;
         *) die "there's no stage called $1" ;;
     esac
 }

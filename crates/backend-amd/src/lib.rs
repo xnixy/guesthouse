@@ -27,7 +27,10 @@ pub use info::{
     CardDetails, DeviceInfo, EngineSet, Firmware, HW_IP_DMA, HW_IP_GFX, read_device_info, read_gpu_clock,
 };
 pub use ioctl::AMD_VENDOR;
-pub use memory::{CpuAccess, DOMAIN_GTT, DOMAIN_VRAM, GemHandle, MapFlags, MemoryType};
+pub use memory::{
+    CpuAccess, DOMAIN_GTT, DOMAIN_VRAM, GemHandle, MapFlags, MemoryType, set_tiling as set_buffer_tiling,
+    tiling as buffer_tiling,
+};
 pub use submit::{Context, Syncobj, sdma_write_ib, submit, wait_eventfd};
 
 // The buffer calls under harness-facing names, so a proof binary can drive the card without the
@@ -167,22 +170,23 @@ impl Backend for AmdBackend {
         &self.facts
     }
 
+    /// The kind is the swizzle mode the guest's surface descriptor gave, so a tiled surface gets a
+    /// buffer that carries the same tiling for whoever imports it.
     fn allocate_video_memory(
         &mut self,
         size: u64,
-        _kind: MemoryKind,
+        kind: MemoryKind,
     ) -> Result<(MemoryId, u64), BackendError> {
-        // On an APU the whole of VRAM is CPU-visible, so a CPU-reachable VRAM buffer is ordinary.
-        // The size-only signature is too thin: it cannot say VRAM versus GTT, CPU access or export
-        // intent. Part B drives this from `AllocationShape` instead.
-        let handle = memory::create(
-            &self.device,
-            size,
-            self.device.info().va_alignment,
-            DOMAIN_VRAM,
-            CpuAccess::Required,
-        )
-        .map_err(|error| BackendError::new(format!("GEM_CREATE: {error}")))?;
+        let buffer = protocol::tiling::host_buffer(kind.0, self.device.info().details.gfx_version);
+        let alignment = self.device.info().va_alignment;
+        let handle = memory::create(&self.device, size, alignment, buffer.domain, buffer.cpu_access)
+            .map_err(|error| BackendError::new(format!("GEM_CREATE: {error}")))?;
+        if buffer.tiling_info != 0
+            && let Err(error) = memory::set_tiling(&self.device, handle, buffer.tiling_info)
+        {
+            memory::close(&self.device, handle);
+            return Err(BackendError::new(format!("GEM_METADATA: {error}")));
+        }
         let id = MemoryId(self.new_id());
         self.memory.insert(id, Bo { handle, mapped: None });
         Ok((id, size))
@@ -289,16 +293,21 @@ impl Backend for AmdBackend {
     }
 
     fn describe_allocation(&mut self, private: &[u8]) -> AllocationShape {
-        // The real shape comes from the guest driver's private data, whose layout is the closed gap.
-        // Until that is known, only a size is read, so the core can keep its books.
-        let size = private.first_chunk::<8>().map_or(4096, |bytes| u64::from_le_bytes(*bytes)).max(4096);
-        AllocationShape { size, exact_size: size, surface: None, gpu_cached: false, kind: MemoryKind::PLAIN }
+        protocol::allocation::shape(private)
     }
 
-    fn finish_allocation_data(&mut self, _private: &mut [u8], _size: u64) {
-        // What amdgpu's KMD would write back into the allocation's private data is part of the closed
-        // protocol. Nothing is written until that layout is known.
+    fn allocation_data_valid(&mut self, private: &[u8]) -> bool {
+        match protocol::allocation::parse(private) {
+            Ok(_) => true,
+            Err(refused) => {
+                log::info!("refused an allocation: {}", refused.0);
+                false
+            }
+        }
     }
+
+    /// The kernel driver writes nothing back into private data the guest built.
+    fn finish_allocation_data(&mut self, _private: &mut [u8], _size: u64) {}
 
     fn finish_queue_data(
         &mut self,

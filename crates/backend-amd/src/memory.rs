@@ -225,6 +225,33 @@ pub fn export(file: &impl AsRawFd, handle: GemHandle) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+// GEM_METADATA, a 288-byte request: the handle, the operation, then flags, tiling_info and an opaque
+// blob the buffer carries for whoever imports it.
+const METADATA_REQUEST_SIZE: usize = 288;
+const METADATA_HANDLE: usize = 0;
+const METADATA_OP: usize = 4;
+const METADATA_TILING_INFO: usize = 16;
+const METADATA_OP_SET: u32 = 1;
+const METADATA_OP_GET: u32 = 2;
+
+/// Keeps tiling flags on a buffer, so an importer lays it out the way it was drawn.
+pub fn set_tiling(file: &impl AsRawFd, handle: GemHandle, tiling_info: u64) -> io::Result<()> {
+    let mut request = [0u8; METADATA_REQUEST_SIZE];
+    put32(&mut request, METADATA_HANDLE, handle.0);
+    put32(&mut request, METADATA_OP, METADATA_OP_SET);
+    put64(&mut request, METADATA_TILING_INFO, tiling_info);
+    ioctl::drm_ioctl(file, call::gem_metadata(), &mut request)
+}
+
+/// The tiling flags a buffer carries.
+pub fn tiling(file: &impl AsRawFd, handle: GemHandle) -> io::Result<u64> {
+    let mut request = [0u8; METADATA_REQUEST_SIZE];
+    put32(&mut request, METADATA_HANDLE, handle.0);
+    put32(&mut request, METADATA_OP, METADATA_OP_GET);
+    ioctl::drm_ioctl(file, call::gem_metadata(), &mut request)?;
+    Ok(get64(&request, METADATA_TILING_INFO))
+}
+
 /// Lets a GEM handle go. Any address it held must be taken back first.
 pub fn close(file: &impl AsRawFd, handle: GemHandle) {
     let mut request = [0u8; GEM_CLOSE_REQUEST_SIZE];

@@ -13,3 +13,4 @@
 pub mod adapter_info;
 pub mod allocation;
 mod bytes;
+pub mod tiling;

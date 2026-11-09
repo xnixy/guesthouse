@@ -8,6 +8,7 @@
 
 use guesthouse_backend_amd::Device;
 use guesthouse_backend_amd::protocol::adapter_info::{self, KeyFields};
+use guesthouse_backend_amd::protocol::tiling;
 use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
@@ -19,6 +20,8 @@ const GTT_TOTAL_FILE: &str = "mem_info_gtt_total";
 const GRAPHICS_IP_FOLDER: &str = "ip_discovery/die/0/11/0";
 const TOPOLOGY_FOLDER: &str = "/sys/class/kfd/kfd/topology/nodes";
 const MIB: u64 = 1 << 20;
+/// addrlib's 64 KiB render layout with XOR, the one a frame on RDNA usually has.
+const SW_64KB_R_X: u32 = 27;
 
 fn main() -> ExitCode {
     let address = std::env::args().nth(1);
@@ -146,6 +149,11 @@ fn run(address: Option<&str>) -> Result<bool, String> {
         info.details.firmware.me, info.details.firmware.pfp, info.details.firmware.mec
     );
 
+    let frame_modifier = tiling::modifier(SW_64KB_R_X, info.details.gfx_version, key.gb_addr_config, Some(4));
+    match frame_modifier {
+        Some(modifier) => println!("64KB_R_X frame        modifier {modifier:#018x}"),
+        None => println!("64KB_R_X frame        no modifier"),
+    }
     println!("device files open     {}", open_device_files().join(", "));
 
     let all_agree = rows.iter().all(|row| row.agrees != Some(false));

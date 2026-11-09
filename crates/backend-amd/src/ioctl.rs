@@ -39,6 +39,7 @@ const DRM_AMDGPU_GEM_MMAP: u64 = 0x01;
 const DRM_AMDGPU_CTX: u64 = 0x02;
 const DRM_AMDGPU_CS: u64 = 0x04;
 const DRM_AMDGPU_INFO: u64 = 0x05;
+const DRM_AMDGPU_GEM_METADATA: u64 = 0x06;
 const DRM_AMDGPU_GEM_VA: u64 = 0x08;
 const DRM_AMDGPU_GEM_USERPTR: u64 = 0x11;
 
@@ -58,6 +59,9 @@ pub mod call {
     }
     pub fn gem_userptr() -> u64 {
         number(IOCTL_READ_WRITE, DRM_COMMAND_BASE + DRM_AMDGPU_GEM_USERPTR, 24)
+    }
+    pub fn gem_metadata() -> u64 {
+        number(IOCTL_READ_WRITE, DRM_COMMAND_BASE + DRM_AMDGPU_GEM_METADATA, 288)
     }
     pub fn gem_va() -> u64 {
         number(IOCTL_WRITE, DRM_COMMAND_BASE + DRM_AMDGPU_GEM_VA, 64)
@@ -169,6 +173,7 @@ mod tests {
         assert_eq!(call::cs(), 0xC018_6444);
         assert_eq!(call::info(), 0x4020_6445);
         assert_eq!(call::gem_va(), 0x4040_6448);
+        assert_eq!(call::gem_metadata(), 0xC120_6446);
         assert_eq!(call::gem_userptr(), 0xC018_6451);
         assert_eq!(call::gem_close(), 0x4008_6409);
         assert_eq!(call::prime_handle_to_fd(), 0xC00C_642D);

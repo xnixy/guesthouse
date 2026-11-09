@@ -115,3 +115,23 @@ fn the_adapter_block_matches_what_amdgpu_reports() {
         assert_eq!(u64::from(info.details.gfx_version.0), major);
     }
 }
+
+#[test]
+fn a_tiled_surface_buffer_keeps_its_swizzle_mode() {
+    use guesthouse_backend_amd::protocol::tiling;
+    use guesthouse_backend_amd::{buffer_tiling, close_buffer, create_buffer, set_buffer_tiling};
+    /// addrlib's 64 KiB render layout with XOR, the usual one for a frame on RDNA.
+    const SW_64KB_R_X: u32 = 27;
+    let Some(device) = card() else {
+        eprintln!("no AMD render node; skipping the tiling check");
+        return;
+    };
+    let gfx = device.info().details.gfx_version;
+    let buffer = tiling::host_buffer(SW_64KB_R_X, gfx);
+    let handle = create_buffer(&device, 0x10_0000, 0x1_0000, buffer.domain, buffer.cpu_access).unwrap();
+    set_buffer_tiling(&device, handle, buffer.tiling_info).unwrap();
+    assert_eq!(buffer_tiling(&device, handle).unwrap(), buffer.tiling_info);
+    close_buffer(&device, handle);
+    let config = device.info().details.gb_addr_config.unwrap_or(0);
+    assert!(tiling::modifier(SW_64KB_R_X, gfx, config, Some(4)).is_some());
+}

@@ -5,8 +5,8 @@
 # Usage: packaging/build-release.sh [--out FOLDER] [--display-driver FOLDER] [STAGE...]
 #
 # The stages run in this order, and with none named all of them do:
-#   qemu      virglrenderer, then QEMU, its firmware blobs, and the libraries it needs from the build
-#             system
+#   qemu      virglrenderer, then QEMU, its firmware blobs, the libraries it needs from the build
+#             system, and the bridge helper
 #   bundled   guesthouse-VERSION-bundled-source.tar, the source of those libraries and blobs
 #   app       the app, the daemon and their helpers
 #   payload   guesthouse-VERSION-x86_64.tar.xz
@@ -165,6 +165,29 @@ configure_qemu() {
         '--extra-ldflags=-Wl,--disable-new-dtags,-rpath,$ORIGIN/lib')
 }
 
+# QEMU's bridge helper, which install.sh makes setuid root, is built on its own. It reads
+# /etc/qemu/bridge.conf and nothing found from where it sits, as a user could write there. It gives up
+# root for the one right it needs as it starts, which takes libcap-ng. And it has no rpath, as a setuid
+# program ignores $ORIGIN, so it uses the system's glib and libcap-ng.
+configure_bridge_helper() {
+    build=$OUT/bridge-helper-build
+    [ ! -f "$build/build.ninja" ] || return 0
+    mkdir -p "$build"
+    (cd "$build" && "$QEMU_TREE/configure" --prefix=/usr --sysconfdir=/etc --disable-relocatable \
+        --without-default-features --disable-system --disable-user --enable-tools --enable-cap-ng \
+        --disable-docs --disable-werror)
+}
+
+build_bridge_helper() {
+    configure_bridge_helper
+    ninja -C "$OUT/bridge-helper-build" qemu-bridge-helper
+    helper=$OUT/bridge-helper-build/qemu-bridge-helper
+    # Without libcap-ng it would keep root for everything it does.
+    ldd "$helper" | grep -q 'libcap-ng' || die "the bridge helper was built without libcap-ng."
+    ! readelf -d "$helper" | grep -Eq 'RPATH|RUNPATH' || die "the bridge helper has an rpath."
+    cp "$helper" "$1/"
+}
+
 build_qemu() {
     targets=qemu-system-$ARCH
     # The Linux route's helper, once the patch has it.
@@ -251,6 +274,7 @@ stage_qemu() {
     bundle_libraries "$OUT/qemu-build/qemu-system-$ARCH" "$target/lib"
     # Venus starts it. It needs only the host's GBM and the C library.
     cp "$VIRGL_PREFIX/libexec/$VIRGL_SERVER" "$target/"
+    build_bridge_helper "$target"
     # The build folder holds what was generated, like the keymaps, and the source the rest.
     cp -R "$QEMU_TREE/pc-bios/." "$OUT/stage/qemu/pc-bios/"
     cp -RL "$OUT/qemu-build/pc-bios/." "$OUT/stage/qemu/pc-bios/"

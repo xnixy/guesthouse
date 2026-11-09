@@ -17,3 +17,4 @@
 --disable-spice
 --disable-curses
 --disable-modules
+--disable-cap-ng

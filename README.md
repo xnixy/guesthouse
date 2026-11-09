@@ -6,7 +6,7 @@
 
 That's Godot's full Forward+ renderer on Vulkan, in Windows, in a VM on Fedora. Nothing is passed through. The host never gives up the card, so my GNOME desktop keeps running on it the whole time.
 
-> **Status:** early. Version 0.2.2 is out, and everything's here, the Windows GPU part included. All of it has only run on my PC, on one RTX 5090. What works, what doesn't and what's next is in the [roadmap](https://github.com/xnixy/guesthouse/issues/2), which I keep up to date.
+> **Status:** early. Version 0.2.2 is out, and everything's here, the Windows GPU part included. It's run on my PC, on one RTX 5090, and Windows has now run on a tester's RTX 4080 too, with a fix that comes in the next release. What works, what doesn't and what's next is in the [roadmap](https://github.com/xnixy/guesthouse/issues/2), which I keep up to date.
 
 ## Install
 
@@ -14,7 +14,7 @@ That's Godot's full Forward+ renderer on Vulkan, in Windows, in a VM on Fedora. 
 curl -fsSL https://raw.githubusercontent.com/xnixy/guesthouse/main/install.sh | sh
 ```
 
-It needs x86_64 Linux. For a GPU in a VM you need an NVIDIA card with the open kernel modules, and the RTX 5090 and a 40 series card have run this. The 40, 20 and 16 series get experimental support. On anything else it installs with plain VMs only, and says why. [What the installer does](#what-the-installer-does) has the details.
+It needs x86_64 Linux. For a GPU in a VM you need an NVIDIA card with the open kernel modules, and so far only my RTX 5090 and a tester's RTX 4080 have run this. The 40, 20 and 16 series get experimental support. On anything else it installs with plain VMs only, and says why. [What the installer does](#what-the-installer-does) has the details.
 
 ## Why I'm building this
 
@@ -43,7 +43,7 @@ This repo has:
 - a display driver for Windows guests, in `drivers/windows-display/`, which the app installs by itself
 - an installer, `install.sh`
 
-A Windows GPU machine needs NVIDIA's kernel module loaded, with `/dev/nvidiactl` and the card's own `/dev/nvidiaN`, and `nvidia-smi` on your PATH. It has run on one RTX 5090, with NVIDIA 615.78.08 on the host and 617.42 in Windows 11 Pro, build 26300, and on nothing else. It has never run on another card, or on a PC with two NVIDIA cards. With two, setup picks one and writes down its PCI address, and Windows and Linux machines open that card. That has only been tried on pretend cards so far.
+A Windows GPU machine needs NVIDIA's kernel module loaded, with `/dev/nvidiactl` and the card's own `/dev/nvidiaN`, and `nvidia-smi` on your PATH. It has run on my RTX 5090, with NVIDIA 615.78.08 on the host and 617.42 in Windows 11 Pro, build 26300. A tester has run Windows on an RTX 4080 with the same host driver, with a fix that's on main and not in a release yet. Nothing else has run it. With two NVIDIA cards, setup picks one and writes down its PCI address, and Windows and Linux machines open that card. The tester's PC has a 4080 and a GTX 1660 SUPER, and Windows ran on the 4080. Linux machines on a PC with two cards have only been tried on pretend cards so far.
 
 A plain VM needs QEMU with its D-Bus display, which Fedora calls `qemu-ui-dbus`, plus `qemu-img`, `swtpm`, `genisoimage` and `7z` for installs. A QEMU built as `qemu/README.md` says has no `qemu-img` of its own, so install the system's. There are no recordings in the repo, so the replay tool only runs on a recording you make yourself.
 
@@ -63,7 +63,7 @@ Everything here was measured on one machine: Ryzen 9 9950X3D, RTX 5090, Fedora 4
 
 **The VM shows NVIDIA's vendor ID.** Windows' own GPU-PV driver only binds to a Microsoft device ID, and Edge, Chromium and streaming programs look at the vendor ID before they will use a GPU, so on Microsoft's they stay on the CPU. So Windows makes a small driver package from its own GPU-PV driver, bound to NVIDIA's vendor ID with a device ID NVIDIA has never shipped, and signed like the display driver. A new machine does this during its install. One made by an older version does it at its first start, and that start then restarts the VM once by itself, as only a new VM can show the new ID. The first boot on the new ID restarts Windows once too, as Direct3D 12 only works on it after a restart. Then the machine is ready, and Edge is hardware accelerated with no flags. A guest that won't take the package keeps Microsoft's ID and the row says why.
 
-Direct3D 12, Direct3D 11, Vulkan and OpenGL all run on the real card, along with the desktop and normal apps. So do CUDA, NVENC and NVDEC, on the real video engines, which ffmpeg uses with H.264, HEVC and AV1. `nvidia-smi` finds the card. A fresh install takes about 9 minutes from picking the ISO to the GPU working.
+Direct3D 12, Direct3D 11, Vulkan and OpenGL all run on the real card, along with the desktop and normal apps. So does OpenCL, from the next release. So do CUDA, NVENC and NVDEC, on the real video engines, which ffmpeg uses with H.264, HEVC and AV1. `nvidia-smi` finds the card. A fresh install takes about 9 minutes from picking the ISO to the GPU working.
 
 **Is it really the GPU, at full speed?** Yes. This is my own benchmark, run on Linux and then inside the VM:
 
@@ -86,7 +86,7 @@ Once work reaches the card it runs at full speed. Getting it there costs a few �
 
 A heavy Godot test scene at 1280x720 does about 690 fps natively. In the VM the prototype does about 196 on Vulkan and 158–186 on Direct3D 12, and the Rust daemon about 240 and 333. GPU time per frame is the same as native, about 1.2 ms, so that gap isn't the GPU either.
 
-**For the best speed, run games fullscreen, and pick Direct3D 12 where a game offers it.** In a window, Direct3D 11 games present through a copy the CPU has to wait on, and Vulkan always does. That can cost up to half the frame rate. Fullscreen Direct3D 11 and Direct3D 12 don't take that path. A proper fix is on the [roadmap](https://github.com/xnixy/guesthouse/issues/2).
+**For the best speed, run games fullscreen, and pick Direct3D 12 where a game offers it.** In a window, Direct3D 11 games present through a copy the CPU has to wait on, and Vulkan always does. That can cost up to half the frame rate. Fullscreen Direct3D 11 and Direct3D 12 don't take that path. Vulkan stays on it for now. A proper fix is on the [roadmap](https://github.com/xnixy/guesthouse/issues/2).
 
 **Is the picture right?** I don't judge that by eye. These tests compare exact values, and the Vulkan and OpenGL ones check the final screen pixel by pixel:
 
@@ -104,9 +104,9 @@ Encoding through ffmpeg comes out clean too: 300 frames each of H.264, HEVC and 
 
 This route is in this repo, in [`linux/`](linux/README.md), with how to try it.
 
-Linux takes a different route. The guest runs NVIDIA's real Linux driver and its calls get forwarded to the host's driver. So far that's Ubuntu 26.04.1.
+Linux takes a different route. The guest runs NVIDIA's real Linux driver and its calls get forwarded to the host's driver. Ubuntu 26.04.1 installs by itself, and from the next release a Linux you install yourself can have the GPU too. So far I've tried that on Fedora 45 Workstation and Fedora 45 KDE Plasma.
 
-`nvidia-smi`, CUDA and Vulkan work, and speed is about the same as the host. With the guest's desktop off, my compute test gets about 120 TFLOPS on Vulkan in both, and an empty CUDA launch takes about 5 µs in both. The one real gap is an empty Vulkan submit, about 54 µs against 28. NVENC and NVDEC work too, and NVIDIA's session limit holds across the host and its guests. GNOME runs on it through Zink, with Firefox, Files and Settings all opening and a terminal doing real work. Godot's Windows build even runs in there through Wine on Wayland.
+`nvidia-smi`, CUDA and Vulkan work, and speed is about the same as the host. With the guest's desktop off, my compute test gets about 120 TFLOPS on Vulkan in both, and an empty CUDA launch takes about 5 µs in both. The one real gap is an empty Vulkan submit, about 54 µs against 28. NVENC and NVDEC work too, and NVIDIA's session limit holds across the host and its guests. GNOME runs on it through Zink, with Firefox, Files and Settings all opening and a terminal doing real work. On a Linux you installed yourself, Plasma does too. Godot's Windows build even runs in there through Wine on Wayland.
 
 ![nvidia-smi and a small CUDA test in a terminal on the Ubuntu guest's desktop](docs/images/nvidia-smi-in-ubuntu.jpg)
 
@@ -185,7 +185,7 @@ What's still coming:
 
 ## What doesn't work yet
 
-Quite a lot, and I'd rather you hear it from me. The list is in the [roadmap](https://github.com/xnixy/guesthouse/issues/2), under known problems, so it stays current without this page going stale. The biggest one: it has only ever run on my PC, on an RTX 5090. See [#9](https://github.com/xnixy/guesthouse/issues/9) if you'd like to help with other cards.
+Quite a lot, and I'd rather you hear it from me. The list is in the [roadmap](https://github.com/xnixy/guesthouse/issues/2), under known problems, so it stays current without this page going stale. The biggest one: it has only run on two PCs, mine with an RTX 5090 and a tester's with an RTX 4080, and the 4080 needs a fix that isn't in a release yet. See [#9](https://github.com/xnixy/guesthouse/issues/9) if you'd like to help with other cards.
 
 ## Trying the code
 
@@ -237,7 +237,7 @@ None of this would exist without other people's work:
 - Microsoft's dxgkrnl driver for Linux, the public source for how GPU-PV talks
 - NVIDIA's open GPU kernel modules
 - gVisor's nvproxy, the closest thing to the Linux route I've seen
-- Mesa's Zink, which GNOME runs on in Linux guests
+- Mesa's Zink, which GNOME and Plasma run on in Linux guests
 - zako-vdd, which the display driver is a fork of
 - Microsoft's OpenVMM, for how Hyper-V's time sync talks
 - GTK, libadwaita and the Rust crates the app is built on

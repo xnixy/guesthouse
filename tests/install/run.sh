@@ -74,7 +74,7 @@ make_toolbox() {
     for tool in $TOOLS; do
         ln -s "$(command -v "$tool")" "$T/bin/$tool"
     done
-    for stand_in in curl sudo ldconfig; do
+    for stand_in in curl sudo ldconfig chown; do
         ln -s "$HERE/stand-ins/$stand_in" "$T/bin/$stand_in"
     done
     for manager in dnf apt-get pacman zypper usermod gpasswd; do
@@ -90,11 +90,24 @@ give_tools() {
     done
 }
 
-# Libraries with every symbol the pretend releases ask for, and firmware, so nothing needs installing.
+# Where root would put the bridge helper, and what a pretend release's is.
+helper_path() {
+    printf '%s' "$T/system/libexec/guesthouse/qemu-bridge-helper"
+}
+
+give_helper() {
+    mkdir -p "$T/system/libexec/guesthouse"
+    printf '#!/bin/sh\necho "bridge helper %s"\n' "${1:-1}" >"$(helper_path)"
+    chmod 4755 "$(helper_path)"
+}
+
+# Libraries with every symbol the pretend releases ask for, firmware, and the bridge helper in place,
+# so nothing needs root.
 give_everything() {
     give_tools qemu-img 7z genisoimage swtpm isoinfo openssl ssh-keygen bwrap gcc
     export LIBRARIES_PRESENT=yes
     FIRMWARE_HERE=yes
+    give_helper
 }
 
 fake_os() {
@@ -111,7 +124,8 @@ new_test() {
     printf 'pipewire' >"$T/libraries/libpipewire-0.3.so.0"
     for library in libepoxy.so.0 libgbm.so.1 libEGL.so.1 libdrm.so.2; do printf 'gl' >"$T/libraries/$library"; done
     printf 'amdgpu_device_initialize2' >"$T/libraries/libdrm_amdgpu.so.1"
-    unset LIBRARIES_PRESENT SUDO_FAILS FAKE_GPU_REFUSED FAKE_GTK FAKE_AMD
+    printf 'capng' >"$T/libraries/libcap-ng.so.0"
+    unset LIBRARIES_PRESENT SUDO_FAILS FAKE_GPU_REFUSED FAKE_GTK FAKE_AMD HELPER_VERSION
     FIRMWARE_HERE=no
     OSTREE=no
     KVM_CLOSED=no
@@ -169,8 +183,11 @@ install_version() {
     answering 'yes\n' "$SHELL_UNDER_TEST" "$(script_for "$1")" "${@:2}"
 }
 
+# The repo's, with the helper's folder in reach.
 uninstaller() {
-    printf '%s' "$REPO/uninstall.sh"
+    sed "s|^BRIDGE_HELPER_FOLDER=.*|BRIDGE_HELPER_FOLDER=$T/system/libexec/guesthouse|" "$REPO/uninstall.sh" \
+        >"$T/uninstall.sh"
+    printf '%s' "$T/uninstall.sh"
 }
 
 current_says() {

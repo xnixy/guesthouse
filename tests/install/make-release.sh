@@ -1,6 +1,7 @@
 #!/bin/sh
 # Makes a pretend release in FAKE_RELEASES, and an install.sh that names it, the way a real release
-# changes the one on main. Its programs are small shell scripts.
+# changes the one on main. Its programs are small shell scripts. The scripts put the bridge helper in
+# system/ beside FAKE_RELEASES, where root would have put it in /usr/local.
 #
 # Usage: make-release.sh REPO FAKE_RELEASES VERSION [PARTS]
 # PARTS is any of `windows` and `linux`. The script for the release is left as install-VERSION.sh.
@@ -12,12 +13,20 @@ version=$3
 parts=${4:-}
 name=guesthouse-$version-x86_64
 tree=$releases/tree-$version/$name
+helper_folder=$(CDPATH='' cd -- "$releases/.." && pwd)/system/libexec/guesthouse
+
+# The scripts as a test runs them, with the helper's folder in reach.
+for_tests() {
+    sed "s|^BRIDGE_HELPER_FOLDER=.*|BRIDGE_HELPER_FOLDER=$helper_folder|" "$@"
+}
 
 mkdir -p "$tree/qemu/build" "$tree/qemu/pc-bios" "$tree/share" "$releases/v$version"
 for program in guesthouse guesthouse-no-hdr guesthouse-daemon guesthouse-jail guesthouse-task guesthouse-share; do
     printf '#!/bin/sh\necho "%s %s"\n' "$program" "$version" >"$tree/$program"
 done
 printf '#!/bin/sh\necho "qemu %s"\n' "$version" >"$tree/qemu/build/qemu-system-x86_64"
+# The same in every release unless a test says otherwise, as QEMU's helper rarely changes.
+printf '#!/bin/sh\necho "bridge helper %s"\n' "${HELPER_VERSION:-1}" >"$tree/qemu/build/qemu-bridge-helper"
 echo bios >"$tree/qemu/pc-bios/bios.bin"
 cat >"$tree/guesthouse-check" <<'CHECK'
 #!/bin/sh
@@ -31,10 +40,12 @@ else
 fi
 printf 'amd\t%s\n' "${FAKE_AMD:-no}"
 CHECK
-chmod +x "$tree"/guesthouse* "$tree/qemu/build/qemu-system-x86_64"
+chmod +x "$tree"/guesthouse* "$tree/qemu/build/qemu-system-x86_64" "$tree/qemu/build/qemu-bridge-helper"
 cp "$repo/crates/app/data/io.github.xnixy.Guesthouse.desktop" "$tree/share/"
 cp -R "$repo/crates/app/data/icons" "$tree/share/"
-cp "$repo/install.sh" "$repo/uninstall.sh" "$tree/"
+for script in install.sh uninstall.sh; do
+    for_tests "$repo/$script" >"$tree/$script"
+done
 printf 'adw_new_thing\ngtk_new_thing\n' >"$tree/needs-symbols"
 for part in $parts; do
     case $part in
@@ -51,4 +62,4 @@ source=$(sha256sum "$releases/v$version/guesthouse-$version-source.tar.xz" | cut
 sed -e "s/^RELEASE_VERSION=.*/RELEASE_VERSION=\"$version\"/" \
     -e "s/^PAYLOAD_SHA256=.*/PAYLOAD_SHA256=\"$payload\"/" \
     -e "s/^SOURCE_SHA256=.*/SOURCE_SHA256=\"$source\"/" \
-    "$repo/install.sh" >"$releases/install-$version.sh"
+    "$repo/install.sh" | for_tests >"$releases/install-$version.sh"

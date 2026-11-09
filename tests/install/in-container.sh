@@ -12,7 +12,7 @@ here=$repo/tests/install
 T=$(mktemp -d)
 H=$T/home
 mkdir -p "$H" "$T/bin" "$T/releases" "$T/libraries"
-for stand_in in curl sudo ldconfig; do
+for stand_in in curl sudo ldconfig chown; do
     ln -s "$here/stand-ins/$stand_in" "$T/bin/"
 done
 for manager in dnf apt-get pacman zypper; do
@@ -24,6 +24,7 @@ printf 'gtk_new_thing' >"$T/libraries/libgtk-4.so.1"
 printf 'pipewire' >"$T/libraries/libpipewire-0.3.so.0"
 for library in libepoxy.so.0 libgbm.so.1 libEGL.so.1 libdrm.so.2; do printf 'gl' >"$T/libraries/$library"; done
 printf 'amdgpu_device_initialize2' >"$T/libraries/libdrm_amdgpu.so.1"
+printf 'capng' >"$T/libraries/libcap-ng.so.0"
 
 PATH=$T/bin:$PATH
 HOME=$H
@@ -52,8 +53,10 @@ echo "dry run: changed nothing"
 
 sh "$T/releases/install-1.0.sh" </dev/null | tail -n 4
 [ "$("$H/.local/lib/guesthouse/current/guesthouse")" = "guesthouse 1.0" ]
-echo "installed, and it runs"
+[ -u "$T/system/libexec/guesthouse/qemu-bridge-helper" ]
+echo "installed, it runs, and the bridge helper is setuid"
 
 sh "$H/.local/lib/guesthouse/current/uninstall.sh" </dev/null | tail -n 2
 [ "$(listing)" = "$(cat "$T/before")" ]
-echo "HOME is as it began"
+[ ! -e "$T/system/libexec/guesthouse/qemu-bridge-helper" ]
+echo "HOME is as it began, and the bridge helper is gone"

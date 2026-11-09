@@ -4,12 +4,16 @@
 # It works from ~/.local/lib/guesthouse/manifest, so any copy of this file does the same job, and it
 # needs no network. A file goes only if it's still the one that was installed: it's left alone if its
 # hash has changed, a folder goes only once it's empty, and anything outside your own folders is refused
-# whatever the manifest says. Your machines and their disks stay, unless you pass --delete-machines and
-# then type the folder's name.
+# whatever the manifest says. The one exception is QEMU's bridge helper, which root put in the folder
+# named below, and root takes away. Your machines and their disks stay, unless you pass
+# --delete-machines and then type the folder's name.
 set -eu
 
 MANIFEST_FORMAT=1
 TAB=$(printf '\t')
+# The same as install.sh's. This path is never read from the manifest, which you can write.
+BRIDGE_HELPER_FOLDER=/usr/local/libexec/guesthouse
+BRIDGE_HELPER=$BRIDGE_HELPER_FOLDER/qemu-bridge-helper
 
 DRY_RUN=no
 DELETE_MACHINES=no
@@ -239,6 +243,22 @@ print_plan() {
         say "The install added you to the kvm group. This takes you out again, as root:"
         say "  sudo gpasswd -d $(id -un) kvm"
     fi
+    if helper_is_ours; then
+        say "The install put QEMU's bridge helper in $BRIDGE_HELPER_FOLDER. This removes it, as root:"
+        say "  sudo sh -c '$(helper_command)'"
+    fi
+}
+
+# Only while it's still the copy the install put there. Another install of Guesthouse on this PC may
+# have replaced it since, and then it's that one's.
+helper_is_ours() {
+    hash=$(awk -F "$TAB" -v path="$BRIDGE_HELPER" '$1 == "root-file" && $3 == path { found = $2 }
+        END { print found }' "$MANIFEST")
+    [ -n "$hash" ] && [ -f "$BRIDGE_HELPER" ] && [ "$(sha256sum "$BRIDGE_HELPER" | cut -d ' ' -f 1)" = "$hash" ]
+}
+
+helper_command() {
+    printf 'rm -f -- "%s" && { rmdir -- "%s" 2>/dev/null || true; }' "$BRIDGE_HELPER" "$BRIDGE_HELPER_FOLDER"
 }
 
 group_was_added() {
@@ -325,6 +345,11 @@ leave_group() {
     sudo gpasswd -d "$(id -un)" kvm </dev/tty || warn "couldn't take you out of the kvm group."
 }
 
+remove_helper() {
+    helper_is_ours || return 0
+    sudo sh -c "$(helper_command)" </dev/tty || warn "couldn't remove $BRIDGE_HELPER."
+}
+
 # The folders go after the manifest, as it's what lists them, and it sits in one of them.
 remove_manifest() {
     folders=$(entries_of_kind dir "$MANIFEST" | cut -f 3 | sort -r)
@@ -353,6 +378,7 @@ main() {
     confirm
     confirm_machines
     leave_group
+    remove_helper
     remove_program
     delete_machines
     remove_manifest

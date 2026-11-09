@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stands in for chown, which only root can do: it writes down what it was asked and changes nothing.
+printf 'chown %s\n' "$*" >>"$STAND_IN_LOG"

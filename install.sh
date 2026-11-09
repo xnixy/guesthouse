@@ -6,7 +6,7 @@
 # will do and every command that needs root, and waits for you to say yes.
 #
 # It never installs or changes a GPU driver, kernel arguments or services, and it never needs root for
-# anything but packages. --dry-run shows the plan and stops. Everything it puts on this PC is listed in
+# anything but packages and QEMU's bridge helper. --dry-run shows the plan and stops. Everything it puts on this PC is listed in
 # ~/.local/lib/guesthouse/manifest, and uninstall.sh removes that and nothing else.
 #
 # The checksums below only prove that the download is the release this file names. They can't protect
@@ -26,6 +26,12 @@ APP_ID=io.github.xnixy.Guesthouse
 ARCH=x86_64
 MANIFEST_FORMAT=1
 QEMU_PROGRAM=qemu/build/qemu-system-x86_64
+# Bridged networking needs QEMU's bridge helper to run as root. A setuid program in your home folder
+# could be swapped or fed a config you wrote, so root puts a copy where only root can write. That's
+# the one thing this puts outside your home folder, and /usr/local is writable on immutable systems too.
+BRIDGE_HELPER_SOURCE=qemu/build/qemu-bridge-helper
+BRIDGE_HELPER_FOLDER=/usr/local/libexec/guesthouse
+BRIDGE_HELPER=$BRIDGE_HELPER_FOLDER/qemu-bridge-helper
 # The first GTK the app with HDR loads on.
 HDR_GTK=4.16
 FIRMWARE_DESCRIPTORS=/usr/share/qemu/firmware
@@ -55,6 +61,7 @@ OLD_LINK=""
 LINK_FLIPPED=no
 MANIFEST_BEFORE=""
 PACKAGES_ADDED=""
+HELPER_PLACED=no
 
 say() {
     printf '%s\n' "$*"
@@ -467,6 +474,7 @@ need_present() {
         adwaita) [ -n "$(library_path libadwaita-1.so.0)" ] ;;
         pipewire) [ -n "$(library_path libpipewire-0.3.so.0)" ] ;;
         opengl) for library in $OPENGL_LIBRARIES; do [ -n "$(library_path "$library")" ] || return 1; done ;;
+        cap-ng) [ -n "$(library_path libcap-ng.so.0)" ] ;;
         firmware) firmware_present ;;
         *) command -v "$1" >/dev/null 2>&1 ;;
     esac
@@ -489,6 +497,7 @@ package_for() {
         fedora:ssh-keygen) say openssh ;;
         fedora:bwrap) say bubblewrap ;;
         fedora:gcc) say gcc ;;
+        fedora:cap-ng) say libcap-ng ;;
         debian:gtk) say libgtk-4-1 ;;
         debian:adwaita) say libadwaita-1-0 ;;
         debian:pipewire) say libpipewire-0.3-0t64 ;;
@@ -502,6 +511,7 @@ package_for() {
         debian:ssh-keygen) say openssh-client ;;
         debian:bwrap) say bubblewrap ;;
         debian:gcc) say gcc ;;
+        debian:cap-ng) say libcap-ng0 ;;
         arch:gtk) say gtk4 ;;
         arch:adwaita) say libadwaita ;;
         arch:pipewire) say libpipewire ;;
@@ -515,6 +525,7 @@ package_for() {
         arch:ssh-keygen) say openssh ;;
         arch:bwrap) say bubblewrap ;;
         arch:gcc) say gcc ;;
+        arch:cap-ng) say libcap-ng ;;
         suse:gtk) say libgtk-4-1 ;;
         suse:adwaita) say libadwaita-1-0 ;;
         suse:pipewire) say libpipewire-0_3-0 ;;
@@ -528,14 +539,16 @@ package_for() {
         suse:ssh-keygen) say openssh-clients ;;
         suse:bwrap) say bubblewrap ;;
         suse:gcc) say gcc ;;
+        suse:cap-ng) say libcap-ng0 ;;
     esac
 }
 
 # Every machine needs the first six: QEMU loads OpenGL's libraries for an AMD card's GPU, whether or
-# not a machine uses it. The rest are what a GPU machine's install and its jail use, and
-# setarch comes with util-linux, which every one of these systems has.
+# not a machine uses it. The bridge helper needs libcap-ng. The rest are what a GPU machine's install
+# and its jail use, and setarch comes with util-linux, which every one of these systems has.
 wanted_needs() {
     say gtk adwaita pipewire opengl qemu-img firmware
+    [ ! -f "$TREE/$BRIDGE_HELPER_SOURCE" ] || say cap-ng
     [ "$MODE" = plain ] || say 7z genisoimage swtpm
     if [ "$MODE" = gpu ] && [ -d "$TREE/linux" ]; then
         say isoinfo openssl ssh-keygen bwrap gcc
@@ -570,15 +583,37 @@ install_command() {
     esac
 }
 
-# What root does, as one string, so what's shown is exactly what runs.
+# Whether root has to put the helper in place: it isn't there, isn't setuid, or isn't this release's.
+helper_needs_work() {
+    [ -f "$1" ] || return 1
+    [ -u "$BRIDGE_HELPER" ] || return 0
+    [ "$(hash_of "$1")" != "$(hash_of "$BRIDGE_HELPER")" ]
+}
+
+# Root checks the copy against the hash taken here, before it makes it setuid, as the source is in a
+# folder you can write. A copy that fails goes.
+helper_command() {
+    source=$TREE/$BRIDGE_HELPER_SOURCE
+    # shellcheck disable=SC2016 # $f and $n are for root's shell
+    printf '{ f="%s"; n="$f/%s.new"; { mkdir -p "$f" && chmod 755 "$f" && cp "%s" "$n" && chown 0:0 "$n" && echo "%s  $n" | sha256sum -c --quiet && chmod 4755 "$n" && mv -f "$n" "$f/%s"; } || { rm -f "$n"; false; }; }' \
+        "$BRIDGE_HELPER_FOLDER" "${BRIDGE_HELPER##*/}" "$source" "$(hash_of "$source")" "${BRIDGE_HELPER##*/}"
+}
+
+# What root does, as one string, so what's shown is exactly what runs. An immutable system gets no
+# packages, but its /usr/local takes the helper all the same.
 plan_root_work() {
     ROOT_COMMAND=""
     ADD_TO_KVM=no
-    [ "$IMMUTABLE" = no ] || return 0
-    [ -z "$PACKAGES" ] || ROOT_COMMAND=$(install_command "$PACKAGES")
-    if kvm_group_would_help; then
-        ADD_TO_KVM=yes
-        ROOT_COMMAND="${ROOT_COMMAND:+$ROOT_COMMAND && }usermod -aG kvm $(id -un)"
+    if [ "$IMMUTABLE" = no ]; then
+        [ -z "$PACKAGES" ] || ROOT_COMMAND=$(install_command "$PACKAGES")
+        if kvm_group_would_help; then
+            ADD_TO_KVM=yes
+            ROOT_COMMAND="${ROOT_COMMAND:+$ROOT_COMMAND && }usermod -aG kvm $(id -un)"
+        fi
+    fi
+    if helper_needs_work "$TREE/$BRIDGE_HELPER_SOURCE"; then
+        HELPER_PLACED=yes
+        ROOT_COMMAND="${ROOT_COMMAND:+$ROOT_COMMAND && }$(helper_command)"
     fi
 }
 
@@ -679,16 +714,19 @@ print_plan() {
 print_root_plan() {
     say ""
     if [ "$IMMUTABLE" = yes ] && [ -n "$PACKAGES" ]; then
-        say "This system is immutable, so I won't touch it. You'll need these, and a reboot:"
+        say "This system is immutable, so I won't add packages to it. You'll need these, and a reboot:"
         say "  ${LAYER_COMMAND:-(however your system adds packages)} $PACKAGES"
     elif [ -n "$MISSING_NEEDS" ] && [ "$FAMILY" = unknown ]; then
         say "These are missing, and I don't know your distro's names for them: $MISSING_NEEDS"
-    elif [ -n "$ROOT_COMMAND" ]; then
+    fi
+    if [ -n "$ROOT_COMMAND" ]; then
         say "This is everything that runs as root:"
         say "  sudo sh -c '$ROOT_COMMAND'"
-    else
+    elif [ "$IMMUTABLE" = no ] || [ -z "$PACKAGES" ]; then
         say "Nothing here needs root."
     fi
+    [ "$HELPER_PLACED" = no ] ||
+        say "That puts QEMU's bridge helper in $BRIDGE_HELPER_FOLDER, setuid root, for bridged networking."
     [ -z "$ROOT_COMMAND" ] || [ "$ADD_TO_KVM" = no ] ||
         say "You'd join the kvm group to open /dev/kvm, and that takes a new login."
 }
@@ -709,7 +747,7 @@ run_root_work() {
     command -v sudo >/dev/null 2>&1 ||
         die "this needs sudo, and it's not here. Run this as root yourself, then run me again: $ROOT_COMMAND"
     sudo sh -c "$ROOT_COMMAND" </dev/tty || die "that command failed, so I'm stopping. Nothing of Guesthouse's was installed."
-    PACKAGES_ADDED=$PACKAGES
+    [ "$IMMUTABLE" = yes ] || PACKAGES_ADDED=$PACKAGES
 }
 
 # A libdrm older than virglrenderer needs would only show when QEMU couldn't start. With every symbol
@@ -793,6 +831,7 @@ list_root_work() {
         manifest_line package - "$package"
     done
     [ "$ADD_TO_KVM" = no ] || manifest_line group - kvm
+    [ "$HELPER_PLACED" = no ] || manifest_line root-file "$(hash_of "$TREE/$BRIDGE_HELPER_SOURCE")" "$BRIDGE_HELPER"
 }
 
 write_manifest_header() {
@@ -1015,15 +1054,18 @@ choose_release() {
     if [ -n "$installed" ] && newer_than "$installed" "$RELEASE_VERSION"; then
         die "you have $installed, which is newer than $RELEASE_VERSION. I won't go backwards."
     fi
-    # A plain install of this version goes on, as the GPU may be able to run now.
-    if [ "$installed" = "$RELEASE_VERSION" ] && { [ "$UPDATE" = yes ] || [ "$(manifest_value mode)" = gpu ]; }; then
+    # A plain install of this version goes on, as the GPU may be able to run now, and so does one whose
+    # bridge helper has gone wrong.
+    if [ "$installed" = "$RELEASE_VERSION" ] && { [ "$UPDATE" = yes ] || [ "$(manifest_value mode)" = gpu ]; } &&
+        ! helper_needs_work "$CURRENT_LINK/$BRIDGE_HELPER_SOURCE"; then
         say "Guesthouse $installed is the latest release."
         exit 0
     fi
 }
 
 stop_if_nothing_changes() {
-    if [ "$(manifest_value version)" = "$RELEASE_VERSION" ] && [ "$(manifest_value mode)" = "$MODE" ]; then
+    if [ "$(manifest_value version)" = "$RELEASE_VERSION" ] && [ "$(manifest_value mode)" = "$MODE" ] &&
+        ! helper_needs_work "$TREE/$BRIDGE_HELPER_SOURCE"; then
         say "Guesthouse $RELEASE_VERSION is the latest release, and it's installed the way this PC can run it."
         exit 0
     fi

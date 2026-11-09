@@ -95,6 +95,12 @@ pub trait Backend: Sized {
     /// Reads a vendor driver's private data for a new allocation.
     fn describe_allocation(&mut self, private: &[u8]) -> AllocationShape;
 
+    /// Whether the vendor's kernel driver would take an allocation's private data. If any allocation
+    /// in a call wouldn't be taken, the whole call fails, as nothing has been made yet.
+    fn allocation_data_valid(&mut self, _private: &[u8]) -> bool {
+        true
+    }
+
     /// Fills in what the vendor's kernel driver would write back into an allocation's private data.
     /// `size` is what [`AllocationShape::size`] said.
     fn finish_allocation_data(&mut self, private: &mut [u8], size: u64);
@@ -149,6 +155,12 @@ pub trait Backend: Sized {
 
     /// The guest has restarted, and its old processes will never say they ended.
     fn all_processes_gone(&mut self) {}
+
+    /// Whether the vendor's kernel driver would take a new context's private data from this process.
+    /// A context it wouldn't take fails the same way as one on a node with no channel.
+    fn context_data_valid(&mut self, _process: u32, _node: u32, _private: &[u8]) -> bool {
+        true
+    }
 
     /// A last look at a new context's private data, which goes back to the guest. Most need nothing.
     fn finish_context_data(&mut self, _node: u32, _private: &mut [u8]) {}

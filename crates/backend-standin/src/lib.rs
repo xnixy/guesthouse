@@ -70,6 +70,9 @@ pub struct StandIn {
     pub memory_starts: HashMap<MemoryId, Vec<u8>>,
     /// Set to make every export fail.
     pub refuse_exports: bool,
+    /// Set to refuse every allocation's and context's private data, as a vendor's driver would refuse
+    /// data it can't read.
+    pub refuse_private_data: bool,
     /// Addresses taken through [`HostServices`] by the first submission.
     pub channel_address: Option<u64>,
     /// Copies stay under way until a test sets `copy_done`.
@@ -136,6 +139,7 @@ impl StandIn {
             slot_copy_status: Status::SUCCESS,
             memory_starts: HashMap::new(),
             refuse_exports: false,
+            refuse_private_data: false,
             channel_address: None,
             slow_copies: false,
             copy_done: false,
@@ -490,6 +494,14 @@ impl Backend for StandIn {
 
     fn context_allowed(&mut self, node: u32, _client_hint: u32) -> bool {
         node != NODE_WITHOUT_CHANNEL
+    }
+
+    fn allocation_data_valid(&mut self, _private: &[u8]) -> bool {
+        !self.refuse_private_data
+    }
+
+    fn context_data_valid(&mut self, _process: u32, _node: u32, _private: &[u8]) -> bool {
+        !self.refuse_private_data
     }
 
     fn unfinished_work_limit(&self) -> Option<u64> {

@@ -92,6 +92,15 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let shapes: Vec<AllocationShape> =
             request.entries().map(|entry| self.shape_of(entry.private)).collect();
         // All of it or none, as nothing has been made yet that would need taking back.
+        let refused = request.entries().any(|entry| {
+            StandardRecord::parse(entry.private).is_none()
+                && !self.backend.allocation_data_valid(entry.private)
+        });
+        if refused {
+            log::info!("refused an allocation whose private data the vendor's driver wouldn't take");
+            CreateAllocationAnswer::fail(Status::INVALID_PARAMETER, out);
+            return Ok(());
+        }
         if let Some(status) = self.refusal(guest_backed, &shapes) {
             CreateAllocationAnswer::fail(status, out);
             return Ok(());

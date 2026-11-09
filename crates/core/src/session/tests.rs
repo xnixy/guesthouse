@@ -480,6 +480,30 @@ mod allocations {
     }
 
     #[test]
+    fn private_data_the_vendor_refuses_fails_the_whole_call() {
+        let mut session = session();
+        session.backend_mut().refuse_private_data = true;
+        let reply = send(&mut session, &create_message(0, &[private(0x2000), private(0x2000)]));
+        assert_eq!(status_of(&reply), Status::INVALID_PARAMETER.0);
+        assert!(session.allocations.is_empty());
+        assert_eq!(session.backend().live_memory_blocks(), 0);
+    }
+
+    #[test]
+    fn our_own_records_are_not_offered_to_the_vendor() {
+        let mut session = session();
+        session.backend_mut().refuse_private_data = true;
+        let mut describe = message(Command::DescribeStandardAllocation, 0x40);
+        set_u32(&mut describe, 0x18, 1);
+        set_u32(&mut describe, 0x1C, 32);
+        set_u32(&mut describe, 0x28, 100);
+        set_u32(&mut describe, 0x2C, 10);
+        let record = send(&mut session, &describe)[36..68].to_vec();
+        let reply = send(&mut session, &create_message(0, &[record]));
+        assert_eq!(status_of(&reply), SUCCESS);
+    }
+
+    #[test]
     fn locked_memory_stops_counting_against_the_cap() {
         let mut session = session_with(Some(0x3000));
         let (_, handle) = allocate(&mut session, private(0x2000));
@@ -2154,6 +2178,14 @@ mod video_guard {
     fn a_context_on_a_node_with_no_channel_is_refused_with_a_zero_handle() {
         let mut session = session();
         assert_eq!(create_context(&mut session, NODE_WITHOUT_CHANNEL), 0);
+        assert!(session.context_nodes.is_empty());
+    }
+
+    #[test]
+    fn a_context_whose_private_data_is_refused_gets_a_zero_handle() {
+        let mut session = session();
+        session.backend_mut().refuse_private_data = true;
+        assert_eq!(create_context(&mut session, 0), 0);
         assert!(session.context_nodes.is_empty());
     }
 

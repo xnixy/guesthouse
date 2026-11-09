@@ -111,11 +111,21 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             request.answer(message, 0, out);
             return Ok(());
         }
+        let process = MessageHeader::process_of(message)?;
+        let private = message.get(CreateContext::PRIVATE..).unwrap_or_default();
+        let private = &private[..request.private_size.min(private.len())];
+        if !self.backend.context_data_valid(process, request.node, private) {
+            log::info!(
+                "refused a context on node {} whose private data the vendor's driver wouldn't take",
+                request.node
+            );
+            request.answer(message, 0, out);
+            return Ok(());
+        }
         let handle = self.handles.take();
         log::debug!("context {handle:#x} on node {}, hint {:#x}", request.node, request.client_hint);
         self.context_nodes.insert(handle, request.node);
         self.context_hints.insert(handle, request.client_hint);
-        let process = MessageHeader::process_of(message)?;
         self.context_processes.insert(handle, process);
         self.backend.context_made(process, request.node);
         let answer_at = out.len();

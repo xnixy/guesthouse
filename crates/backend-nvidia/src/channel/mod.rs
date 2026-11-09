@@ -23,6 +23,7 @@ use crate::rm::classes::{
 };
 use crate::rm::device::{AddressSpace, Device, Mapping};
 use crate::rm::{Handle, Rm, RmError};
+use guesthouse_backend::MemoryKind;
 
 /// The host area of a channel on a guest's ring.
 pub const AREA_SIZE: usize = 0x20000;
@@ -336,7 +337,7 @@ impl Channel {
         if self.engine != Engine::Graphics || self.local_memory.is_some() {
             return Ok(None);
         }
-        let (handle, given) = device.alloc_video_memory(LOCAL_MEMORY_BYTES)?;
+        let (handle, given) = device.alloc_video_memory(LOCAL_MEMORY_BYTES, MemoryKind::PLAIN)?;
         let mapped = device.map(
             space,
             &Mapping {

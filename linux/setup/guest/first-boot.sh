@@ -63,6 +63,8 @@ refresh() {
     fi
     # Only if the first boot diverted it: the wrapper needs Xwayland.real beside it.
     [ ! -e "$root/usr/bin/Xwayland.real" ] || install -m 755 "$here/Xwayland" "$root/usr/bin/Xwayland"
+    # The AMD hook too, so an AMD card's guest takes its new Mesa trigger the way a first boot installs it.
+    install -D -m 644 "$here/files/hooks/apt-nvfwd-mesa.conf" "$root/etc/apt/apt.conf.d/90nvfwd-mesa"
     ln -sf "$here/check.sh" "$root/usr/local/sbin/nvfwd-check"
     systemctl daemon-reload
     systemctl enable "$here/units/nvfwd-gpu.service" "$here/units/nvfwd-desktop.service"

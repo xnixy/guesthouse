@@ -170,6 +170,20 @@ class OwnRefresh(unittest.TestCase):
         self.guest.run()
         self.assertIn("PowerButtonAction=8", self.guest.read("etc/xdg/powerdevilrc"))
 
+    def test_an_amd_guest_takes_its_amd_units_and_hook_and_not_the_forwarded_gpus(self):
+        # An AMD guest is known by its unit, and has no NVIDIA driver image to refresh from.
+        write(self.guest.path("etc/systemd/system/nvfwd-amd.service"), "old\n")
+        result = self.guest.run("--if-changed")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotEqual(self.guest.read("usr/lib/nvfwd/check.sh"), OLD_MARK, "its scripts are refreshed")
+        self.assertIn("systemctl enable nvfwd-amd.service", self.guest.lines("systemctl"))
+        self.assertTrue(os.path.exists(self.guest.path("etc/dnf/libdnf5-plugins/actions.d/nvfwd-mesa.actions")),
+                        "the Mesa hook is reinstalled")
+        # The forwarded GPU's settings are left out, so nothing needs a driver image.
+        self.assertNotIn("systemctl enable nvfwd-gpu.service nvfwd-desktop-watch.service",
+                         self.guest.lines("systemctl"))
+        self.assertFalse(os.path.exists(self.guest.path("etc/modprobe.d/nvfwd.conf")))
+
 
 class GpuUpHandsOver(unittest.TestCase):
     def guest(self, refresh_exit):

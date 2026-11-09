@@ -182,10 +182,18 @@ if [ "${1:-}" = --refresh ]; then
     family=$own_family
     kernel=$(uname -r)
     copy_scripts
-    install_settings
-    label_for_selinux
-    systemctl daemon-reload
-    systemctl enable nvfwd-gpu.service nvfwd-desktop-watch.service
+    # An AMD guest has no NVIDIA driver and keeps its own units, so it takes this image's AMD scripts,
+    # units and Mesa hook, not the forwarded GPU's settings, and needs no driver image to do it.
+    if [ -e "$units/nvfwd-amd.service" ]; then
+        . "$here/amd/setup-amd.sh"
+        install_mesa_hook
+        install_amd_units
+    else
+        install_settings
+        label_for_selinux
+        systemctl daemon-reload
+        systemctl enable nvfwd-gpu.service nvfwd-desktop-watch.service
+    fi
     exit 0
 fi
 

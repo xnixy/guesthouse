@@ -348,6 +348,17 @@ impl Backend for AmdBackend {
         node < self.facts.node_count
     }
 
+    /// The kernel driver writes nothing back into a context's private data, so it is only checked.
+    fn context_data_valid(&mut self, _process: u32, node: u32, private: &[u8]) -> bool {
+        match protocol::context::check(private) {
+            Ok(_) => true,
+            Err(refused) => {
+                log::info!("refused a context on node {node}: {}", refused.0);
+                false
+            }
+        }
+    }
+
     fn start_work(&mut self, _host: &mut dyn HostServices, _work: &Work<'_>) -> WorkStart {
         // amdgpu submission is a blocking ioctl that signals a sync object, not a doorbell the core
         // rings, and completion arrives on an eventfd, not in fence memory. The trait has no event

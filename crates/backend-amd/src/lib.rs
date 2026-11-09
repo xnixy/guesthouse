@@ -115,6 +115,11 @@ impl AmdBackend {
     }
 }
 
+/// Whether every range lies inside the card's usable addresses, `start..end`.
+fn ranges_fit(ranges: &[GpuRange], start: u64, end: u64) -> bool {
+    ranges.iter().all(|range| range.start >= start && range.end <= end && range.start <= range.end)
+}
+
 /// Builds the facts the guest is told from the card's own readings.
 fn facts_from(info: &DeviceInfo) -> AdapterFacts {
     AdapterFacts {
@@ -226,7 +231,16 @@ impl Backend for AmdBackend {
         Err(BackendError::new("AMD backend does not move allocations yet"))
     }
 
+    /// The core's ranges are its own, not the card's. amdgpu keeps the bottom and top of its address
+    /// range, so a space reaching into either is refused here rather than failing at the first map.
     fn create_address_space(&mut self, ranges: &[GpuRange]) -> Result<SpaceId, BackendError> {
+        let info = self.device.info();
+        if !ranges_fit(ranges, info.va_start, info.va_end) {
+            return Err(BackendError::new(format!(
+                "these GPU ranges reach past what the card offers, {:#x}..{:#x}",
+                info.va_start, info.va_end
+            )));
+        }
         let space = SpaceId(self.new_id());
         self.spaces.insert(space, Space { ranges: ranges.to_vec(), mappings: BTreeMap::new() });
         Ok(space)
@@ -396,5 +410,19 @@ impl Backend for AmdBackend {
 
     fn poll_staging_copy(&mut self, _host: &mut dyn HostServices, _now: Instant) -> Option<Status> {
         Some(Status::UNSUCCESSFUL)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn address_spaces_stay_inside_the_cards_range() {
+        let ranges = [GpuRange { start: 0x400_0000, end: 0x1_0000_0000 }];
+        assert!(ranges_fit(&ranges, 0x1_0000, 0x8000_0000_0000));
+        assert!(!ranges_fit(&ranges, 0x800_0000, 0x8000_0000_0000));
+        assert!(!ranges_fit(&ranges, 0x1_0000, 0x8000_0000));
+        assert!(ranges_fit(&[], 0, 0));
     }
 }

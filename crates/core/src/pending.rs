@@ -142,3 +142,12 @@ pub enum GateStep {
 }
 
 pub type Gate = VecDeque<GateStep>;
+
+/// A wait that more than one queue of a context is held behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedWait {
+    /// The queues still behind it.
+    pub queues_left: usize,
+    /// One queue has gone through, and took what the wait holds for the others.
+    pub went: bool,
+}

@@ -5,7 +5,7 @@ use crate::deferred::{Deferred, DeferredAction, FreedAllocation};
 use crate::fault_rate::{FAULT_WINDOW, MOST_FAULTS};
 use crate::pending::{
     GATE_TIMEOUT, GateStep, MOST_FAILED_QUEUES, Pending, QUEUE_TIMEOUT, QueueAction, RING_ROOM_TIMEOUT,
-    Signal, Target, Waiting,
+    SharedWait, Signal, Target, Waiting,
 };
 use crate::session::{Answer, HeldReply, ReplyTicket};
 use crate::tables::Queue;
@@ -271,14 +271,21 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
         let queues = self.context_queues.get(&handle).cloned().unwrap_or_else(|| vec![handle]);
         let deadline = Instant::now() + GATE_TIMEOUT;
+        let id = self.next_wait;
+        self.next_wait += 1;
+        // A wait on a context is one wait, however many queues the context has: a mutex it takes is
+        // taken once, and lets every one of them through.
+        let mut went = false;
+        let mut held = 0;
         for queue in queues {
-            if !self.gates.contains_key(&queue) && self.signals_finished(&signals, false) {
-                self.take_tokens(&signals, false);
+            if !self.gates.contains_key(&queue) && (went || self.signals_finished(&signals, false)) {
+                if !went {
+                    self.take_tokens(&signals, false);
+                    went = true;
+                }
                 continue;
             }
-            let id = self.next_wait;
-            self.next_wait += 1;
-            self.join_lines(&signals, id);
+            held += 1;
             let step = GateStep::Wait { signals: signals.clone(), deadline, id };
             if let Some(gate) = self.gates.get_mut(&queue) {
                 gate.push_back(step);
@@ -286,6 +293,12 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 self.gates.insert(queue, VecDeque::from([step]));
                 self.pending.push(Pending::Gate { queue });
             }
+        }
+        if held > 0 && !went {
+            self.join_lines(&signals, id);
+        }
+        if held > 1 || (held > 0 && went) {
+            self.shared_waits.insert(id, SharedWait { queues_left: held, went });
         }
         answer_status(Status::SUCCESS, out);
         Ok(())
@@ -296,16 +309,14 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         while let Some(step) = self.gates.get_mut(&queue).and_then(VecDeque::pop_front) {
             match step {
                 GateStep::Wait { signals, deadline, id } => {
-                    let can_go = self.wait_can_go(&signals, id);
+                    let went = self.shared_waits.get(&id).is_some_and(|shared| shared.went);
+                    let can_go = went || self.wait_can_go(&signals, id);
                     if !can_go && now < deadline {
                         let held = GateStep::Wait { signals, deadline, id };
                         self.gates.get_mut(&queue).expect("just read").push_front(held);
                         return false;
                     }
-                    self.leave_lines(&signals, id);
-                    if can_go {
-                        self.take_tokens(&signals, false);
-                    }
+                    self.leave_wait(id, &signals, can_go);
                 }
                 GateStep::Ring { doorbell, fence, value } => self.ring(queue, doorbell, fence, value),
                 GateStep::Copy { id } => {
@@ -318,6 +329,31 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
         self.gates.remove(&queue);
         true
+    }
+
+    /// One queue is done with a wait, through it or past its deadline. The first queue through takes
+    /// what the wait holds, for all the queues it covers.
+    pub(crate) fn leave_wait(&mut self, id: u64, signals: &[Signal], through: bool) {
+        let Some(shared) = self.shared_waits.get_mut(&id) else {
+            self.leave_lines(signals, id);
+            if through {
+                self.take_tokens(signals, false);
+            }
+            return;
+        };
+        let first_through = through && !shared.went;
+        shared.went |= through;
+        shared.queues_left -= 1;
+        let last = shared.queues_left == 0;
+        if last {
+            self.shared_waits.remove(&id);
+        }
+        if first_through {
+            self.take_tokens(signals, false);
+        }
+        if first_through || last {
+            self.leave_lines(signals, id);
+        }
     }
 
     /// Lets work run, or leaves it behind the queue's gate if there is one.

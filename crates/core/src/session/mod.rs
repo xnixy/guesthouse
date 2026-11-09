@@ -23,7 +23,7 @@ use crate::gpu_addresses::{AddressUse, GpuAddresses};
 use crate::guest_ranges::GuestRanges;
 use crate::handles::HandleCounter;
 use crate::io_space::IoSpace;
-use crate::pending::{Gate, Pending};
+use crate::pending::{Gate, Pending, SharedWait};
 use crate::sync_table::SyncTable;
 use crate::tables::{Allocation, Mapping, Queue, ReservedRange};
 use crate::timing::Timings;
@@ -153,6 +153,8 @@ pub struct Session<B, M> {
     pub(crate) gates: HashMap<u32, Gate>,
     /// The number of the next wait to join a line.
     pub(crate) next_wait: u64,
+    /// Waits that hold more than one queue, by number.
+    pub(crate) shared_waits: HashMap<u64, SharedWait>,
     /// Allocations whose first lock has waited for the GPU once, and goes ahead when it comes back.
     pub(crate) first_locks_waited: HashSet<u32>,
     /// The display driver has registered a ring since the guest last started, so its process holds
@@ -222,6 +224,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             context_processes: HashMap::new(),
             present_limits: HashMap::new(),
             next_wait: 0,
+            shared_waits: HashMap::new(),
             first_locks_waited: HashSet::new(),
             display_driver_seen: false,
             gates: HashMap::new(),

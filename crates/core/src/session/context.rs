@@ -206,7 +206,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let closed = self.queues.remove(&handle);
         for step in self.gates.remove(&handle).unwrap_or_default() {
             if let GateStep::Wait { signals, id, .. } = step {
-                self.leave_lines(&signals, id);
+                self.leave_wait(id, &signals, false);
             }
         }
         for queues in self.context_queues.values_mut() {

@@ -1523,6 +1523,58 @@ mod queues {
     }
 
     #[test]
+    fn a_wait_on_a_context_takes_a_mutex_once_for_all_its_queues() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        let context = create_context(&mut session, 0);
+        let queues = [(); 3].map(|_| create_queue(&mut session, context).0);
+        let mutex = create_mutex(&mut session);
+        gpu_wait(&mut session, context, mutex, 0);
+        queues.iter().for_each(|&queue| submit(&mut session, queue, 1));
+        assert_eq!(session.backend().doorbells, queues.map(|queue| (queue, 1)));
+        assert!(session.gates.is_empty());
+        assert!(session.shared_waits.is_empty());
+    }
+
+    #[test]
+    fn a_context_waiting_on_a_held_mutex_lets_all_its_queues_go_on_one_signal() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        let (holder, waiter) = (create_context(&mut session, 6), create_context(&mut session, 0));
+        create_queue(&mut session, holder);
+        let queues = [(); 2].map(|_| create_queue(&mut session, waiter).0);
+        let mutex = create_mutex(&mut session);
+        gpu_wait(&mut session, holder, mutex, 0);
+        gpu_wait(&mut session, waiter, mutex, 0);
+        queues.iter().for_each(|&queue| submit(&mut session, queue, 1));
+        assert!(session.backend().doorbells.is_empty());
+        signal_mutex(&mut session, mutex);
+        let _ = session.poll(Instant::now());
+        assert_eq!(session.backend().doorbells, queues.map(|queue| (queue, 1)));
+        assert!(session.shared_waits.is_empty());
+        let object = session.sync_objects.get(mutex).unwrap();
+        assert_eq!(object.tokens.unwrap().free, 0, "the waiter holds it once");
+    }
+
+    #[test]
+    fn a_closed_queue_leaves_a_shared_wait_to_the_others() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        let (holder, waiter) = (create_context(&mut session, 6), create_context(&mut session, 0));
+        create_queue(&mut session, holder);
+        let queues = [(); 2].map(|_| create_queue(&mut session, waiter).0);
+        let mutex = create_mutex(&mut session);
+        gpu_wait(&mut session, holder, mutex, 0);
+        gpu_wait(&mut session, waiter, mutex, 0);
+        session.close_queue(queues[0]);
+        submit(&mut session, queues[1], 1);
+        signal_mutex(&mut session, mutex);
+        let _ = session.poll(Instant::now());
+        assert_eq!(session.backend().doorbells, [(queues[1], 1)]);
+        assert!(session.shared_waits.is_empty());
+    }
+
+    #[test]
     fn a_held_mutex_is_given_up_on_at_the_gates_time_limit() {
         let mut session = session();
         session.backend_mut().run_work = true;

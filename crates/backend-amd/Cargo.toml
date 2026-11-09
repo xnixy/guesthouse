@@ -21,5 +21,11 @@ log = "0.4"
 name = "amd-probe"
 path = "src/bin/amd_probe.rs"
 
+[[bin]]
+# Builds the guest's adapter block from the real card and checks its key fields against what amdgpu
+# reports in sysfs. Needs a real AMD render node.
+name = "amd-adapter-check"
+path = "src/bin/amd_adapter_check.rs"
+
 [lints]
 workspace = true

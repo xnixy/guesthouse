@@ -93,3 +93,25 @@ fn the_backend_trait_opens_allocates_maps_and_exports() {
     backend.release_memory(memory);
     backend.destroy_address_space(space);
 }
+
+#[test]
+fn the_adapter_block_matches_what_amdgpu_reports() {
+    use guesthouse_backend_amd::protocol::adapter_info::{self, KeyFields};
+    let Some(device) = card() else {
+        eprintln!("no AMD render node; skipping the adapter block check");
+        return;
+    };
+    let info = device.info();
+    let key = KeyFields::read(&adapter_info::build(info)).unwrap();
+    assert!(key.checksum_holds);
+    assert!(key.in_virtual_machine);
+    assert_eq!(key.chip_id, u32::from(info.device_id));
+    let folder = device.device_folder().unwrap();
+    let sysfs = |name: &str| std::fs::read_to_string(folder.join(name)).ok()?.trim().parse::<u64>().ok();
+    if let Some(vram) = sysfs("mem_info_vram_total") {
+        assert_eq!(key.visible_heap + key.invisible_heap, vram);
+    }
+    if let Some(major) = sysfs("ip_discovery/die/0/11/0/major") {
+        assert_eq!(u64::from(info.details.gfx_version.0), major);
+    }
+}

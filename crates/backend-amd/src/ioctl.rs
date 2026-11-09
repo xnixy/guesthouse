@@ -128,6 +128,11 @@ pub fn amd_render_node(address: Option<&str>) -> Option<PathBuf> {
     amd_render_node_in(Path::new(DRM_CLASS_FOLDER), Path::new(DRM_DEVICE_FOLDER), address)
 }
 
+/// The sysfs folder of a render node's PCI device, where what INFO leaves out can be read.
+pub fn device_folder(node: &Path) -> Option<PathBuf> {
+    Some(Path::new(DRM_CLASS_FOLDER).join(node.file_name()?).join("device"))
+}
+
 fn amd_render_node_in(class_folder: &Path, device_folder: &Path, address: Option<&str>) -> Option<PathBuf> {
     let mut names: Vec<_> = fs::read_dir(class_folder)
         .ok()?

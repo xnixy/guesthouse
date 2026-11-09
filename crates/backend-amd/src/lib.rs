@@ -19,10 +19,13 @@ mod device;
 mod info;
 mod ioctl;
 mod memory;
+pub mod protocol;
 mod submit;
 
 pub use device::{Device, Mapping};
-pub use info::{DeviceInfo, EngineSet, HW_IP_DMA, HW_IP_GFX, read_device_info, read_gpu_clock};
+pub use info::{
+    CardDetails, DeviceInfo, EngineSet, Firmware, HW_IP_DMA, HW_IP_GFX, read_device_info, read_gpu_clock,
+};
 pub use ioctl::AMD_VENDOR;
 pub use memory::{CpuAccess, DOMAIN_GTT, DOMAIN_VRAM, GemHandle, MapFlags, MemoryType};
 pub use submit::{Context, Syncobj, sdma_write_ib, submit, wait_eventfd};
@@ -311,8 +314,8 @@ impl Backend for AmdBackend {
         // escape hook has neither yet. This is guest-protocol work.
     }
 
-    fn adapter_answer(&mut self, _query: &VendorQuery<'_>, _out: &mut Vec<u8>) -> Option<Status> {
-        None
+    fn adapter_answer(&mut self, query: &VendorQuery<'_>, out: &mut Vec<u8>) -> Option<Status> {
+        protocol::adapter_info::answer(query, self.device.info(), out)
     }
 
     fn registry_value(&mut self, _name: &RegistryName) -> Option<RegistryValue> {

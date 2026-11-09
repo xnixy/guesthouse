@@ -6,6 +6,7 @@ use crate::memory::GemHandle;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 /// An open render node, with what was read off the card at open time. Every address space the GPU
@@ -14,6 +15,7 @@ use std::ptr;
 pub struct Device {
     file: File,
     info: DeviceInfo,
+    folder: Option<PathBuf>,
 }
 
 impl Device {
@@ -22,8 +24,9 @@ impl Device {
         let node = ioctl::amd_render_node(address)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no AMD render node found"))?;
         let file = OpenOptions::new().read(true).write(true).open(&node)?;
-        let info = info::read_device_info(&file)?;
-        Ok(Self { file, info })
+        let folder = ioctl::device_folder(&node);
+        let info = info::read_device_info(&file, folder.as_deref())?;
+        Ok(Self { file, info, folder })
     }
 
     pub fn info(&self) -> &DeviceInfo {
@@ -32,6 +35,11 @@ impl Device {
 
     pub fn file(&self) -> &File {
         &self.file
+    }
+
+    /// The card's PCI device folder in sysfs, where amdgpu reports what it knows outside INFO.
+    pub fn device_folder(&self) -> Option<&Path> {
+        self.folder.as_deref()
     }
 
     /// The GPU's clock in nanoseconds.

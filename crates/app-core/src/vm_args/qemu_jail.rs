@@ -110,15 +110,15 @@ impl VmPlan {
             return Network { tcp_bind, tcp_connect: Ports::Any, udp_bind: Ports::Any, udp_send: Ports::Any };
         }
         // A restricted user network only answers forwards, and asks the host's resolver for names.
+        let udp_forwards = self.forwarded_ports(Protocol::Udp);
+        // A UDP forward answers to whatever port the program on this PC sent from, such as
+        // Moonlight's for Sunshine's video, so its replies can go to any port. The guest still
+        // can't start anything of its own: the restricted network drops it.
+        let udp_send = if udp_forwards.is_empty() { Ports::Only(vec![DNS_PORT]) } else { Ports::Any };
         let mut udp_bind = vec![EPHEMERAL_PORT];
-        udp_bind.extend(self.forwarded_ports(Protocol::Udp));
+        udp_bind.extend(udp_forwards);
         let tcp_connect = if self.shared_folder().is_some() { Ports::Any } else { Ports::none() };
-        Network {
-            tcp_bind,
-            tcp_connect,
-            udp_bind: Ports::Only(udp_bind),
-            udp_send: Ports::Only(vec![DNS_PORT]),
-        }
+        Network { tcp_bind, tcp_connect, udp_bind: Ports::Only(udp_bind), udp_send }
     }
 
     fn firmware_code(&self) -> &Path {

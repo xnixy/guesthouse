@@ -70,11 +70,25 @@ fn nat_holds_binds_to_the_forwards_and_lets_the_guest_out() {
 
 #[test]
 fn a_restricted_network_reaches_nothing_but_names() {
+    let machine = Machine {
+        network_mode: Mode::None,
+        forwards: vec![Forward::new(Protocol::Tcp, 8080, 80)],
+        ..windows()
+    };
+    let (_scratch, plan) = jailed(machine, true);
+    let network = plan.qemu_jail_plan(&jail(true)).network;
+    assert_eq!(network.tcp_connect, Ports::none());
+    assert_eq!(network.udp_bind, Ports::Only(vec![0]));
+    assert_eq!(network.udp_send, Ports::Only(vec![DNS_PORT]));
+}
+
+#[test]
+fn a_udp_forward_answers_whatever_port_it_was_sent_from() {
     let (_scratch, plan) = jailed(Machine { network_mode: Mode::None, ..windows() }, true);
     let network = plan.qemu_jail_plan(&jail(true)).network;
     assert_eq!(network.tcp_connect, Ports::none());
     assert_eq!(network.udp_bind, Ports::Only(vec![0, 9000]));
-    assert_eq!(network.udp_send, Ports::Only(vec![DNS_PORT]));
+    assert_eq!(network.udp_send, Ports::Any);
 }
 
 #[test]
@@ -163,7 +177,7 @@ fn on_passt_qemu_only_has_the_private_link() {
     let (_scratch, plan) = on_passt(windows(), true);
     let network = plan.qemu_jail_plan(&jail(true)).network;
     assert_eq!(network.tcp_connect, Ports::none());
-    assert_eq!(network.udp_send, Ports::Only(vec![DNS_PORT]));
+    assert_eq!(network.udp_send, Ports::Any, "for the UDP forward's replies");
     assert_eq!(network.tcp_bind, Ports::Only(vec![plan.agent_port, 8080]));
 }
 

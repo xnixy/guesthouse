@@ -28,10 +28,29 @@ pub enum AddressUse {
     Host,
     /// A slot of the frame ring, which comes and goes with viewers and screen modes.
     FrameRing,
-    /// A whole allocation, mapped where the host chose.
+    /// A whole allocation in video memory, mapped where the host chose.
     Mapped,
+    /// The same in system memory: the guest's own pages, or video memory a first lock moved there.
+    MappedSystem,
     /// Set aside by the guest, for mappings it places itself.
     Reserved,
+}
+
+impl AddressUse {
+    /// The use for an allocation mapped where the host chose, by the memory behind it.
+    pub fn mapped(system_memory: bool) -> Self {
+        if system_memory { Self::MappedSystem } else { Self::Mapped }
+    }
+
+    /// Where a range can come from once no new addresses are left: a range that held the other kind
+    /// of memory, which is better than refusing the mapping.
+    fn last_resort(self) -> Option<Self> {
+        match self {
+            Self::Mapped => Some(Self::MappedSystem),
+            Self::MappedSystem => Some(Self::Mapped),
+            Self::Host | Self::FrameRing | Self::Reserved => None,
+        }
+    }
 }
 
 /// A bump allocator with a free list per shape of range. Addresses stay unique across every address
@@ -40,6 +59,11 @@ pub enum AddressUse {
 /// A program that makes and frees memory all day would run out of new addresses in the end. Freed
 /// ranges are not split or joined, and go back only to the same use, size and alignment, because
 /// handing one to a different use has made the vendor's driver refuse mappings.
+///
+/// A mapped range also goes back only to the kind of memory it held last. Video memory mapped where
+/// system memory was has made the vendor's compute launches fault with an invalid address space,
+/// however long the range rested and whatever caches were dropped first. Ranges that held video
+/// memory go back to video memory without trouble.
 #[derive(Debug)]
 pub struct GpuAddresses {
     next: u64,
@@ -129,7 +153,10 @@ impl GpuAddresses {
         if let Some(spare) = self.spare(size, align, usage, window) {
             return Some(spare);
         }
-        let base = self.next_clear(size, align).filter(|&base| window.holds(base, size))?;
+        let Some(base) = self.next_clear(size, align).filter(|&base| window.holds(base, size)) else {
+            let other = usage.last_resort()?;
+            return self.spare(size, align, other, window);
+        };
         self.next = base + size;
         if usage == AddressUse::Host {
             self.host.push((base, base + size));
@@ -319,6 +346,37 @@ mod tests {
         assert_ne!(addresses.take(0x10000, ALLOCATION_ALIGN, AddressUse::Reserved), Ok(first));
         assert_ne!(addresses.take(0x20000, ALLOCATION_ALIGN, usage), Ok(first));
         assert_eq!(addresses.take(0x10000, ALLOCATION_ALIGN, usage), Ok(first));
+    }
+
+    #[test]
+    fn a_range_that_held_system_memory_goes_back_to_system_memory() {
+        let mut addresses = GpuAddresses::new();
+        let (video, system) = (AddressUse::mapped(false), AddressUse::mapped(true));
+        let first = addresses.take(0x10000, ALLOCATION_ALIGN, video).unwrap();
+        addresses.give_back(first, 0x10000, ALLOCATION_ALIGN, system);
+        assert_ne!(addresses.take(0x10000, ALLOCATION_ALIGN, video), Ok(first));
+        assert_eq!(addresses.take(0x10000, ALLOCATION_ALIGN, system), Ok(first));
+    }
+
+    #[test]
+    fn a_range_that_held_video_memory_goes_back_to_video_memory() {
+        let mut addresses = GpuAddresses::new();
+        let (video, system) = (AddressUse::mapped(false), AddressUse::mapped(true));
+        let first = addresses.take(0x10000, ALLOCATION_ALIGN, system).unwrap();
+        addresses.give_back(first, 0x10000, ALLOCATION_ALIGN, video);
+        assert_ne!(addresses.take(0x10000, ALLOCATION_ALIGN, system), Ok(first));
+        assert_eq!(addresses.take(0x10000, ALLOCATION_ALIGN, video), Ok(first));
+    }
+
+    #[test]
+    fn with_no_new_addresses_left_a_range_of_the_other_memory_is_used() {
+        let last = GPU_RANGES[1].end - 0x10000;
+        let mut addresses = GpuAddresses::keeping_clear(&[GpuRange { start: 0, end: last }]);
+        let (video, system) = (AddressUse::mapped(false), AddressUse::mapped(true));
+        let only = addresses.take(0x10000, ALLOCATION_ALIGN, system).unwrap();
+        addresses.give_back(only, 0x10000, ALLOCATION_ALIGN, system);
+        assert_eq!(addresses.take(0x10000, ALLOCATION_ALIGN, video), Ok(only));
+        assert!(addresses.take(0x10000, ALLOCATION_ALIGN, video).is_err());
     }
 
     #[test]

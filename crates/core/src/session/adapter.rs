@@ -11,7 +11,9 @@ use guesthouse_messages::adapter::{
     IdentityAnswer, SetIoSpace, adapter_identity, description_answer, driver_caps, flip_queue,
     node_description, node_of, physical_adapter_ids, segment_sizes,
 };
-use guesthouse_messages::address::{memory_answer, memory_group};
+use guesthouse_messages::address::{
+    ReservationRequest, available_for_reservation, memory_answer, memory_group,
+};
 use guesthouse_messages::indirect;
 use guesthouse_messages::queue::{DriverEscape, clock_answer};
 use guesthouse_messages::registry::RegistryQuery;
@@ -122,14 +124,39 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     }
 
     pub(super) fn query_video_memory(&mut self, message: &[u8], out: &mut Vec<u8>) -> Handled {
-        let limits = self.config.limits;
-        if memory_group(message)? == VIDEO_MEMORY_GROUP {
-            let usage = self.allocations.values().map(|allocation| allocation.size).sum();
-            memory_answer(limits.video_budget, usage, out);
+        let group = memory_group(message)?;
+        let process = MessageHeader::process_of(message)?;
+        let reserved = self.reservations.get(&(process, group)).copied().unwrap_or(0);
+        let usage = if group == VIDEO_MEMORY_GROUP {
+            self.allocations.values().map(|allocation| allocation.size).sum()
         } else {
-            memory_answer(limits.system_budget, 0, out);
-        }
+            0
+        };
+        memory_answer(self.group_budget(group), usage, reserved, out);
         Ok(())
+    }
+
+    /// Keeps the amount a process asks to have kept, up to what a usage query says it may. Nothing
+    /// is set aside: the number only comes back in the process's own usage queries.
+    pub(super) fn change_video_memory_reservation(&mut self, message: &[u8], out: &mut Vec<u8>) -> Handled {
+        let request = ReservationRequest::parse(message)?;
+        let process = MessageHeader::process_of(message)?;
+        if request.bytes > available_for_reservation(self.group_budget(request.group)) {
+            answer_status(Status::INVALID_PARAMETER, out);
+            return Ok(());
+        }
+        if request.bytes == 0 {
+            self.reservations.remove(&(process, request.group));
+        } else {
+            self.reservations.insert((process, request.group), request.bytes);
+        }
+        answer_status(Status::SUCCESS, out);
+        Ok(())
+    }
+
+    fn group_budget(&self, group: u32) -> u64 {
+        let limits = self.config.limits;
+        if group == VIDEO_MEMORY_GROUP { limits.video_budget } else { limits.system_budget }
     }
 
     /// The two clocks agree in speed but not in where they start, which is all the guest needs.

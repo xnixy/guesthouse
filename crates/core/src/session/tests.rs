@@ -399,6 +399,41 @@ mod adapter {
         assert_eq!(u64_at(&reply, 24), Ok(3 << 30));
     }
 
+    fn reserve(session: &mut TestSession, group: u32, bytes: u64) -> u32 {
+        let mut request = message(Command::ChangeVideoMemoryReservation, 0x38);
+        set_u32(&mut request, 0x24, group);
+        set_u64(&mut request, 0x28, bytes);
+        status_of(&send(session, &request))
+    }
+
+    #[test]
+    fn a_reservation_comes_back_in_the_usage_query() {
+        let mut session = session();
+        assert_eq!(reserve(&mut session, 0, 1 << 30), SUCCESS);
+        let reply = send(&mut session, &message(Command::QueryVideoMemory, 0x20));
+        assert_eq!(u64_at(&reply, 16), Ok(1 << 30));
+        assert_eq!(reserve(&mut session, 0, 0), SUCCESS);
+        let reply = send(&mut session, &message(Command::QueryVideoMemory, 0x20));
+        assert_eq!(u64_at(&reply, 16), Ok(0));
+    }
+
+    #[test]
+    fn a_reservation_up_to_what_the_query_offers_is_kept() {
+        let mut session = session();
+        let reply = send(&mut session, &message(Command::QueryVideoMemory, 0x20));
+        let available = u64_at(&reply, 24).unwrap();
+        assert_eq!(reserve(&mut session, 0, available), SUCCESS);
+        assert_eq!(reserve(&mut session, 0, available + 1), Status::INVALID_PARAMETER.0);
+    }
+
+    #[test]
+    fn a_reservation_goes_with_its_process() {
+        let mut session = session();
+        reserve(&mut session, 1, 1 << 20);
+        send(&mut session, &message(Command::DestroyProcess, 0x20));
+        assert!(session.reservations.is_empty());
+    }
+
     #[test]
     fn the_system_group_reports_guest_ram() {
         let mut request = message(Command::QueryVideoMemory, 0x20);

@@ -158,11 +158,35 @@ pub fn memory_group(message: &[u8]) -> Result<u32, Malformed> {
     u32_at(message, 0x1C)
 }
 
-pub fn memory_answer(budget: u64, usage: u64, out: &mut Vec<u8>) {
+/// Answers a usage query: the budget, what's in use, what this process has reserved, and how much
+/// it may reserve.
+pub fn memory_answer(budget: u64, usage: u64, reserved: u64, out: &mut Vec<u8>) {
     put_u64(out, budget);
     put_u64(out, usage);
-    put_u64(out, 0);
-    put_u64(out, budget / 2);
+    put_u64(out, reserved);
+    put_u64(out, available_for_reservation(budget));
+}
+
+/// How much of a budget a process may reserve.
+pub fn available_for_reservation(budget: u64) -> u64 {
+    budget / 2
+}
+
+/// A process asking that some memory be kept for it, which `SetVideoMemoryReservation` sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReservationRequest {
+    /// Zero is video memory, as in a usage query.
+    pub group: u32,
+    pub bytes: u64,
+}
+
+impl ReservationRequest {
+    const GROUP: usize = 0x24;
+    const BYTES: usize = 0x28;
+
+    pub fn parse(message: &[u8]) -> Result<Self, Malformed> {
+        Ok(Self { group: u32_at(message, Self::GROUP)?, bytes: u64_at(message, Self::BYTES)? })
+    }
 }
 
 #[cfg(test)]
@@ -203,7 +227,18 @@ mod tests {
         two_values_and_status(1, 2, Status::SUCCESS, &mut out);
         assert_eq!(out.len(), 24);
         let mut out = Vec::new();
-        memory_answer(100, 7, &mut out);
+        memory_answer(100, 7, 0, &mut out);
         assert_eq!(u64_at(&out, 24), Ok(50));
+    }
+
+    #[test]
+    fn a_reservation_reads_its_group_and_size() {
+        let mut bytes = [0; 0x38];
+        bytes[0x24] = 1;
+        set_u64(&mut bytes, 0x28, 0x4000_0000);
+        assert_eq!(
+            ReservationRequest::parse(&bytes),
+            Ok(ReservationRequest { group: 1, bytes: 0x4000_0000 })
+        );
     }
 }

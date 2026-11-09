@@ -73,6 +73,7 @@ commands! {
     DescribeNode = 44,
     IsSyncObjectSignaled = 46,
     QueryStatistics = 48,
+    ChangeVideoMemoryReservation = 49,
     CreateHardwareQueue = 50,
     DestroyHardwareQueue = 51,
     SubmitToHardwareQueue = 52,

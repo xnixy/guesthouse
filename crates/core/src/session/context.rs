@@ -37,6 +37,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.guest_pids.remove(&process);
         self.process_going(process);
         self.context_processes.retain(|_, owner| *owner != process);
+        self.reservations.retain(|&(owner, _), _| owner != process);
         self.backend.process_gone(process);
         if let Some(space) = self.spaces.remove(&process) {
             let action = DeferredAction::CloseSpace(space);

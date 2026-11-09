@@ -150,6 +150,8 @@ pub struct Session<B, M> {
     pub(crate) context_processes: HashMap<u32, u32>,
     /// Each device's limit on queued presents, once it has set one.
     pub(crate) present_limits: HashMap<u32, u32>,
+    /// What each process has asked to keep of each memory group, by (process, group).
+    pub(crate) reservations: HashMap<(u32, u32), u64>,
     pub(crate) gates: HashMap<u32, Gate>,
     /// The number of the next wait to join a line.
     pub(crate) next_wait: u64,
@@ -221,6 +223,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             context_hints: HashMap::new(),
             context_processes: HashMap::new(),
             present_limits: HashMap::new(),
+            reservations: HashMap::new(),
             next_wait: 0,
             first_locks_waited: HashSet::new(),
             display_driver_seen: false,
@@ -348,6 +351,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             Some(C::QueryDriverCaps) => self.query_driver_caps(message, out)?,
             Some(C::DescribeNode) => self.describe_node(message, out)?,
             Some(C::QueryVideoMemory) => self.query_video_memory(message, out)?,
+            Some(C::ChangeVideoMemoryReservation) => self.change_video_memory_reservation(message, out)?,
             Some(C::QueryClockCalibration) => self.query_clock(out)?,
             Some(C::GetRegistryKeys) => answer_no_registry_keys(out),
             Some(C::QueryStatistics) => self.refuse_statistics(out),

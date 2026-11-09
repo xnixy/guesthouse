@@ -312,10 +312,10 @@ impl Backend for AmdBackend {
     fn finish_queue_data(
         &mut self,
         _queue: u32,
-        _private: &mut [u8],
+        private: &mut [u8],
         _serial: u32,
     ) -> Result<(), BackendError> {
-        Ok(())
+        protocol::hw_queue::check(private).map_err(|refused| BackendError::new(refused.0))
     }
 
     fn escape(&mut self, _process: u32, _data: &mut [u8], _books: &GuestBooks<'_>) {

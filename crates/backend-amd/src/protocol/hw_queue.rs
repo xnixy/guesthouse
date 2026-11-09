@@ -1,20 +1,21 @@
 //! A new hardware queue's private data, UMDKMDIF_CREATEHWQUEUE_PRIVATE_DATA in AMD's open compute
 //! client.
 //!
-//! What is known of it is what the kernel driver reads to build a queue it schedules itself. Several
-//! of its fields point into the guest process's own memory, which the host can't follow, so those
-//! are only checked for being set. A queue the guest would feed from user mode has a doorbell the
-//! kernel writes back. Nothing here backs such a queue, so no doorbell is written, and the AQL
-//! queues the compute runtime asks for are refused, as they need a compute engine this backend
-//! doesn't give the guest yet.
+//! What is known of it is what the kernel driver reads to build a queue it schedules itself, from
+//! the guest's buffer as it came. Several of its fields point into the guest process's own memory,
+//! which the host can't follow, so those are only checked for being set. A queue the guest would
+//! feed from user mode is made by a different path in the kernel driver, which writes a doorbell
+//! back. Nothing here backs such a queue, so no doorbell is written. The AQL queues the compute
+//! runtime asks for are refused, as they need a compute engine this backend doesn't give the guest
+//! yet.
 
 use super::bytes::qword;
 
-/// Enough to hold every field read here.
+/// The highest field the kernel driver reads is a dword at 0x5C.
 const LEAST_SIZE: usize = 0x60;
 /// A pointer to the guest's queue description, which must be set.
 const DESCRIPTION_POINTER: usize = 0x30;
-/// Nonzero for an AQL queue.
+/// A byte, nonzero for an AQL queue.
 const AQL_MARK: usize = 0x58;
 
 /// Why the kernel driver, or this backend, would refuse this queue, for the log.
@@ -52,6 +53,13 @@ mod tests {
         let before = data.clone();
         assert_eq!(check(&data), Ok(()));
         assert_eq!(data, before);
+    }
+
+    #[test]
+    fn the_aql_mark_is_one_byte() {
+        let mut data = queue();
+        data[AQL_MARK + 1..].fill(0xFF);
+        assert_eq!(check(&data), Ok(()));
     }
 
     #[test]

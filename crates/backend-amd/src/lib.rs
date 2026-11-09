@@ -1,19 +1,20 @@
-//! The AMD backend's host-execution side.
+//! The AMD backend: the host's open amdgpu driver, and the private data AMD's Windows driver passes
+//! to it.
 //!
-//! This is the half of AMD support that is open and testable today: turning a guest's GPU work into
-//! real work on the host's AMD card through the open `amdgpu` kernel driver's DRM ioctls. It opens
-//! the render node, reads the card's facts, makes and maps buffers, and submits a command buffer
-//! that completes on an eventfd. None of it needs a Windows guest or any closed AMD code.
+//! The host-execution side turns a guest's GPU work into real work on the host's AMD card through
+//! amdgpu's DRM ioctls. It opens the render node, reads the card's facts, makes and maps buffers,
+//! and submits a command buffer that completes on an eventfd.
 //!
-//! The other half, the guest-protocol side, is the private WDDM blobs the guest's driver sends and
-//! expects back. That is not here. The trait methods that serve it ([`Backend::describe_allocation`],
-//! [`Backend::finish_allocation_data`], [`Backend::escape`], the staging copies and so on) are
-//! placeholders, marked below, waiting on the protocol layouts.
+//! The guest-protocol side, in [`protocol`], is the private data in the WDDM calls the guest's
+//! driver makes: it answers the adapter block, checks allocations, contexts, queues, submissions and
+//! escapes the way the kernel driver would, and tiles a surface's host buffer the way the guest laid
+//! it out. It is plain byte work, tested without a guest.
 //!
 //! Where the backend trait is shaped for NVIDIA and does not fit amdgpu, the mismatch is called out
 //! at the method. The chief one is submission: amdgpu's `DRM_AMDGPU_CS` is a blocking ioctl whose
 //! completion arrives on an event source, not a doorbell the trait rings. The real submission path
-//! lives in [`submit`] and is proven by the `amd-probe` binary, not by [`Backend::start_work`].
+//! lives in [`submit`] and is proven by the `amd-probe` binary, not by [`Backend::start_work`],
+//! which only checks the guest's private data for now.
 
 mod device;
 mod info;
@@ -318,9 +319,16 @@ impl Backend for AmdBackend {
         protocol::hw_queue::check(private).map_err(|refused| BackendError::new(refused.0))
     }
 
-    fn escape(&mut self, _process: u32, _data: &mut [u8], _books: &GuestBooks<'_>) {
-        // AMD's escapes carry a subfunction (ATI_LHESCAPE_HDR) and expect a status; the trait's
-        // escape hook has neither yet. This is guest-protocol work.
+    /// The answer is in the escape's own header. The trait has no status to return beside it.
+    fn escape(&mut self, process: u32, data: &mut [u8], _books: &GuestBooks<'_>) {
+        match protocol::escape::answer(data) {
+            Ok(code) => log::debug!(
+                "escape from {process}: service {} subfunction {:#x}, answered as failed",
+                code.service,
+                code.subfunction
+            ),
+            Err(refused) => log::info!("an escape from {process} is {}", refused.0),
+        }
     }
 
     fn adapter_answer(&mut self, query: &VendorQuery<'_>, out: &mut Vec<u8>) -> Option<Status> {

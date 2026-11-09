@@ -1,6 +1,6 @@
 [package]
 name = "guesthouse-backend-amd"
-description = "The AMD host-execution side: the host's open amdgpu driver, reached through its DRM ioctls. The guest-protocol side is not here yet."
+description = "The AMD backend: the host's open amdgpu driver through its DRM ioctls, and the private data AMD's Windows driver sends."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

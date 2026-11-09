@@ -15,5 +15,6 @@ pub mod allocation;
 mod bytes;
 pub mod command_data;
 pub mod context;
+pub mod escape;
 pub mod hw_queue;
 pub mod tiling;

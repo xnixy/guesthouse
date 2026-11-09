@@ -6,7 +6,7 @@
 
 That's Godot's full Forward+ renderer on Vulkan, in Windows, in a VM on Fedora. Nothing is passed through. The host never gives up the card, so my GNOME desktop keeps running on it the whole time.
 
-> **Status:** early. Version 0.2.2 is out, and everything's here, the Windows GPU part included. It's run on my PC, on one RTX 5090, and Windows has now run on a tester's RTX 4080 too, with a fix that comes in the next release. What works, what doesn't and what's next is in the [roadmap](https://github.com/xnixy/guesthouse/issues/2), which I keep up to date.
+> **Status:** early. Version 0.2.3 is out, and everything's here, the Windows GPU part included. It's run on my PC, on one RTX 5090, and Windows has now run on a tester's RTX 4080 too. What works, what doesn't and what's next is in the [roadmap](https://github.com/xnixy/guesthouse/issues/2), which I keep up to date.
 
 ## Install
 
@@ -63,7 +63,7 @@ Everything here was measured on one machine: Ryzen 9 9950X3D, RTX 5090, Fedora 4
 
 **The VM shows NVIDIA's vendor ID.** Windows' own GPU-PV driver only binds to a Microsoft device ID, and Edge, Chromium and streaming programs look at the vendor ID before they will use a GPU, so on Microsoft's they stay on the CPU. So Windows makes a small driver package from its own GPU-PV driver, bound to NVIDIA's vendor ID with a device ID NVIDIA has never shipped, and signed like the display driver. A new machine does this during its install. One made by an older version does it at its first start, and that start then restarts the VM once by itself, as only a new VM can show the new ID. The first boot on the new ID restarts Windows once too, as Direct3D 12 only works on it after a restart. Then the machine is ready, and Edge is hardware accelerated with no flags. A guest that won't take the package keeps Microsoft's ID and the row says why.
 
-Direct3D 12, Direct3D 11, Vulkan and OpenGL all run on the real card, along with the desktop and normal apps. So does OpenCL, from the next release. So do CUDA, NVENC and NVDEC, on the real video engines, which ffmpeg uses with H.264, HEVC and AV1. `nvidia-smi` finds the card. A fresh install takes about 9 minutes from picking the ISO to the GPU working.
+Direct3D 12, Direct3D 11, Vulkan and OpenGL all run on the real card, along with the desktop and normal apps. So does OpenCL. So do CUDA, NVENC and NVDEC, on the real video engines, which ffmpeg uses with H.264, HEVC and AV1. `nvidia-smi` finds the card. A fresh install takes about 9 minutes from picking the ISO to the GPU working.
 
 **Is it really the GPU, at full speed?** Yes. This is my own benchmark, run on Linux and then inside the VM:
 
@@ -104,7 +104,7 @@ Encoding through ffmpeg comes out clean too: 300 frames each of H.264, HEVC and 
 
 This route is in this repo, in [`linux/`](linux/README.md), with how to try it.
 
-Linux takes a different route. The guest runs NVIDIA's real Linux driver and its calls get forwarded to the host's driver. Ubuntu 26.04.1 installs by itself, and from the next release a Linux you install yourself can have the GPU too. So far I've tried that on Fedora 45 Workstation and Fedora 45 KDE Plasma.
+Linux takes a different route. The guest runs NVIDIA's real Linux driver and its calls get forwarded to the host's driver. Ubuntu 26.04.1 installs by itself, and a Linux you install yourself can have the GPU too. So far I've tried that on Fedora 45 Workstation and Fedora 45 KDE Plasma.
 
 `nvidia-smi`, CUDA and Vulkan work, and speed is about the same as the host. With the guest's desktop off, my compute test gets about 120 TFLOPS on Vulkan in both, and an empty CUDA launch takes about 5 µs in both. The one real gap is an empty Vulkan submit, about 54 µs against 28. NVENC and NVDEC work too, and NVIDIA's session limit holds across the host and its guests. GNOME runs on it through Zink, with Firefox, Files and Settings all opening and a terminal doing real work. On a Linux you installed yourself, Plasma does too. Godot's Windows build even runs in there through Wine on Wayland.
 

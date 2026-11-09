@@ -359,7 +359,13 @@ impl Backend for AmdBackend {
         }
     }
 
-    fn start_work(&mut self, _host: &mut dyn HostServices, _work: &Work<'_>) -> WorkStart {
+    fn start_work(&mut self, _host: &mut dyn HostServices, work: &Work<'_>) -> WorkStart {
+        // The kernel driver fails a submission whose private data is wrong, and the guest then
+        // treats the device as lost, so the queue stops here the same way.
+        if let Err(refused) = protocol::command_data::check(work.private) {
+            log::warn!("refused a submission on queue {:#x}: {}", work.queue, refused.0);
+            return WorkStart::QueueFailed;
+        }
         // amdgpu submission is a blocking ioctl that signals a sync object, not a doorbell the core
         // rings, and completion arrives on an eventfd, not in fence memory. The trait has no event
         // source, so the real path is `submit::submit` plus `Syncobj::arm_eventfd`, proven by the

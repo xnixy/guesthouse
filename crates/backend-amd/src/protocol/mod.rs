@@ -13,6 +13,7 @@
 pub mod adapter_info;
 pub mod allocation;
 mod bytes;
+pub mod command_data;
 pub mod context;
 pub mod hw_queue;
 pub mod tiling;

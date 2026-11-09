@@ -7,6 +7,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const FILE_CAPABILITIES: &str = "security.capability";
+/// Debian, Ubuntu and Mint ship the helper without setuid, on purpose. This gives it the one right it
+/// needs to make a tap, rather than root.
+const HELPER_RIGHT: &str = "cap_net_admin+ep";
 /// How deep QEMU's helper follows includes before this stops looking.
 const MOST_INCLUDES: u32 = 8;
 
@@ -43,6 +46,11 @@ impl BridgeHost {
                 .is_ok_and(|size| size > 0)
     }
 
+    /// Installed, but not able to make a tap for this user yet.
+    fn helper_needs_right(&self) -> bool {
+        self.helper.exists() && !self.helper_can_run()
+    }
+
     /// As the helper decides: something must allow the bridge, and a deny always wins. `None` if some
     /// of it can't be read: a distribution may keep it from users, and only the helper can then say.
     fn bridge_allowed(&self, bridge: &str) -> Option<bool> {
@@ -68,9 +76,15 @@ impl BridgeHost {
         } else if ports.is_ok_and(|mut ports| ports.next().is_none()) {
             found.push(format!("Nothing is connected to {bridge}, so it does not reach the network."));
         }
-        if !self.helper_can_run() {
+        if !self.helper.exists() {
             found.push(format!(
-                "{} is missing, or cannot run as root. It comes in the package qemu-common.",
+                "{} is missing. It comes in the package qemu-common, or qemu-system-common on Debian, \
+                 Ubuntu and Mint.",
+                self.helper.display()
+            ));
+        } else if self.helper_needs_right() {
+            found.push(format!(
+                "{} cannot run as root. Debian, Ubuntu and Mint ship it that way.",
                 self.helper.display()
             ));
         }
@@ -105,11 +119,14 @@ impl BridgeHost {
     pub fn commands(&self, bridge: &str, interface: Option<&str>, exists: bool) -> String {
         let config = self.config.to_string_lossy();
         let folder = self.config.parent().unwrap_or(Path::new("/")).to_string_lossy();
-        let allow = format!(
+        let mut allow = format!(
             "sudo mkdir -p {}\necho 'allow {bridge}' | sudo tee -a {}",
             shell_quote(&folder),
             shell_quote(&config)
         );
+        if self.helper_needs_right() {
+            allow += &format!("\nsudo setcap {HELPER_RIGHT} {}", shell_quote(&self.helper.to_string_lossy()));
+        }
         let Some(interface) = interface.filter(|_| !exists) else { return allow };
         let port = shell_quote(&format!("{bridge}-{interface}"));
         let (name, device) = (shell_quote(bridge), shell_quote(interface));
@@ -264,5 +281,31 @@ mod tests {
         let commands = host.commands("br0", Some("eno2"), false);
         assert!(commands.contains("nmcli") && commands.contains("allow br0"));
         assert!(!host.commands("br0", Some("eno2"), true).contains("nmcli"), "only what is left to do");
+    }
+
+    #[test]
+    fn a_helper_shipped_without_setuid_gets_its_right() {
+        let scratch = Scratch::new();
+        let host = host(&scratch);
+        assert!(problems(&host).contains("Debian, Ubuntu and Mint ship it that way"));
+        assert!(!problems(&host).contains("missing"));
+        let setcap = format!("sudo setcap cap_net_admin+ep {}", host.helper.display());
+        assert!(host.commands("br0", Some("eno2"), true).contains(&setcap));
+        assert!(host.commands("br0", Some("eno2"), false).contains(&setcap));
+        fs::set_permissions(&host.helper, fs::Permissions::from_mode(0o4755)).unwrap();
+        assert!(
+            !host.commands("br0", Some("eno2"), true).contains("setcap"),
+            "Fedora and Arch ship it setuid"
+        );
+    }
+
+    #[test]
+    fn a_missing_helper_names_the_package_for_each_family() {
+        let scratch = Scratch::new();
+        let host = BridgeHost { helper: scratch.path("nowhere"), ..host(&scratch) };
+        let said = problems(&host);
+        assert!(said.contains("is missing") && said.contains("qemu-system-common"));
+        assert!(!said.contains("cannot run as root"));
+        assert!(!host.commands("br0", Some("eno2"), true).contains("setcap"), "nothing to give a right to");
     }
 }

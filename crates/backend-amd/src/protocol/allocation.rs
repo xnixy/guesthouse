@@ -53,7 +53,8 @@ const SURFACE_OWN_SIZE: usize = 0x00;
 const SURFACE_FLAGS: usize = 0x04;
 /// The guest says this surface needs no check of its shape.
 const SURFACE_SKIP_SHAPE_CHECK: u32 = 1 << 15;
-/// The addrlib swizzle mode the guest laid the surface out with.
+/// The swizzle mode the guest laid the surface out with: the hardware's SW_MODE on GFX9 to GFX11,
+/// Addr3SwizzleMode on GFX12. See [`super::tiling`].
 const SURFACE_SWIZZLE_MODE: usize = 0x08;
 /// 0 to 3. 1, 2 and 3 are 1D, 2D and 3D.
 const SURFACE_DIMENSIONS: usize = 0x0C;

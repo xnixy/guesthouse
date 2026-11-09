@@ -1,13 +1,16 @@
 //! From a surface's swizzle mode to the host buffer that holds it and the format modifier a frame
 //! exports with.
 //!
-//! The guest lays a surface out with addrlib, AMD's open address library, and its descriptor names
-//! the swizzle mode by addrlib's own number. On GFX9 to GFX11 that is AddrSwizzleMode, whose numbers
-//! are the hardware's SW_MODE, the value amdgpu's AMDGPU_TILING_SWIZZLE_MODE and the modifier's
-//! AMD_FMT_MOD_TILE field carry. On GFX12 it is Addr3SwizzleMode, which matches the GFX12 tiling
-//! field. So the mode passes through, and only the modifier's other fields are worked out here, from
-//! the card's GB_ADDR_CONFIG, the way amdgpu does it for a buffer that has tiling flags and no
-//! modifier.
+//! The guest lays a surface out with addrlib, AMD's open address library. On GFX9 to GFX11 its
+//! descriptor names the swizzle mode by the hardware's own SW_MODE number, not by addrlib's
+//! AddrSwizzleMode, which the kernel driver translates it to only for its own queries. SW_MODE is
+//! the value amdgpu's AMDGPU_TILING_SWIZZLE_MODE and the modifier's AMD_FMT_MOD_TILE field carry.
+//! On GFX12 the descriptor holds Addr3SwizzleMode, which matches the GFX12 tiling field. So the mode
+//! passes through, and only the modifier's other fields are worked out here, from the card's
+//! GB_ADDR_CONFIG, the way amdgpu does it for a buffer that has tiling flags and no modifier.
+//!
+//! A mode too big for the tiling field gets none: the kernel driver refuses modes past 0x20 on
+//! GFX10, and 0x20 itself is addrlib's linear-general, which has no hardware number.
 //!
 //! Every number here is from the open uAPI headers, amdgpu_drm.h and drm_fourcc.h.
 
@@ -69,14 +72,17 @@ pub struct HostBuffer {
 /// The host buffer for a surface the guest laid out with this swizzle mode. A tiled surface only
 /// goes through the GPU, so it may sit in VRAM the CPU can't see.
 pub fn host_buffer(swizzle_mode: u32, gfx: GfxVersion) -> HostBuffer {
-    let cpu_access = if swizzle_mode == SWIZZLE_LINEAR { CpuAccess::Required } else { CpuAccess::NotNeeded };
-    HostBuffer { domain: DOMAIN_VRAM, cpu_access, tiling_info: tiling_info(swizzle_mode, gfx) }
+    let tiling_info = tiling_info(swizzle_mode, gfx);
+    let cpu_access = if tiling_info == 0 { CpuAccess::Required } else { CpuAccess::NotNeeded };
+    HostBuffer { domain: DOMAIN_VRAM, cpu_access, tiling_info }
 }
 
 /// The tiling flags amdgpu keeps on the buffer, so an importer that reads them lays it out the same.
+/// Zero, linear, for a mode the field can't hold.
 pub fn tiling_info(swizzle_mode: u32, gfx: GfxVersion) -> u64 {
     let mask = if gfx.0 >= 12 { TILING_GFX12_SWIZZLE_MASK } else { TILING_SWIZZLE_MASK };
-    u64::from(swizzle_mode) & mask
+    let mode = u64::from(swizzle_mode);
+    if mode & !mask != 0 { 0 } else { mode }
 }
 
 fn field(config: u32, shift: u32, mask: u32) -> u32 {
@@ -106,6 +112,9 @@ pub fn modifier(
 ) -> Option<u64> {
     if swizzle_mode == SWIZZLE_LINEAR {
         return Some(LINEAR);
+    }
+    if tiling_info(swizzle_mode, gfx) == 0 {
+        return None;
     }
     let vendor = VENDOR_AMD << VENDOR_SHIFT;
     if gfx.0 >= 12 {
@@ -242,8 +251,18 @@ mod tests {
         let modifier = modifier(SW3_256KB_2D, (12, 0), SMALL_RDNA2, None).unwrap();
         assert_eq!(mod_field(modifier, TILE_VERSION_SHIFT, 0xff), TILE_VER_GFX12);
         assert_eq!(mod_field(modifier, TILE_SHIFT, 0x1f), u64::from(SW3_256KB_2D));
-        assert_eq!(tiling_info(0x1C, (12, 0)), 0x4);
+        assert_eq!(tiling_info(0x4, (12, 0)), 0x4);
         assert_eq!(tiling_info(SW_64KB_R_X, (10, 3)), u64::from(SW_64KB_R_X));
+    }
+
+    #[test]
+    fn a_mode_the_tiling_field_cant_hold_gets_no_tiling() {
+        let linear_general = 0x20;
+        assert_eq!(tiling_info(linear_general, (10, 3)), 0);
+        assert_eq!(modifier(linear_general, (10, 3), SMALL_RDNA2, Some(4)), None);
+        assert_eq!(host_buffer(0x21, (10, 3)).cpu_access, CpuAccess::Required);
+        assert_eq!(tiling_info(0x1C, (12, 0)), 0);
+        assert_eq!(modifier(0x1C, (12, 0), SMALL_RDNA2, None), None);
     }
 
     #[test]

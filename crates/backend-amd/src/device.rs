@@ -55,22 +55,7 @@ impl Device {
 
     /// Maps a buffer's bytes into this process so the CPU can read what the GPU wrote, or fill an IB.
     pub fn map_cpu(&self, handle: GemHandle, size: usize) -> io::Result<Mapping> {
-        let offset = crate::memory::mmap_offset(&self.file, handle)?;
-        // SAFETY: a shared mapping of `size` bytes at the kernel-provided offset of this node.
-        let address = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                self.file.as_raw_fd(),
-                offset as libc::off_t,
-            )
-        };
-        if address == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Mapping { address: address.cast(), size })
+        Mapping::of(&self.file, handle, size)
     }
 }
 
@@ -89,6 +74,26 @@ pub struct Mapping {
 }
 
 impl Mapping {
+    /// Maps `size` bytes of a buffer that is a handle on `file`, any open of the render node.
+    pub fn of(file: &File, handle: GemHandle, size: usize) -> io::Result<Self> {
+        let offset = crate::memory::mmap_offset(file, handle)?;
+        // SAFETY: a shared mapping of `size` bytes at the kernel-provided offset of this node.
+        let address = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                offset as libc::off_t,
+            )
+        };
+        if address == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { address: address.cast(), size })
+    }
+
     pub fn write_u32(&mut self, offset: usize, value: u32) {
         assert!(offset + 4 <= self.size, "write past the mapping");
         // SAFETY: the offset is inside the mapping, which is writable.

@@ -28,7 +28,7 @@ pub use pci_address::PciAddress;
 pub use types::*;
 
 use std::os::fd::OwnedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Everything a GPU vendor must provide.
 ///
@@ -195,6 +195,12 @@ pub trait Backend: Sized {
     /// How much of a queue may be unfinished before the guest's next submission is held back. In the
     /// vendor's own units, the ones [`WorkStart::Started`] counts in. `None` means no limit.
     fn unfinished_work_limit(&self) -> Option<u64> {
+        None
+    }
+
+    /// How long started work may take before its queue is given up. `None` leaves it to the core.
+    /// A backend whose card can be slow without being stuck says more here.
+    fn work_patience(&self) -> Option<Duration> {
         None
     }
 

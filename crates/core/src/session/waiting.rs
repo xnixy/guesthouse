@@ -16,7 +16,7 @@ use guesthouse_messages::notice::Notice;
 use guesthouse_messages::queue::PresentToken;
 use guesthouse_messages::sync::{SignalSharedFence, SignalSyncObject, WaitOnCpu, WaitOnGpu};
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What became of a submission.
 pub(crate) enum GpuTook {
@@ -168,7 +168,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             self.run_queue_action(action);
         } else {
             let targets = self.queue_targets(handles);
-            let deadline = Instant::now() + QUEUE_TIMEOUT;
+            let deadline = Instant::now() + self.queue_timeout();
             self.pending.push(Pending::AfterQueues { targets, deadline, action });
         }
     }
@@ -407,6 +407,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.faults.stopped()
     }
 
+    /// How long the GPU gets before the host stops waiting for a queue.
+    fn queue_timeout(&self) -> Duration {
+        self.backend.work_patience().unwrap_or(QUEUE_TIMEOUT)
+    }
+
     /// Gives up on a queue the GPU has stopped answering, and frees the guest to carry on.
     fn queue_timed_out(&mut self, handle: u32, fence: u64, value: u64, now: Instant) {
         log::error!("queue {handle:#x} did not reach fence value {value:#x} in time");
@@ -599,7 +604,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 } else if self.fence_value(fence) >= value {
                     self.timings.fence_seen(now.saturating_duration_since(rung));
                     None
-                } else if now.saturating_duration_since(rung) > QUEUE_TIMEOUT {
+                } else if now.saturating_duration_since(rung) > self.queue_timeout() {
                     self.queue_timed_out(queue, fence, value, now);
                     None
                 } else {

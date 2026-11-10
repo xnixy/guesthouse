@@ -65,6 +65,20 @@ fn one_failed_queue_leaves_the_rest_of_its_process_on_the_gpu() {
 }
 
 #[test]
+fn a_backend_with_a_slow_card_gets_its_own_time_before_a_queue_fails() {
+    const SLOW_CARD: Duration = Duration::from_secs(60);
+    let mut session = running_session();
+    session.backend_mut().work_patience = Some(SLOW_CARD);
+    let lane = lane_of(&mut session, FIRST_PROCESS);
+    let at = Instant::now();
+    assert_eq!(submit_status(&mut session, &lane, 1), SUCCESS);
+    session.poll(at + QUEUE_TIMEOUT + PAST_THE_TIMEOUT);
+    assert!(!session.queues[&lane.queue].failed);
+    session.poll(at + SLOW_CARD + PAST_THE_TIMEOUT);
+    assert!(session.queues[&lane.queue].failed);
+}
+
+#[test]
 fn a_process_whose_queues_keep_failing_comes_off_the_gpu() {
     let mut session = running_session();
     let spare = MOST_FAILED_QUEUES + 1;

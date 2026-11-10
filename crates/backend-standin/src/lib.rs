@@ -14,8 +14,8 @@ mod memory;
 mod random_messages;
 
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, DriverFound, DriverSurvey, GpuRange,
-    GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
+    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, Doorbell, DriverFound, DriverSurvey,
+    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
     RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status,
     SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
 };
@@ -100,6 +100,8 @@ pub struct StandIn {
     pub work_patience: Option<Duration>,
     /// How many submissions to come are answered with no room, as a driver refusing one for now.
     pub busy_starts: u32,
+    /// How many doorbells to come are refused for now, as a driver refusing a submission call.
+    pub refused_rings: u32,
 }
 
 #[derive(Debug, Default)]
@@ -174,6 +176,7 @@ impl StandIn {
             unfinished_limit: None,
             work_patience: None,
             busy_starts: 0,
+            refused_rings: 0,
         }
     }
 
@@ -472,12 +475,16 @@ impl Backend for StandIn {
         WorkStart::Started { doorbell: work.fence_value, work: self.work_per_submission }
     }
 
-    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<(), BackendError> {
+    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<Doorbell, BackendError> {
         if self.fail_rings {
             return Err(BackendError::new("the stand-in was told to fail its doorbells"));
         }
+        if self.refused_rings > 0 {
+            self.refused_rings -= 1;
+            return Ok(Doorbell::NotYet);
+        }
         self.doorbells.push((queue, doorbell));
-        Ok(())
+        Ok(Doorbell::Rung)
     }
 
     fn close_queue(&mut self, queue: u32) {

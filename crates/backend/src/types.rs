@@ -283,6 +283,15 @@ pub enum WorkStart {
     Busy,
 }
 
+/// What became of ringing a doorbell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Doorbell {
+    /// The work is on its way to the GPU.
+    Rung,
+    /// The driver refused it for now. Nothing changed, and the same doorbell should be rung again.
+    NotYet,
+}
+
 /// Where a GPU address lies in memory shared with the guest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedSpan {

@@ -1775,6 +1775,24 @@ mod queues {
     }
 
     #[test]
+    fn a_doorbell_refused_for_now_is_rung_again_before_later_work() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        session.backend_mut().refused_rings = 2;
+        let context = create_context(&mut session, 0);
+        let (queue, _, fence) = create_queue(&mut session, context);
+        submit(&mut session, queue, 1);
+        submit(&mut session, queue, 2);
+        assert!(session.backend().doorbells.is_empty());
+        let _ = session.poll(Instant::now());
+        let _ = session.poll(Instant::now());
+        assert_eq!(session.backend().doorbells, [(queue, 1), (queue, 2)]);
+        assert!(!session.queues[&queue].failed);
+        assert_eq!(session.memory().read_u64(fence).unwrap(), 0, "the GPU writes the fence, not the host");
+        assert!(session.gates.is_empty());
+    }
+
+    #[test]
     fn a_gate_holds_doorbells_until_its_fence_moves() {
         let mut session = session();
         session.backend_mut().run_work = true;

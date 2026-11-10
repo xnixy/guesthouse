@@ -10,7 +10,7 @@ use crate::pending::{
 use crate::session::{Answer, HeldReply, ReplyTicket};
 use crate::tables::Queue;
 use crate::timing::{HeldFor, Stage};
-use guesthouse_backend::{Backend, GuestMemory, SpaceId, UnmapRequest, WorkStart};
+use guesthouse_backend::{Backend, Doorbell, GuestMemory, SpaceId, UnmapRequest, WorkStart};
 use guesthouse_messages::Status;
 use guesthouse_messages::notice::Notice;
 use guesthouse_messages::queue::PresentToken;
@@ -335,7 +335,13 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                     }
                     self.leave_wait(id, &signals, can_go);
                 }
-                GateStep::Ring { doorbell, fence, value } => self.ring(queue, doorbell, fence, value),
+                GateStep::Ring { doorbell, fence, value } => {
+                    if !self.ring(queue, doorbell, fence, value) {
+                        let held = GateStep::Ring { doorbell, fence, value };
+                        self.gates.get_mut(&queue).expect("just read").push_front(held);
+                        return false;
+                    }
+                }
                 GateStep::Copy { id } => {
                     if self.copy_is_active(id) {
                         self.gates.get_mut(&queue).expect("just read").push_front(GateStep::Copy { id });
@@ -373,28 +379,38 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
     }
 
-    /// Lets work run, or leaves it behind the queue's gate if there is one.
+    /// Lets work run, or leaves it behind the queue's gate if there is one. A doorbell the backend
+    /// refuses for now starts a gate, so it is rung again before anything after it on the queue.
     pub(crate) fn ring_or_hold(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) {
-        match self.gates.get_mut(&queue) {
-            Some(gate) => gate.push_back(GateStep::Ring { doorbell, fence, value }),
-            None => self.ring(queue, doorbell, fence, value),
+        let step = GateStep::Ring { doorbell, fence, value };
+        if let Some(gate) = self.gates.get_mut(&queue) {
+            gate.push_back(step);
+        } else if !self.ring(queue, doorbell, fence, value) {
+            self.gates.insert(queue, VecDeque::from([step]));
+            self.pending.push(Pending::Gate { queue });
         }
     }
 
-    fn ring(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) {
-        if let Err(error) = self.backend.ring_doorbell(queue, doorbell) {
-            log::warn!("queue {queue:#x} couldn't start its work: {error}");
-            if let Some(record) = self.queues.get_mut(&queue) {
-                record.failed = true;
+    /// Rings a doorbell. False if the backend refused it for now, and it must be rung again.
+    fn ring(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) -> bool {
+        match self.backend.ring_doorbell(queue, doorbell) {
+            Ok(Doorbell::Rung) => {
+                self.timings.mark(Stage::Rung);
+                self.pending.push(Pending::Watch { queue, fence, value, rung: Instant::now() });
             }
-            // Nothing will run, so stand in for the GPU where the guest would notice.
-            if let Err(error) = self.memory.write_u64(fence, value) {
-                log::warn!("standing in for a failed doorbell: {error}");
+            Ok(Doorbell::NotYet) => return false,
+            Err(error) => {
+                log::warn!("queue {queue:#x} couldn't start its work: {error}");
+                if let Some(record) = self.queues.get_mut(&queue) {
+                    record.failed = true;
+                }
+                // Nothing will run, so stand in for the GPU where the guest would notice.
+                if let Err(error) = self.memory.write_u64(fence, value) {
+                    log::warn!("standing in for a failed doorbell: {error}");
+                }
             }
-            return;
         }
-        self.timings.mark(Stage::Rung);
-        self.pending.push(Pending::Watch { queue, fence, value, rung: Instant::now() });
+        true
     }
 
     /// Whether queues may still be given work.

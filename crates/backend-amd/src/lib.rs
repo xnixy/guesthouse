@@ -20,8 +20,8 @@ mod channel_order;
 mod copy_ib;
 mod device;
 mod fault;
-mod guest_dma;
 mod fence_ib;
+mod guest_dma;
 mod info;
 mod ioctl;
 mod memory;
@@ -57,8 +57,8 @@ use channel_order::WrittenRows;
 use copy_ib::CopyIb;
 use guest_dma::Reach;
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, DriverFound, DriverSurvey, GpuRange,
-    GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
+    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, Doorbell, DriverFound, DriverSurvey,
+    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
     RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status,
     SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
 };
@@ -135,19 +135,8 @@ fn send(vm: &mut SpaceVm, run: &PreparedRun) -> io::Result<()> {
             ib.address, ib.bytes
         )));
     }
-    let mut sent = vm.send(run.ip_type, &run.ibs, run.slot);
-    for _ in 1..SEND_TRIES {
-        if !matches!(&sent, Err(error) if error.kind() == io::ErrorKind::WouldBlock) {
-            break;
-        }
-        sent = vm.send(run.ip_type, &run.ibs, run.slot);
-    }
-    sent
+    vm.send(run.ip_type, &run.ibs, run.slot)
 }
-
-/// How many times a run amdgpu keeps refusing is sent, each try lasting as long as a refused call
-/// is tried again. A doorbell can't be rung later, so after these the queue fails.
-const SEND_TRIES: u32 = 4;
 
 impl std::fmt::Debug for AmdBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -890,18 +879,25 @@ impl Backend for AmdBackend {
     }
 
     /// amdgpu's CS call is the doorbell, and it can fail.
-    fn ring_doorbell(&mut self, _queue: u32, doorbell: u64) -> Result<(), BackendError> {
+    fn ring_doorbell(&mut self, _queue: u32, doorbell: u64) -> Result<Doorbell, BackendError> {
         let Some(run) = self.prepared.remove(&doorbell) else {
             return Err(BackendError::new("no run was prepared for this doorbell"));
         };
         let Some(space) = self.spaces.get_mut(&run.space) else {
             return Err(BackendError::new("the run's address space has closed"));
         };
-        let sent = send(&mut space.vm, &run);
-        if sent.is_err() {
-            space.vm.drop_fence_writer(run.slot);
+        match send(&mut space.vm, &run) {
+            Ok(()) => Ok(Doorbell::Rung),
+            // amdgpu refuses a submission while pages it lists are moving, and takes it later.
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                self.prepared.insert(doorbell, run);
+                Ok(Doorbell::NotYet)
+            }
+            Err(error) => {
+                space.vm.drop_fence_writer(run.slot);
+                Err(BackendError::new(format!("engine family {}: {error}", run.ip_type)))
+            }
         }
-        sent.map_err(|error| BackendError::new(format!("engine family {}: {error}", run.ip_type)))
     }
 
     fn close_queue(&mut self, queue: u32) {

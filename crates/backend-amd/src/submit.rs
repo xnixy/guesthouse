@@ -64,6 +64,12 @@ const CS_REQUEST_SIZE: usize = 24;
 const SYNCOBJ_HANDLE: usize = 0;
 const SYNCOBJ_REQUEST_SIZE: usize = 8;
 
+// drm_syncobj_wait, 32 bytes: a pointer to the handles, a time to wait until, how many handles, flags,
+// and which one was signalled first. A time of 0 is already past, so the call only looks.
+const WAIT_HANDLES: usize = 0;
+const WAIT_COUNT: usize = 16;
+const WAIT_REQUEST_SIZE: usize = 32;
+
 // drm_syncobj_eventfd, 24 bytes: handle, flags, point (u64), fd (s32), pad.
 const EVENTFD_HANDLE: usize = 0;
 const EVENTFD_FD: usize = 16;
@@ -127,6 +133,19 @@ impl Syncobj {
         put32(&mut request, EVENTFD_FD, event.as_raw_fd() as u32);
         ioctl::drm_ioctl(file, call::syncobj_eventfd(), &mut request)?;
         Ok(event)
+    }
+
+    /// Whether the kernel has signalled it, without waiting. A submission must have named it.
+    pub fn signalled(&self, file: &impl AsRawFd) -> io::Result<bool> {
+        let handles = [self.handle];
+        let mut request = [0u8; WAIT_REQUEST_SIZE];
+        put64(&mut request, WAIT_HANDLES, handles.as_ptr() as u64);
+        put32(&mut request, WAIT_COUNT, 1);
+        match ioctl::drm_ioctl(file, call::syncobj_wait(), &mut request) {
+            Ok(()) => Ok(true),
+            Err(error) if error.raw_os_error() == Some(libc::ETIME) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn destroy(&self, file: &impl AsRawFd) {

@@ -11,16 +11,17 @@
 //! it out. It is plain byte work, tested without a guest.
 //!
 //! Where the backend trait is shaped for NVIDIA and does not fit amdgpu, the mismatch is called out
-//! at the method. The chief one is submission: amdgpu's `DRM_AMDGPU_CS` is a blocking ioctl whose
-//! completion arrives on an event source, not a doorbell the trait rings. The real submission path
-//! lives in [`submit`] and is proven by the `amd-probe` binary, not by [`Backend::start_work`],
-//! which only checks the guest's private data for now.
+//! at the method. The chief one is submission: amdgpu has no doorbell, only the `DRM_AMDGPU_CS`
+//! call. So [`Backend::start_work`] gets a run ready, with a command buffer of the daemon's last
+//! that has the card write the queue's fence, and [`Backend::ring_doorbell`] makes the call. The
+//! guest's fence then moves when the card is through, as the core expects of a GPU.
 
 mod channel_order;
 mod copy_ib;
 mod device;
 mod fault;
 mod guest_dma;
+mod fence_ib;
 mod info;
 mod ioctl;
 mod memory;
@@ -34,6 +35,7 @@ mod space_vm;
 mod submit;
 
 pub use device::{Device, Mapping};
+pub use fence_ib::{Writer as FenceWriter, words as fence_words, writer_for as fence_writer_for};
 pub use info::{
     CardDetails, DeviceInfo, EngineSet, Firmware, HW_IP_DMA, HW_IP_GFX, read_device_info, read_gpu_clock,
 };
@@ -107,7 +109,45 @@ pub struct AmdBackend {
     copy_ib: Option<CopyIb>,
     /// How long the next run is waited for, which is less after one that hung.
     patience: Patience,
+    /// Runs the core has had prepared and not yet let go, by the doorbell that sends each.
+    prepared: HashMap<u64, PreparedRun>,
 }
+
+/// A run ready to send: its command buffers, the fence writer in `slot` last.
+#[derive(Debug)]
+struct PreparedRun {
+    space: SpaceId,
+    queue: u32,
+    ip_type: u32,
+    ibs: Vec<Ib>,
+    slot: usize,
+}
+
+/// The bytes of a fence the card writes.
+const FENCE_BYTES: u64 = size_of::<u64>() as u64;
+
+/// Sends a prepared run, if its command buffers are still mapped.
+fn send(vm: &mut SpaceVm, run: &PreparedRun) -> io::Result<()> {
+    let (_, guests) = run.ibs.split_last().expect("the fence writer is always there");
+    if let Some(ib) = vm.first_unmapped(guests) {
+        return Err(io::Error::other(format!(
+            "{:#x} for {:#x} bytes is no longer mapped",
+            ib.address, ib.bytes
+        )));
+    }
+    let mut sent = vm.send(run.ip_type, &run.ibs, run.slot);
+    for _ in 1..SEND_TRIES {
+        if !matches!(&sent, Err(error) if error.kind() == io::ErrorKind::WouldBlock) {
+            break;
+        }
+        sent = vm.send(run.ip_type, &run.ibs, run.slot);
+    }
+    sent
+}
+
+/// How many times a run amdgpu keeps refusing is sent, each try lasting as long as a refused call
+/// is tried again. A doorbell can't be rung later, so after these the queue fails.
+const SEND_TRIES: u32 = 4;
 
 impl std::fmt::Debug for AmdBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -131,6 +171,7 @@ impl AmdBackend {
             cpu_views: HashMap::new(),
             copy_ib: None,
             patience: Patience::RUN,
+            prepared: HashMap::new(),
         })
     }
 
@@ -143,7 +184,8 @@ impl AmdBackend {
         &self.device
     }
 
-    /// Copies a frame with the CPU. The work that drew it has retired, as a submission is waited for.
+    /// Copies a frame with the CPU. The core starts a copy once the queue that drew the frame has
+    /// reached its fence, so the work has retired.
     fn copy_with_cpu(&mut self, copy: &StagingCopy) -> Result<(), String> {
         let plan = CopyPlan::of(copy).ok_or("a tiled surface, or a rectangle past a surface")?;
         let source = self.cpu_address(copy.own_space, copy.source_address, plan.source_end())?;
@@ -255,7 +297,7 @@ impl AmdBackend {
     }
 
     /// Copies what `from` holds into `to`, a window at a time, by the DMA engine. The work that wrote
-    /// it has retired, as every submission is waited for.
+    /// it has retired, as the core waits for the queues that could before it moves an allocation.
     fn move_with_dma(&mut self, space: SpaceId, from: Bo, to: Bo, size: u64) -> Result<(), String> {
         let flags =
             MapFlags { readable: true, writable: true, executable: false, memory_type: MemoryType::Uncached };
@@ -566,6 +608,7 @@ impl Backend for AmdBackend {
     fn destroy_address_space(&mut self, space: SpaceId) {
         // Closing the space's open takes its VM, and all that was mapped in it, with it.
         self.spaces.remove(&space);
+        self.prepared.retain(|_, run| run.space != space);
         log::debug!("address space {space:?} closed");
     }
 
@@ -755,7 +798,7 @@ impl Backend for AmdBackend {
             log::warn!("work for node {}, which this card hasn't got", work.node);
             return WorkStart::QueueFailed;
         };
-        let ibs: Vec<Ib> = protocol::command_data::command_buffers(work.private)
+        let mut ibs: Vec<Ib> = protocol::command_data::command_buffers(work.private)
             .into_iter()
             .map(|buffer| Ib { address: buffer.address, bytes: buffer.bytes })
             .collect();
@@ -790,8 +833,29 @@ impl Backend for AmdBackend {
             return WorkStart::QueueFailed;
         }
         log::debug!("run on engine family {} in space {:?}: {:x?}", node.ip_type, work.space, ibs);
-        // The run is waited for here, so the core then completes the fence itself. A
-        // completion that arrives on its own, as amdgpu's eventfd allows, would free this thread.
+        let card = self.device.info();
+        let writer = fence_ib::writer_for(node.ip_type, card.details.gfx_version.0)
+            .filter(|_| space.vm.holds(work.fence_gpu_address, FENCE_BYTES));
+        if let Some(writer) = writer {
+            // The card writes the fence itself when the run is through, so nothing waits here.
+            let written =
+                space.vm.fence_writer(card.va_alignment, writer, work.fence_gpu_address, work.fence_value);
+            return match written {
+                Ok(Some((slot, last))) => {
+                    ibs.push(last);
+                    let doorbell = self.new_id();
+                    let (space, queue, ip_type) = (work.space, work.queue, node.ip_type);
+                    self.prepared.insert(doorbell, PreparedRun { space, queue, ip_type, ibs, slot });
+                    WorkStart::Started { doorbell, work: 1 }
+                }
+                Ok(None) => WorkStart::Busy,
+                Err(error) => {
+                    log::warn!("work on engine family {} not run: {error}", node.ip_type);
+                    WorkStart::QueueFailed
+                }
+            };
+        }
+        // An engine with no fence writer is waited for here, and the core then completes the fence.
         let ran = space.vm.run(node.ip_type, &ibs, self.patience);
         self.note_how_it_ran(&ran);
         match ran {
@@ -825,12 +889,41 @@ impl Backend for AmdBackend {
         }
     }
 
-    /// Where the command submission will go: amdgpu's CS call is the doorbell, and it can fail.
-    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<(), BackendError> {
-        Ok(())
+    /// amdgpu's CS call is the doorbell, and it can fail.
+    fn ring_doorbell(&mut self, _queue: u32, doorbell: u64) -> Result<(), BackendError> {
+        let Some(run) = self.prepared.remove(&doorbell) else {
+            return Err(BackendError::new("no run was prepared for this doorbell"));
+        };
+        let Some(space) = self.spaces.get_mut(&run.space) else {
+            return Err(BackendError::new("the run's address space has closed"));
+        };
+        let sent = send(&mut space.vm, &run);
+        if sent.is_err() {
+            space.vm.drop_fence_writer(run.slot);
+        }
+        sent.map_err(|error| BackendError::new(format!("engine family {}: {error}", run.ip_type)))
     }
 
-    fn close_queue(&mut self, _queue: u32) {}
+    fn close_queue(&mut self, queue: u32) {
+        let unsent: Vec<u64> = self
+            .prepared
+            .iter()
+            .filter(|(_, run)| run.queue == queue)
+            .map(|(&doorbell, _)| doorbell)
+            .collect();
+        for doorbell in unsent {
+            if let Some(run) = self.prepared.remove(&doorbell)
+                && let Some(space) = self.spaces.get_mut(&run.space)
+            {
+                space.vm.drop_fence_writer(run.slot);
+            }
+        }
+    }
+
+    /// A run can take seconds on a small card, and several can be waiting on it.
+    fn work_patience(&self) -> Option<std::time::Duration> {
+        Some(Patience::RUN.hung)
+    }
 
     fn start_staging_copy(&mut self, _host: &mut dyn HostServices, copy: &StagingCopy) -> StagingStart {
         StagingStart::Finished(match self.copy_staging(copy) {

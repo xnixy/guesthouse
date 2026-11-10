@@ -2,9 +2,9 @@
 //!
 //! `DRM_AMDGPU_CS` takes a context, an indirect buffer at a GPU address, and a set of chunks. This
 //! backend sends two: the IB chunk and a syncobj-out chunk, so the kernel signals a sync object when
-//! the work retires. There is no doorbell: the submission is an ioctl, and completion arrives on an
-//! eventfd armed on that sync object. That is the shape AMD forces on the backend trait, which today
-//! expects a doorbell and polls fence memory.
+//! the work retires. There is no doorbell: the submission is an ioctl. The daemon's own runs wait
+//! for it on an eventfd armed on that sync object. A guest's run isn't waited for: it ends by
+//! writing the guest's fence, see `fence_ib`, and its sync object is only looked at afterwards.
 //!
 //! A buffer with a GPU address in this file's VM is not kept there for a submission by that alone:
 //! only buffers made for the VM itself are, and a space's are taken in from another open. amdgpu can

@@ -216,6 +216,11 @@ pub trait Backend: Sized {
     /// soon, holding the queue's later work behind it.
     fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<Doorbell, BackendError>;
 
+    /// Looks at work the GPU was given, while the core waits for queues to reach their fences. For a
+    /// backend whose driver can end work early, as when it resets a hung engine, without the GPU
+    /// writing the fence: it stands in at the fence then, as the work will never get there.
+    fn poll_work(&mut self, _host: &mut dyn HostServices, _now: Instant) {}
+
     /// A hardware queue has gone, so whatever backs it can go too.
     fn close_queue(&mut self, queue: u32);
 

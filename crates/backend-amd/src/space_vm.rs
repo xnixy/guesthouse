@@ -140,13 +140,26 @@ pub struct SpaceVm {
     fence_ibs: Option<FenceIbs>,
     /// The runs sent without waiting that the kernel hasn't been seen to retire, oldest first.
     on_card: VecDeque<OnCard>,
+    /// The fences of runs seen to retire since they were last asked for.
+    retired: Vec<GuestFence>,
 }
 
-/// A run on the card: the slot its fence writer is in, and what the kernel signals when it retires.
+/// Where a run's fence is in guest memory, by guest physical address, and the value it ends with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestFence {
+    pub queue: u32,
+    pub address: u64,
+    pub value: u64,
+}
+
+/// A run on the card: the slot its fence writer is in, what the kernel signals when it retires, and
+/// the fence the run writes last.
 #[derive(Debug)]
 struct OnCard {
     slot: usize,
     retired: Syncobj,
+    /// None once its queue has gone, as the fence's page may then be another queue's.
+    fence: Option<GuestFence>,
 }
 
 /// How a run on the card ended.
@@ -171,6 +184,7 @@ impl SpaceVm {
             faults: fault::Watch::default(),
             fence_ibs: None,
             on_card: VecDeque::new(),
+            retired: Vec::new(),
         })
     }
 
@@ -268,8 +282,8 @@ impl SpaceVm {
     }
 
     /// Sends command buffers already mapped here to run in order on the engine family `ip_type`,
-    /// and doesn't wait for them. The last is the fence writer in `slot`.
-    pub fn send(&mut self, ip_type: u32, ibs: &[Ib], slot: usize) -> io::Result<()> {
+    /// and doesn't wait for them. The last is the fence writer in `slot`, which writes `fence`.
+    pub fn send(&mut self, ip_type: u32, ibs: &[Ib], slot: usize, fence: GuestFence) -> io::Result<()> {
         let Some(fence_ibs) = &self.fence_ibs else {
             return Err(io::Error::other("no fence writers were made here"));
         };
@@ -280,13 +294,27 @@ impl SpaceVm {
         buffers.push(fence_ibs.handle());
         match submit::submit_all(&self.file, context, ip_type, ibs, &buffers, &retired) {
             Ok(_) => {
-                self.on_card.push_back(OnCard { slot, retired });
+                self.on_card.push_back(OnCard { slot, retired, fence: Some(fence) });
                 Ok(())
             }
             Err(error) => {
                 retired.destroy(&self.file);
                 Err(error)
             }
+        }
+    }
+
+    /// The fences of the runs the kernel has retired since this was last asked, looking at them all.
+    pub fn take_retired(&mut self) -> Vec<GuestFence> {
+        self.take_back_slots(true);
+        std::mem::take(&mut self.retired)
+    }
+
+    /// Forgets the fences of a queue that has gone.
+    pub fn forget_queue(&mut self, queue: u32) {
+        self.retired.retain(|fence| fence.queue != queue);
+        for run in &mut self.on_card {
+            run.fence = run.fence.filter(|fence| fence.queue != queue);
         }
     }
 
@@ -299,6 +327,7 @@ impl SpaceVm {
             if run.retired.signalled(&self.file).unwrap_or(true) {
                 run.retired.destroy(&self.file);
                 fence_ibs.give_back(run.slot);
+                self.retired.extend(run.fence);
             } else if all {
                 still_on_card.push_back(run);
             } else {

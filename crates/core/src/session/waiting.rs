@@ -539,6 +539,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         if self.pending.is_empty() {
             return self.how_soon();
         }
+        if self.pending.iter().any(|item| matches!(item, Pending::Watch { .. })) {
+            self.backend.poll_work(&mut services!(self), now);
+        }
         // The two lists swap places, so polling does not allocate.
         let spare = std::mem::take(&mut self.pending_spare);
         let mut items = std::mem::replace(&mut self.pending, spare);

@@ -66,11 +66,11 @@ use nodes::nodes;
 use run_wait::Patience;
 use screen_copy::{CopyPlan, PIXEL_BYTES};
 use sdma_copy::{LinearCopy, TiledCopy};
-use space_vm::{Origin, Ran, SpaceVm};
+use space_vm::{GuestFence, Origin, Ran, SpaceVm};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::os::fd::OwnedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use submit::Ib;
 
 /// How this backend names the host driver's branch. There is no Windows-style branch here: the host
@@ -111,16 +111,18 @@ pub struct AmdBackend {
     patience: Patience,
     /// Runs the core has had prepared and not yet let go, by the doorbell that sends each.
     prepared: HashMap<u64, PreparedRun>,
+    /// When the runs on the card were last looked at.
+    looked_at_runs: Option<Instant>,
 }
 
 /// A run ready to send: its command buffers, the fence writer in `slot` last.
 #[derive(Debug)]
 struct PreparedRun {
     space: SpaceId,
-    queue: u32,
     ip_type: u32,
     ibs: Vec<Ib>,
     slot: usize,
+    fence: GuestFence,
 }
 
 /// The bytes of a fence the card writes.
@@ -135,7 +137,29 @@ fn send(vm: &mut SpaceVm, run: &PreparedRun) -> io::Result<()> {
             ib.address, ib.bytes
         )));
     }
-    vm.send(run.ip_type, &run.ibs, run.slot)
+    vm.send(run.ip_type, &run.ibs, run.slot, run.fence)
+}
+
+/// How often runs on the card are looked at for ones the kernel ended early.
+const LOOK_AT_RUNS_EVERY: Duration = Duration::from_millis(50);
+
+/// Stands in at the fence of each run the kernel retired before the card wrote it: one it reset,
+/// or cancelled after a reset. A run that went through wrote its fence before the kernel saw it end.
+fn stand_in_for_lost_runs(host: &mut dyn HostServices, retired: Vec<GuestFence>) {
+    for fence in retired {
+        let Ok(reached) = host.fence_value(fence.address) else { continue };
+        if reached >= fence.value {
+            continue;
+        }
+        log::warn!(
+            "queue {:#x}: the kernel ended a run before it wrote fence value {:#x}, so the host writes it",
+            fence.queue,
+            fence.value
+        );
+        if let Err(error) = host.write_u64(fence.address, fence.value) {
+            log::warn!("standing in for a lost run: {error}");
+        }
+    }
 }
 
 impl std::fmt::Debug for AmdBackend {
@@ -161,6 +185,7 @@ impl AmdBackend {
             copy_ib: None,
             patience: Patience::RUN,
             prepared: HashMap::new(),
+            looked_at_runs: None,
         })
     }
 
@@ -833,8 +858,10 @@ impl Backend for AmdBackend {
                 Ok(Some((slot, last))) => {
                     ibs.push(last);
                     let doorbell = self.new_id();
-                    let (space, queue, ip_type) = (work.space, work.queue, node.ip_type);
-                    self.prepared.insert(doorbell, PreparedRun { space, queue, ip_type, ibs, slot });
+                    let fence =
+                        GuestFence { queue: work.queue, address: work.fence, value: work.fence_value };
+                    let (space, ip_type) = (work.space, node.ip_type);
+                    self.prepared.insert(doorbell, PreparedRun { space, ip_type, ibs, slot, fence });
                     WorkStart::Started { doorbell, work: 1 }
                 }
                 Ok(None) => WorkStart::Busy,
@@ -901,10 +928,13 @@ impl Backend for AmdBackend {
     }
 
     fn close_queue(&mut self, queue: u32) {
+        for space in self.spaces.values_mut() {
+            space.vm.forget_queue(queue);
+        }
         let unsent: Vec<u64> = self
             .prepared
             .iter()
-            .filter(|(_, run)| run.queue == queue)
+            .filter(|(_, run)| run.fence.queue == queue)
             .map(|(&doorbell, _)| doorbell)
             .collect();
         for doorbell in unsent {
@@ -913,6 +943,16 @@ impl Backend for AmdBackend {
             {
                 space.vm.drop_fence_writer(run.slot);
             }
+        }
+    }
+
+    fn poll_work(&mut self, host: &mut dyn HostServices, now: Instant) {
+        if self.looked_at_runs.is_some_and(|last| now.saturating_duration_since(last) < LOOK_AT_RUNS_EVERY) {
+            return;
+        }
+        self.looked_at_runs = Some(now);
+        for space in self.spaces.values_mut() {
+            stand_in_for_lost_runs(host, space.vm.take_retired());
         }
     }
 
@@ -963,7 +1003,72 @@ impl Backend for AmdBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use guesthouse_backend::{CardLabel, DriverVersion, StartDecision, decide_start};
+    use guesthouse_backend::{
+        CardLabel, DriverVersion, GuestSpan, MemoryError, SharedSpan, StartDecision, decide_start,
+    };
+
+    /// Guest memory that holds only fences, by guest physical address.
+    #[derive(Default)]
+    struct Fences(HashMap<u64, u64>);
+
+    impl HostServices for Fences {
+        fn take_gpu_addresses(&mut self, _size: u64, _align: u64) -> Result<u64, BackendError> {
+            unreachable!()
+        }
+        fn read_at_gpu_address(&self, _space: SpaceId, _address: u64, _out: &mut [u8]) -> Option<usize> {
+            unreachable!()
+        }
+        fn shared_span(&self, _space: SpaceId, _address: u64) -> Option<SharedSpan> {
+            unreachable!()
+        }
+        fn guest_span(&self, _space: SpaceId, _address: u64) -> Option<GuestSpan> {
+            unreachable!()
+        }
+        fn read_guest_span(&self, _space: SpaceId, _address: u64, _out: &mut [u8]) -> Option<usize> {
+            unreachable!()
+        }
+        fn write_guest_span(&mut self, _space: SpaceId, _address: u64, _value: u32) -> bool {
+            unreachable!()
+        }
+        fn write_u32(&mut self, _address: u64, _value: u32) -> Result<(), MemoryError> {
+            unreachable!()
+        }
+        fn write_u64(&mut self, address: u64, value: u64) -> Result<(), MemoryError> {
+            self.0.insert(address, value);
+            Ok(())
+        }
+        fn read_guest(&self, _address: u64, _out: &mut [u8]) -> usize {
+            unreachable!()
+        }
+        fn fence_value(&self, fence: u64) -> Result<u64, MemoryError> {
+            Ok(self.0.get(&fence).copied().unwrap_or(0))
+        }
+    }
+
+    #[test]
+    fn a_run_that_ended_before_writing_its_fence_gets_it_written_by_the_host() {
+        const WRITTEN: u64 = 0x1000;
+        const LOST: u64 = 0x2000;
+        let mut host = Fences::default();
+        host.0.insert(WRITTEN, 7);
+        host.0.insert(LOST, 3);
+        let retired = vec![
+            GuestFence { queue: 1, address: WRITTEN, value: 7 },
+            GuestFence { queue: 2, address: LOST, value: 4 },
+        ];
+        stand_in_for_lost_runs(&mut host, retired);
+        assert_eq!(host.0[&WRITTEN], 7);
+        assert_eq!(host.0[&LOST], 4);
+    }
+
+    #[test]
+    fn a_fence_already_past_a_lost_run_is_left_alone() {
+        const FENCE: u64 = 0x1000;
+        let mut host = Fences::default();
+        host.0.insert(FENCE, 9);
+        stand_in_for_lost_runs(&mut host, vec![GuestFence { queue: 1, address: FENCE, value: 8 }]);
+        assert_eq!(host.0[&FENCE], 9);
+    }
 
     fn setup_for(version: &str) -> Setup {
         Setup {

@@ -30,9 +30,18 @@ const PACKET3_OPCODE_SHIFT: u32 = 8;
 /// Stores a value in memory when everything before it has left the pipe.
 const RELEASE_MEM: u32 = 0x49;
 const RELEASE_MEM_WORDS: u32 = 7;
-const EVENT_BOTTOM_OF_PIPE_TS: u32 = 0x28;
+/// Writes back and invalidates the caches at end of pipe, then stores the value, as amdgpu's own
+/// fence does: what the run wrote is in memory before the guest sees its fence move.
+const EVENT_CACHE_FLUSH_AND_INV_TS: u32 = 0x14;
 /// The index every timestamp event carries.
 const EVENT_INDEX_TS: u32 = 5 << 8;
+// The cache actions of RELEASE_MEM on GFX 10 and 11, and its write policy.
+const GCR_GLM_WB: u32 = 1 << 12;
+const GCR_GLM_INV: u32 = 1 << 13;
+const GCR_GL2_WB: u32 = 1 << 21;
+const GCR_SEQ: u32 = 1 << 22;
+const CACHE_POLICY_BYPASS: u32 = 3 << 25;
+const FLUSH_CACHES: u32 = GCR_SEQ | GCR_GL2_WB | GCR_GLM_INV | GCR_GLM_WB | CACHE_POLICY_BYPASS;
 const DATA_64_BIT: u32 = 2 << 29;
 const SEND_DATA_AFTER_WRITE_CONFIRM: u32 = 3 << 24;
 
@@ -61,7 +70,7 @@ pub fn words(writer: Writer, fence: u64, value: u64) -> [u32; SLOT_WORDS] {
     match writer {
         Writer::EndOfPipe => [
             PACKET3 | (RELEASE_MEM_WORDS - 1) << PACKET3_COUNT_SHIFT | RELEASE_MEM << PACKET3_OPCODE_SHIFT,
-            EVENT_BOTTOM_OF_PIPE_TS | EVENT_INDEX_TS,
+            FLUSH_CACHES | EVENT_CACHE_FLUSH_AND_INV_TS | EVENT_INDEX_TS,
             DATA_64_BIT | SEND_DATA_AFTER_WRITE_CONFIRM,
             fence as u32,
             (fence >> 32) as u32,
@@ -155,7 +164,7 @@ mod tests {
     fn the_end_of_pipe_writer_is_one_packet_with_the_address_and_all_of_the_value() {
         let words = words(Writer::EndOfPipe, FENCE, VALUE);
         assert_eq!(words[0], 0xC006_4900);
-        assert_eq!(words[1], 0x528);
+        assert_eq!(words[1], 0x0660_3514, "the cache flush and fields of amdgpu's own fence");
         assert_eq!(words[2], 0x4300_0000);
         assert_eq!(words[3..7], [0x3456_7008, 0x12, 2, 1]);
         assert_eq!(words[7], 0);

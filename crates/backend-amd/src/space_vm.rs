@@ -8,6 +8,7 @@
 //! are, and let go after the last.
 
 use crate::device::Device;
+use crate::fault::{self, Fault};
 use crate::memory::{self, GemHandle, MapFlags};
 use crate::run_wait::{self, Patience, Waited};
 use crate::submit::{self, Context, Ib, Syncobj};
@@ -111,6 +112,8 @@ pub struct SpaceVm {
     books: Books,
     /// One amdgpu context for each engine family, made on first use. Closing the file frees them.
     contexts: HashMap<u32, Context>,
+    /// Whether work here has faulted, after which nothing more is run here.
+    faults: fault::Watch,
 }
 
 /// How a run on the card ended.
@@ -121,11 +124,19 @@ pub enum Ran {
     Refused,
     /// The kernel neither finished nor reset it in time.
     Hung,
+    /// Work here reached an address with nothing mapped, in this run or an earlier one. Nothing
+    /// more is run here.
+    Faulted(Fault),
 }
 
 impl SpaceVm {
     pub fn open(device: &Device) -> io::Result<Self> {
-        Ok(Self { file: device.open_again()?, books: Books::default(), contexts: HashMap::new() })
+        Ok(Self {
+            file: device.open_again()?,
+            books: Books::default(),
+            contexts: HashMap::new(),
+            faults: fault::Watch::default(),
+        })
     }
 
     /// The buffer behind an address here, by its handle on the first open, and the offset into it.
@@ -144,9 +155,27 @@ impl SpaceVm {
         ibs.iter().find(|ib| !self.books.holds(ib.address, u64::from(ib.bytes)))
     }
 
+    /// The fault that stopped this space, if its work has had one.
+    pub fn faulted(&self) -> Option<Fault> {
+        self.faults.found()
+    }
+
     /// Runs command buffers already mapped here on the engine family `ip_type`, in order, and waits
-    /// for the last to retire, as long as `patience` allows.
+    /// for the last to retire, as long as `patience` allows. Nothing is run once work here has
+    /// faulted. amdgpu can record a fault a moment after its run retires, so there is a look before
+    /// a run as well as after it.
     pub fn run(&mut self, ip_type: u32, ibs: &[Ib], patience: Patience) -> io::Result<Ran> {
+        if let Some(fault) = self.faults.look(&self.file) {
+            return Ok(Ran::Faulted(fault));
+        }
+        let ran = self.submit_and_wait(ip_type, ibs, patience);
+        match (ran, self.faults.look(&self.file)) {
+            (Ok(Ran::Retired), Some(fault)) => Ok(Ran::Faulted(fault)),
+            (ran, _) => ran,
+        }
+    }
+
+    fn submit_and_wait(&mut self, ip_type: u32, ibs: &[Ib], patience: Patience) -> io::Result<Ran> {
         let context = match self.contexts.entry(ip_type) {
             Entry::Occupied(slot) => slot.into_mut(),
             Entry::Vacant(slot) => {

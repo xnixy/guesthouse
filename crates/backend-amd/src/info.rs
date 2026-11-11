@@ -216,7 +216,7 @@ impl EngineSet {
     }
 }
 
-fn query(file: &impl AsRawFd, query: u32, reply: &mut [u8]) -> io::Result<()> {
+pub(crate) fn query(file: &impl AsRawFd, query: u32, reply: &mut [u8]) -> io::Result<()> {
     let mut request = [0u8; INFO_REQUEST_SIZE];
     put64(&mut request, INFO_RETURN_POINTER, reply.as_mut_ptr() as u64);
     put32(&mut request, INFO_RETURN_SIZE, reply.len() as u32);

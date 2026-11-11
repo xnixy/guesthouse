@@ -40,12 +40,24 @@ pub fn device_query() -> u64 {
         | (DRM_COMMAND_BASE + DRM_XE_DEVICE_QUERY)
 }
 
-/// A DRM ioctl against an open file, tried again if a signal cuts it short. The request buffer is
-/// the size the number says, and any pointer inside it points at a live buffer of the size it gives.
-pub fn drm_ioctl(file: &impl AsRawFd, ioctl: u64, request: &mut [u8]) -> io::Result<()> {
+/// The request size an ioctl number carries.
+const IOCTL_SIZE_MASK: u64 = 0x3FFF;
+
+/// A DRM ioctl against an open file, tried again if a signal cuts it short. A request shorter than
+/// the size the number carries is refused before the kernel sees it.
+///
+/// # Safety
+///
+/// Any pointer inside the request must point at a buffer that is live, writable and as long as
+/// the request says, as the kernel writes there.
+pub unsafe fn drm_ioctl(file: &impl AsRawFd, ioctl: u64, request: &mut [u8]) -> io::Result<()> {
+    let size = ((ioctl >> IOCTL_SIZE_SHIFT) & IOCTL_SIZE_MASK) as usize;
+    if request.len() < size {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "a request shorter than its ioctl's size"));
+    }
     loop {
-        // SAFETY: the request is a live buffer of the size the ioctl number carries, and the caller
-        // keeps any buffer it points at alive and as long as it says. The kernel writes only there.
+        // SAFETY: the request holds at least the size the ioctl number carries, which is all the
+        // kernel reads or writes of it, and the caller vouches for any pointer inside it.
         let result = unsafe { libc::ioctl(file.as_raw_fd(), ioctl as _, request.as_mut_ptr()) };
         if result >= 0 {
             return Ok(());
@@ -124,6 +136,14 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use std::{env, process};
+
+    #[test]
+    fn a_request_shorter_than_its_number_says_never_reaches_the_kernel() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: the request holds no pointer.
+        let refused = unsafe { drm_ioctl(&file, device_query(), &mut [0; DEVICE_QUERY_SIZE - 1]) };
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
 
     #[test]
     fn the_query_number_follows_the_kernels_encoding() {

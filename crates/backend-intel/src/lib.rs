@@ -220,20 +220,24 @@ impl Backend for IntelBackend {
         card.vendor == INTEL_VENDOR
     }
 
-    /// The host is the Linux kernel's xe and the guest one release of Intel's driver. They are
-    /// different drivers on purpose, so the pair is let through when the guest's release is the one
-    /// this backend knows. Nothing has been tested yet, so a start always warns.
+    /// The host is the Linux kernel's xe and the guest one release of Intel's driver. xe has no
+    /// branches of its own: the host's side of that release's data is this backend, written for it,
+    /// so the host is said to be on the guest release's branch. That is all that lets the pair
+    /// through, and only for the release this backend knows. Nothing has been tested yet, so a start
+    /// always warns.
     fn survey(setup: &Setup) -> Result<DriverSurvey, Refusal> {
         let version = setup.guest_driver_version.to_string();
         let known = guest_driver::GUEST_RELEASES.contains(&version.as_str());
         let kernel = sysfs::kernel_release().unwrap_or_else(|| "kernel".into());
+        let host = format!("{HOST_BRANCH} {kernel}");
+        let branch = if known { setup.guest_branch.clone() } else { HOST_BRANCH.into() };
         Ok(DriverSurvey {
-            host: DriverFound { version: kernel, branch: HOST_BRANCH.into() },
+            host: DriverFound { version: host, branch },
             guest: DriverFound { version, branch: setup.guest_branch.clone() },
             host_branch_known: true,
             guest_branch_known: known,
             host_version_tested: false,
-            mixed_branches_tested: known,
+            mixed_branches_tested: false,
             card: CardLabel::Experimental,
         })
     }
@@ -455,6 +459,7 @@ mod tests {
         let survey = IntelBackend::survey(&setup_for(guest_driver::GUEST_RELEASES[0])).unwrap();
         assert!(matches!(decide_start(&survey), StartDecision::RunWithWarning(_)));
         assert_eq!(survey.card, CardLabel::Experimental);
+        assert!(!survey.mixed_branches_tested && !survey.host_version_tested, "nothing is claimed tested");
         let survey = IntelBackend::survey(&setup_for("31.0.101.5000")).unwrap();
         assert!(matches!(decide_start(&survey), StartDecision::Refuse(_)));
     }

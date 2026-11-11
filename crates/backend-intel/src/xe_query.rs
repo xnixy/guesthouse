@@ -32,7 +32,8 @@ const LIST_HEADER: usize = 8;
 pub fn ask(file: &impl AsRawFd, kind: u32) -> io::Result<Vec<u8>> {
     let mut request = [0u8; DEVICE_QUERY_SIZE];
     request[QUERY_KIND..QUERY_KIND + 4].copy_from_slice(&kind.to_le_bytes());
-    drm_ioctl(file, device_query(), &mut request)?;
+    // SAFETY: with no buffer given, the request holds no pointer, and xe only writes the size.
+    unsafe { drm_ioctl(file, device_query(), &mut request)? };
     let size = dword(&request, QUERY_SIZE).unwrap_or(0) as usize;
     let mut answer = vec![0u8; size];
     ask_into(file, kind, &mut answer)?;
@@ -46,7 +47,9 @@ pub fn ask_into(file: &impl AsRawFd, kind: u32, buffer: &mut [u8]) -> io::Result
     request[QUERY_SIZE..QUERY_SIZE + 4].copy_from_slice(&(buffer.len() as u32).to_le_bytes());
     let data = buffer.as_mut_ptr() as u64;
     request[QUERY_DATA..QUERY_DATA + 8].copy_from_slice(&data.to_le_bytes());
-    drm_ioctl(file, device_query(), &mut request)
+    // SAFETY: the pointer is `buffer`'s, which is borrowed mutably for the call and as long as the
+    // size the request gives.
+    unsafe { drm_ioctl(file, device_query(), &mut request) }
 }
 
 /// The entries of a list answer, each `entry` bytes, as many as its count says and the answer holds.

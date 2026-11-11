@@ -9,6 +9,8 @@ Everything in this repo is under GPL-2.0-or-later, apart from what's listed here
 - The tables in the `nvfwd` device in `qemu/qemu-gpupv.patch` (`nv_tables.h`, `nv_tables_extra.h`, `fd_controls.h`, `class_tables.h`, `uvm_tables.h`), and `linux/guest/fd_controls.h` and `linux/guest/nv_tables_extra.h`, are made from those same modules, and each carries that notice. The offsets in `rm_layout.h` and `rusd.c` are from their public headers. Most of the numbers in `linux/allow.txt` are from those headers too.
 - The Time Synchronization channel in `qemu/qemu-gpupv.patch` follows Linux's `hv_util.c`. Its instance ID and message layout come from Microsoft's [OpenVMM](https://github.com/microsoft/openvmm), under the MIT licence.
 - The DMA engine's copy packet in `crates/backend-amd/src/sdma_copy.rs` follows the one in Mesa's `src/amd/common/ac_cmdbuf_sdma.c`, under the MIT licence.
+- The xe query numbers and layouts in `crates/backend-intel/src/ioctl.rs` and `xe_query.rs` come from Linux's `include/uapi/drm/xe_drm.h`, under the MIT licence. The hwconfig key numbers in `crates/backend-intel/src/hwconfig.rs` come from Mesa's `src/intel/dev/intel_hwconfig_types.h`, under the MIT licence.
+- The platform numbers in `crates/backend-intel/src/generation.rs` and `protocol/`, and the names of the fields they fill, come from Intel's [gmmlib](https://github.com/intel/gmmlib) and [compute-runtime](https://github.com/intel/compute-runtime), under the MIT licence. Their notice is below.
 - A release's QEMU comes with [virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer), built from upstream's source as it is, under the MIT licence. It isn't in this repo, and its source is in the release's bundled source, with its licence.
 - `linux/layer/zink_on_nvidia.c` and `linux/cast/glx_dri3.c` are mine, under the MIT licence, so that their fixes can go to Mesa.
 
@@ -384,4 +386,31 @@ proprietary programs.  If your program is a subroutine library, you may
 consider it more useful to permit linking proprietary applications with the
 library.  If this is what you want to do, use the GNU Library General
 Public License instead of this License.
+```
+
+## Intel's gmmlib and compute-runtime
+
+```
+MIT License
+
+Copyright (c) 2017 Intel Corporation
+Copyright (C) 2021 Intel Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

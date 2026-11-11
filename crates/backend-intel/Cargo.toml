@@ -1,0 +1,29 @@
+[package]
+name = "guesthouse-backend-intel"
+description = "The Intel backend: the host's xe driver, read but not yet run on, and the private data Intel's Windows driver sends."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+guesthouse-backend.workspace = true
+guesthouse-messages.workspace = true
+# ioctl, which the standard library does not offer. Same as the other backends.
+libc = "0.2"
+# The facade, as in the core.
+log = "0.4"
+
+[dev-dependencies]
+guesthouse-backend-standin.workspace = true
+guesthouse-core.workspace = true
+
+[[bin]]
+# Prints what the host's xe driver says about the card, for a tester to paste. It only reads: it
+# makes no address space, buffer or queue, so nothing runs on the card.
+name = "intel-probe"
+path = "src/bin/intel_probe.rs"
+
+[lints]
+workspace = true

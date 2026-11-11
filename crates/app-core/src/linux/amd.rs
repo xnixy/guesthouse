@@ -6,31 +6,18 @@
 //! A card is found by AMD's vendor ID in the DRM class, as render node numbers move between boots.
 
 use crate::context::Context;
-use crate::machine::{Machine, sorted_names};
-use crate::setup::cards::{find_cards, product_name};
-use crate::usb::sysfs_text;
+use crate::gpu_maker::GpuMaker;
+use crate::machine::Machine;
+use crate::render_cards::{RenderCard, render_cards};
+use crate::setup::cards::find_cards;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-const AMD_VENDOR: &str = "0x1002";
-const AMD_NAMES_START: &str = "\n1002  ";
-const RENDER_PREFIX: &str = "renderD";
-const DRM_DEVICE_LINK: &str = "device";
-/// Where the render nodes are, which the DRM class names.
-const RENDER_NODES: &str = "/dev/dri";
 /// Written in the machine's folder when the guest said native context failed, and why.
 const FALLBACK_FILE: &str = "amd-fallback";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AmdCard {
-    /// Where the card is on the PCI bus, as sysfs names it.
-    pub pci: String,
-    /// Its render node, as `/dev/dri/renderD128`.
-    pub render_node: PathBuf,
-    pub name: String,
-    /// Its PCI device id.
-    pub device: u32,
-}
+/// An AMD card here, found the way every maker's are.
+pub type AmdCard = RenderCard;
 
 /// How the guest's 3D reaches the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,31 +38,10 @@ impl AmdMode {
     }
 }
 
-fn hex_number(text: &str) -> Option<u32> {
-    u32::from_str_radix(text.trim_start_matches("0x"), 16).ok()
-}
-
-fn card_of(drm_class: &Path, names: &Path, node: &str) -> Option<AmdCard> {
-    let device = drm_class.join(node).join(DRM_DEVICE_LINK);
-    if sysfs_text(&device.join("vendor")) != AMD_VENDOR {
-        return None;
-    }
-    let pci = fs::read_link(&device).ok()?.file_name()?.to_string_lossy().into_owned();
-    let number = hex_number(&sysfs_text(&device.join("device")))?;
-    let product =
-        product_name(AMD_NAMES_START, number, names).unwrap_or_else(|| format!("card {number:04x}"));
-    let render_node = Path::new(RENDER_NODES).join(node);
-    Some(AmdCard { pci, render_node, name: format!("AMD {product}"), device: number })
-}
-
 /// The AMD cards with a render node, by PCI address. Any of them will do, iGPU or not, and so will the
 /// one that drives the host's desktop.
 pub fn amd_cards(context: &Context) -> Vec<AmdCard> {
-    let nodes = sorted_names(&context.drm_class).into_iter().filter(|name| name.starts_with(RENDER_PREFIX));
-    let mut cards: Vec<AmdCard> =
-        nodes.filter_map(|node| card_of(&context.drm_class, &context.pci_names, &node)).collect();
-    cards.sort_by(|one, other| one.pci.cmp(&other.pci));
-    cards
+    render_cards(context, GpuMaker::Amd)
 }
 
 /// The card at this address, if it's still in this PC.

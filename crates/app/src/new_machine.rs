@@ -40,7 +40,7 @@ const CARD_TITLE: &str = "Card";
 const AMD_NOT_FINISHED: &str = "starts on the AMD card. GPU-PV on AMD is not finished, so Windows may have no \
                                 GPU there yet";
 /// Said plainly, as Intel's support only logs what the guest's driver asks for.
-const INTEL_NOT_FINISHED: &str = "starts on the Intel card. Intel support is at an early test stage: Windows                                   runs, but nothing is drawn by the card yet";
+const INTEL_NOT_FINISHED: &str = "starts on the Intel card. Intel support is at an early test stage: Windows runs, but nothing is drawn by the card yet";
 const CARD_NOTE: &str = "Windows is installed for this card's maker. It can move to another card of the same maker \
                          later, but not to another maker's.";
 

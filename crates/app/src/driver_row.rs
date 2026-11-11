@@ -27,7 +27,7 @@ fn ask(maker: GpuMaker) -> String {
             "Choose AMD's installer for Adrenalin {AMD_RELEASE}. The display driver is taken out of it."
         ),
         GpuMaker::Intel => format!(
-            "Choose Intel's installer for graphics driver {INTEL_WINDOWS_DRIVER}, gfx_win_101.9175.exe.              The drivers for the card are taken out of it."
+            "Choose Intel's installer for graphics driver {INTEL_WINDOWS_DRIVER}, gfx_win_101.9175.exe. The drivers for the card are taken out of it."
         ),
         GpuMaker::Nvidia => String::new(),
     }

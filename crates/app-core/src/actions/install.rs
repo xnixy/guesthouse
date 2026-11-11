@@ -1,5 +1,6 @@
 //! Installing Windows: the answer disc, the wait for setup, and the check of what it made.
 
+use crate::gpu_maker::GpuMaker;
 use super::complete_host_driver;
 use super::desktop::{BOOT_LINE, SERIAL_FILE, count, wait_for_desktop};
 use super::identity::set_up_identity;
@@ -27,6 +28,7 @@ use std::time::Duration;
 
 pub(super) const INSTALL_FILES: [&str; 4] =
     ["autounattend.xml", "SetupComplete.cmd", "setup.ps1", "agent.ps1"];
+const SYSTEM_FILES_SCRIPT: &str = "nv-files.ps1";
 const INSTALL_HOURS: u64 = 2;
 /// Setup writes all the time until the desktop, so a disk that stops growing means it's waiting for
 /// someone, or stuck. The longest quiet stretch in a normal install is well under this.
@@ -96,6 +98,10 @@ fn fill_answer_disc(context: &Context, machine: &Machine, files: &Path) -> Resul
         fs::copy(context.paths.guest_files().join(name), files.join(name))?;
     }
     fs::copy(context.paths.guest_files().join(SETMODE_FILE), files.join(SETMODE_FILE))?;
+    if machine.windows_maker() == Some(GpuMaker::Intel) {
+        // Setup places Intel's loaders in the system folders with the script that does it at a start.
+        fs::copy(context.paths.guest_files().join(SYSTEM_FILES_SCRIPT), files.join(SYSTEM_FILES_SCRIPT))?;
+    }
     let password = make_password(context, machine)?;
     let zone = zones::host_zone(zones::HOST_ZONE_LINK);
     let answers = answer_file(context, &zone, machine.account(), &password)?;

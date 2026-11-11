@@ -1,9 +1,10 @@
 # Copies the driver's files to where a normal install puts them, so programs find them by name. The
 # app sends the list. A file already there stays unless this one is newer: the file version decides,
 # then the date.
-# Usage: nv-files.ps1 LIST
-param([Parameter(Mandatory)][string]$List)
-$store = 'C:\Windows\System32\HostDriverStore\FileRepository\nv_dispi.inf_amd64_gpupv'
+# Usage: nv-files.ps1 LIST [-StoreFolder NAME]
+# The files are taken from the driver's folder in the host driver store: NVIDIA's unless another is named.
+param([Parameter(Mandatory)][string]$List, [string]$StoreFolder = 'nv_dispi.inf_amd64_gpupv')
+$store = Join-Path 'C:\Windows\System32\HostDriverStore\FileRepository' $StoreFolder
 
 function Test-Newer($source, $target) {
     if (-not (Test-Path -LiteralPath $target)) { return $true }

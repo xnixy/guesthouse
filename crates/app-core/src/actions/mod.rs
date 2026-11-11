@@ -20,7 +20,7 @@ use amd_files::{bring_amd_driver_up_to_date, complete_host_driver};
 pub use desktop::{apply_share, boots, rebooted};
 use desktop::{note_boot, set_up_desktop, wait_for_desktop};
 use gpu_check::check_gpu;
-use guest_files::{place_driver_files, place_profile_store};
+use guest_files::{place_driver_files, place_profile_store, place_system_files};
 use identity::{after_failed_gpu, set_up_identity};
 use identity_restart::restart_after_switch;
 use identity_switch::{new_vm_needed, stop_for_new_identity};
@@ -211,10 +211,10 @@ fn place_files_for_maker(task: &mut Task) -> Result<()> {
             place_profile_store(task)
         }
         Some(GpuMaker::Amd) => bring_amd_driver_up_to_date(task),
-        // Intel's support is new, so there is no earlier layout of its driver to bring up to date, and
-        // what the guest was given at install is all it has. Another maker's files would put a driver
-        // in the guest that isn't its card's.
-        Some(GpuMaker::Intel) => Ok(()),
+        // Intel's support is new, so there is no earlier layout of its driver to bring up to date. The
+        // guest has the loaders from install, and this puts back any it lacks. Another maker's files
+        // would put a driver in the guest that isn't its card's.
+        Some(GpuMaker::Intel) => place_system_files(task),
         None => Ok(()),
     }
 }
@@ -364,7 +364,7 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
         "force" => force(task, first),
         "grow" => grow(task, text.parse().map_err(|_| Failure::new("That is not a size."))?),
         "resume" => resume(task),
-        "dxdiag" => diagnose::dxdiag(task),
+        "dxdiag" | "api-check" => diagnose::dxdiag(task),
         "clean_up" => clean_up(task),
         "after_reboot" => after_reboot(task),
         "apply_display" => {

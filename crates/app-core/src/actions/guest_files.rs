@@ -7,7 +7,10 @@ use super::desktop::{GUEST_FOLDER, put_guest_file};
 use crate::agent::guest_script;
 use crate::failure::Result;
 use crate::log::write_log;
+use crate::setup::guest_driver::INTEL_STORE_FOLDER;
 use crate::setup::guest_files::guest_file_list;
+use crate::setup::intel::{SYSTEM_LIST, intel_driver_folder};
+use std::fs;
 use crate::text::base64_encode;
 
 const SCRIPT_NAME: &str = "nv-files.ps1";
@@ -48,9 +51,11 @@ fn count_missing(task: &Task) -> Option<u32> {
     said.split(MISSING_MARK).nth(1)?.trim().parse().ok()
 }
 
-fn run_placing_script(task: &Task) -> String {
+/// `store` names the driver's folder in the guest's driver store, where NVIDIA's is the script's own.
+fn run_placing_script(task: &Task, store: Option<&str>) -> String {
     let (script, list, log) = (guest_path(SCRIPT_NAME), guest_path(LIST_NAME), guest_path(LOG_NAME));
-    task.ask_guest(&format!("& {script} {list} | Tee-Object {log}"), PLACE_SECONDS)
+    let store = store.map(|name| format!(" -StoreFolder {name}")).unwrap_or_default();
+    task.ask_guest(&format!("& {script} {list}{store} | Tee-Object {log}"), PLACE_SECONDS)
 }
 
 /// The folder NVIDIA's settings store lives in, with the driver's own profile database in it. A guest
@@ -82,8 +87,26 @@ pub(super) fn place_driver_files(task: &mut Task) -> Result<()> {
             return Ok(());
         }
     };
+    place_listed_files(task, &list, None)
+}
+
+/// What Intel's INF puts in the system folders, from the list unpacked with its driver: the loaders
+/// the guest's programs find Intel's OpenCL, Vulkan and Level Zero drivers through. A guest that
+/// has them all is left alone.
+pub(super) fn place_system_files(task: &mut Task) -> Result<()> {
+    let list = intel_driver_folder(task.context).and_then(|folder| fs::read_to_string(folder.join(SYSTEM_LIST)).ok());
+    match list.filter(|list| !list.trim().is_empty()) {
+        Some(list) => place_listed_files(task, &list, Some(INTEL_STORE_FOLDER)),
+        None => {
+            write_log(task.context, "driver files: Intel's driver has no list of system files")?;
+            Ok(())
+        }
+    }
+}
+
+fn place_listed_files(task: &mut Task, list: &str, store: Option<&str>) -> Result<()> {
     task.step("Checking the driver's files");
-    send_list(task, &list);
+    send_list(task, list);
     if count_missing(task).is_none_or(|count| count == 0) {
         return Ok(());
     }
@@ -94,7 +117,7 @@ pub(super) fn place_driver_files(task: &mut Task) -> Result<()> {
     }
     task.step("Placing the driver's files");
     put_guest_file(task, SCRIPT_NAME, &guest_path(SCRIPT_NAME))?;
-    let said = run_placing_script(task);
+    let said = run_placing_script(task, store);
     write_log(task.context, &format!("driver files: {}", said.trim()))?;
     if said.contains(FAILED_MARK) {
         task.error = "Some of the driver's files did not reach Windows. The log says which.".to_owned();

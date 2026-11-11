@@ -26,7 +26,7 @@ const NVIDIA_STORE_FOLDER: &str = "nv_dispi.inf_amd64_gpupv";
 const AMD_DISC_FOLDER: &str = "amd";
 const AMD_STORE_FOLDER: &str = "amdxc.inf_amd64_gpupv";
 const INTEL_DISC_FOLDER: &str = "intel";
-const INTEL_STORE_FOLDER: &str = "iigd_dch.inf_amd64_gpupv";
+pub(crate) const INTEL_STORE_FOLDER: &str = "iigd_dch.inf_amd64_gpupv";
 const NOT_WINDOWS: &str = "Only a Windows machine is given a GPU driver.";
 
 /// The driver for this machine's guest, or why there is none yet.

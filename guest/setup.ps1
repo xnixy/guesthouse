@@ -24,6 +24,12 @@ foreach ($maker in $stores.Keys) {
     $store = Join-Path 'C:\Windows\System32\HostDriverStore\FileRepository' $stores[$maker]
     New-Item -ItemType Directory -Force $store | Out-Null
     robocopy $from $store /E /NP /NFL /NDL /NJH /NJS
+    # The loaders and runtime the driver's INF would put in the system folders, which the app lists.
+    $list = Join-Path $store 'system-files.txt'
+    $placer = Join-Path $PSScriptRoot 'nv-files.ps1'
+    if ($maker -eq 'intel' -and (Test-Path $list) -and (Test-Path $placer)) {
+        & $placer $list -StoreFolder $stores[$maker] | Out-File C:\gpupv\system-files.log
+    }
 }
 # A machine on an Intel card asks Intel's Direct3D 12 driver to load its classic module, so that what
 # a test run shows doesn't depend on the driver's own choice. 2 is the value said to do that, and

@@ -18,10 +18,14 @@ stand-in = ["dep:guesthouse-backend-standin"]
 nvidia = ["dep:guesthouse-backend-nvidia", "dep:serde_json", "dep:guesthouse-sensors"]
 # The AMD backend. With nvidia on as well, each run opens the card the app named for its guest.
 amd = ["dep:guesthouse-backend-amd", "dep:serde_json"]
+# The Intel backend, a first stage that runs nothing on the card and logs what the guest's driver
+# sends. With another backend on as well, each run opens the card the app named, the same way.
+intel = ["dep:guesthouse-backend-intel", "dep:serde_json"]
 
 [dependencies]
 guesthouse-backend.workspace = true
 guesthouse-backend-amd = { workspace = true, optional = true }
+guesthouse-backend-intel = { workspace = true, optional = true }
 guesthouse-backend-nvidia = { workspace = true, optional = true }
 guesthouse-backend-standin = { workspace = true, optional = true }
 guesthouse-core.workspace = true

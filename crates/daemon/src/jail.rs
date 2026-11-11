@@ -91,11 +91,12 @@ pub fn gpu_devices(devices: &Path, render_nodes: &Path) -> Vec<PathBuf> {
     found
 }
 
-#[cfg(feature = "amd")]
+#[cfg(any(feature = "amd", feature = "intel"))]
 impl Needs {
-    /// What the AMD daemon of this slot needs. Only the one render node is granted, so the other
-    /// cards' device files are not reachable from this process.
-    pub fn of_amd_card(
+    /// What the daemon of this slot needs for a card it reaches through one render node, as AMD's
+    /// and Intel's are. Only that node is granted, so the other cards' device files are not
+    /// reachable from this process.
+    pub fn of_render_node(
         slot: crate::slot::Slot,
         project: &Path,
         driver_folder: &Path,

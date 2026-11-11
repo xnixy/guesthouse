@@ -32,18 +32,6 @@ const VERSION_FIELD: usize = 0;
 const NEWEST: usize = USER_DRIVERS.len() - 1;
 const KERNEL_DRIVER: &str = "amdkmdag.sys";
 
-/// What DXCore looks up, by the lower-case name the core asks with. The strings are Microsoft's
-/// public attribute GUIDs: a GPU, then Direct3D 11, Direct3D 12, compute, machine learning and media.
-/// Without the list, DXCore has nothing to say this adapter can draw.
-const DXCORE_ATTRIBUTES: &[&str] = &[
-    "{B69EB219-3DED-4464-979F-A00BD4687006}",
-    "{8C47866B-7583-450D-F0F0-6BADA895AF4B}",
-    "{0C9ECE4D-2F6E-4F01-8C96-E89E331B47B1}",
-    "{248E2800-A793-4724-ABAA-23A6DE1BE090}",
-    "{B71B0D41-1088-422F-A27C-0250B7D3A988}",
-    "{8EB2C848-82F6-4B49-AA87-AECFCF0174C6}",
-];
-
 static LOGGED_DRIVER_NAME: AtomicBool = AtomicBool::new(false);
 
 /// Writes the user-mode driver path into `out`, keeping the guest's version dword.
@@ -72,8 +60,9 @@ pub fn registry(name: &RegistryName) -> Option<RegistryValue> {
             let path = format!("{DRIVER_STORE}\\{KERNEL_DRIVER}");
             Some(RegistryValue { value_type: None, bytes: utf16_zero(&path) })
         }
-        RegistryName::Value(name) if name.eq_ignore_ascii_case("dxcoreattributes") => {
-            Some(RegistryValue { value_type: Some(TYPE_STRING_LIST), bytes: utf16_list(DXCORE_ATTRIBUTES) })
+        RegistryName::Value(name) if name.eq_ignore_ascii_case(guest_text::DXCORE_ATTRIBUTES_VALUE) => {
+            let attributes = utf16_list(guest_text::DXCORE_GRAPHICS_ATTRIBUTES);
+            Some(RegistryValue { value_type: Some(TYPE_STRING_LIST), bytes: attributes })
         }
         RegistryName::Value(name) => super::api_drivers::registry_value(name),
     }

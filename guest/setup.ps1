@@ -17,13 +17,21 @@ powercfg /hibernate off
 bcdedit /set '{current}' highestmode on
 # Windows looks here for the driver's user-mode half, under the name the daemon gives it. The disc
 # has one maker's driver, in a folder named for the maker.
-$stores = @{ nvidia = 'nv_dispi.inf_amd64_gpupv'; amd = 'amdxc.inf_amd64_gpupv' }
+$stores = @{ nvidia = 'nv_dispi.inf_amd64_gpupv'; amd = 'amdxc.inf_amd64_gpupv'; intel = 'iigd_dch.inf_amd64_gpupv' }
 foreach ($maker in $stores.Keys) {
     $from = Join-Path $PSScriptRoot $maker
     if (-not (Test-Path $from)) { continue }
     $store = Join-Path 'C:\Windows\System32\HostDriverStore\FileRepository' $stores[$maker]
     New-Item -ItemType Directory -Force $store | Out-Null
     robocopy $from $store /E /NP /NFL /NDL /NJH /NJS
+}
+# A machine on an Intel card asks Intel's Direct3D 12 driver to load its classic module, so that what
+# a test run shows doesn't depend on the driver's own choice. 2 is the value said to do that, and
+# nothing here has confirmed it.
+if (Test-Path (Join-Path $PSScriptRoot 'intel')) {
+    $intelKey = 'HKLM:\SOFTWARE\INTEL\IGFX\D3D12'
+    New-Item -Path $intelKey -Force | Out-Null
+    New-ItemProperty -Path $intelKey -Name 'EnableTrinity' -PropertyType DWord -Value 2 -Force | Out-Null
 }
 Start-ScheduledTask -TaskName 'gpupv-agent'
 'setup done' | Out-File C:\gpupv\setup.log

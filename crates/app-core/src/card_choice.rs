@@ -10,9 +10,9 @@ use crate::machine::Machine;
 use crate::render_cards::render_cards;
 use crate::setup::cards::{card_in_use, find_cards};
 
-/// Whether a new machine, or a settings page, is offered Intel's cards. The cards are found, and a
-/// machine can be on one, but Windows can't be set up for one yet, so this stays off until it can.
-const OFFER_INTEL_CARDS: bool = false;
+/// Whether a new machine, or a settings page, is offered Intel's cards. They are, as a test stage:
+/// Windows can be set up and started on one, but nothing is drawn by the card yet.
+const OFFER_INTEL_CARDS: bool = true;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardChoice {
@@ -119,7 +119,7 @@ mod tests {
         let context = with_cards(&scratch, true);
         let choices = windows_card_choices(&context);
         let addresses: Vec<&str> = choices.iter().map(|choice| choice.pci.as_str()).collect();
-        assert_eq!(addresses, ["", IGPU]);
+        assert_eq!(addresses, ["", IGPU, INTEL_IGPU]);
         assert!(choices[0].label.contains("RTX 5090"), "{choices:?}");
         assert!(choices[1].label.ends_with("at 0000:7c:00.0"), "{choices:?}");
         assert_eq!((choices[0].device, choices[1].device), (0x2B85, 0x13C0));
@@ -131,7 +131,7 @@ mod tests {
         let scratch = Scratch::new();
         let context = with_cards(&scratch, false);
         let choices = windows_card_choices(&context);
-        assert_eq!(choices.len(), 1);
+        assert_eq!(choices.len(), 2);
         assert_eq!(choices[default_choice(&context, &choices)].pci, IGPU);
     }
 
@@ -150,12 +150,15 @@ mod tests {
     }
 
     #[test]
-    fn intel_cards_are_found_but_not_offered_until_the_switch_is_turned_on() {
+    fn intel_cards_are_offered_after_the_others_while_the_switch_is_on_and_not_when_it_is_off() {
         let scratch = Scratch::new();
         let context = with_cards(&scratch, true);
         let offered_now: Vec<GpuMaker> =
             windows_card_choices(&context).iter().map(|choice| choice.maker).collect();
-        assert_eq!(offered_now, [GpuMaker::Nvidia, GpuMaker::Amd]);
+        assert_eq!(offered_now, [GpuMaker::Nvidia, GpuMaker::Amd, GpuMaker::Intel]);
+        let without: Vec<GpuMaker> =
+            choices_offering(&context, false).iter().map(|choice| choice.maker).collect();
+        assert_eq!(without, [GpuMaker::Nvidia, GpuMaker::Amd]);
         let all = choices_offering(&context, true);
         let intel: Vec<&str> = all
             .iter()

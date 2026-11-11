@@ -516,8 +516,7 @@ fn an_intel_machine_is_given_neither_nvidias_files_nor_amds_and_the_guest_is_not
     intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
     let host = RecordingHost::default();
     let mut task = Task::new(&context, &host, "start", intel);
-    let refused = place_files_for_maker(&mut task).unwrap_err();
-    assert_eq!(refused.0, NO_INTEL_SUPPORT);
+    place_files_for_maker(&mut task).unwrap();
     assert!(agent.requests.lock().unwrap().is_empty(), "nothing was sent to the guest");
     assert_eq!(task.error, "");
 }

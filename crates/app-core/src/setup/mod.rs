@@ -1,5 +1,5 @@
 //! First-time setup: looks at this PC, and takes what is needed from NVIDIA's driver installer, and
-//! for a Windows machine on an AMD card, from AMD's.
+//! for a Windows machine on an AMD or Intel card, from theirs.
 //!
 //! Nothing here touches the card. It's read through sysfs and `nvidia-smi`, so a VM using it isn't
 //! disturbed. Everything setup makes goes in the store's setup folder, and `setup.json` there says
@@ -15,6 +15,8 @@ pub mod guest_driver;
 pub mod guest_files;
 pub mod inf;
 pub mod intel;
+pub mod intel_driver;
+pub mod intel_inf;
 pub mod toolkit;
 
 use crate::context::Context;

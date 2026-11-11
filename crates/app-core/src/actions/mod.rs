@@ -41,7 +41,6 @@ use crate::monitor::Command as Qmp;
 use crate::network_settings::other_machines;
 use crate::processes::qemu_pid;
 use crate::settings::max_vram_gib;
-use crate::setup::intel::NO_INTEL_SUPPORT;
 use crate::snapshots::{delete_snapshot, go_back, take_snapshot};
 use crate::start_checks::{start_problems, video_cap};
 use crate::tasks::{TaskRecord, write_task};
@@ -211,9 +210,10 @@ fn place_files_for_maker(task: &mut Task) -> Result<()> {
             place_profile_store(task)
         }
         Some(GpuMaker::Amd) => bring_amd_driver_up_to_date(task),
-        // A start of this machine is refused before it gets here. Placing another maker's files would
-        // put a driver in the guest that isn't its card's.
-        Some(GpuMaker::Intel) => Err(Failure::new(NO_INTEL_SUPPORT)),
+        // Intel's support is new, so there is no earlier layout of its driver to bring up to date, and
+        // what the guest was given at install is all it has. Another maker's files would put a driver
+        // in the guest that isn't its card's.
+        Some(GpuMaker::Intel) => Ok(()),
         None => Ok(()),
     }
 }

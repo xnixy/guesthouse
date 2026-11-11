@@ -154,13 +154,26 @@ impl Extraction {
         check: &dyn Fn(&Path) -> Option<String>,
         progress: &(impl Fn(u32) + ?Sized),
     ) -> Result<()> {
+        self.unpack_entries(context, &[entry], target, check, progress)
+    }
+
+    /// The same for several entries, which a driver whose files sit among many others needs.
+    pub(super) fn unpack_entries(
+        &self,
+        context: &Context,
+        entries: &[&str],
+        target: &Path,
+        check: &dyn Fn(&Path) -> Option<String>,
+        progress: &(impl Fn(u32) + ?Sized),
+    ) -> Result<()> {
         let new = crate::settings::with_suffix(target, ".new");
         let _ = fs::remove_dir_all(&new);
         fs::create_dir_all(&new)?;
         let mut child = Command::new("7z")
             .args(["x", &self.installer])
             .arg(format!("-o{}", new.display()))
-            .args([entry, "-y", "-bso0", "-bse1", "-bsp1"])
+            .args(entries)
+            .args(["-y", "-bso0", "-bse1", "-bsp1"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

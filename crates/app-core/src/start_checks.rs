@@ -13,7 +13,7 @@ use crate::processes::{memory_taken, qemu_pid};
 use crate::settings::max_vram_gib;
 use crate::setup::amd::amd_start_problems;
 use crate::setup::cards::card_problem;
-use crate::setup::intel::NO_INTEL_SUPPORT;
+use crate::setup::intel::intel_start_problems;
 use crate::setup::setup_done;
 use crate::tasks::no_slot_text;
 use std::path::Path;
@@ -129,7 +129,7 @@ fn card_start_problems(context: &Context, machine: &Machine) -> Vec<String> {
             }
         }
         Some(GpuMaker::Amd) => amd_start_problems(context, &machine.amd_gpu),
-        Some(GpuMaker::Intel) => vec![NO_INTEL_SUPPORT.to_owned()],
+        Some(GpuMaker::Intel) => intel_start_problems(context, &machine.amd_gpu),
         None => Vec::new(),
     }
 }
@@ -381,7 +381,8 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_machine_on_an_intel_card_is_refused_plainly_even_when_the_other_makers_are_set_up() {
+    fn a_windows_machine_on_an_intel_card_needs_intels_own_setup_and_card() {
+        use crate::setup::intel::NO_INTEL_SETUP;
         let scratch = Scratch::new();
         let (context, machine) = startable(&scratch);
         finish_setup(&context);
@@ -390,7 +391,9 @@ mod tests {
         fs::create_dir_all(on_intel.folder(&context)).unwrap();
         crate::agent::make_token(&context, &on_intel).unwrap();
         let found = start_problems(&context, &on_intel).unwrap();
-        assert_eq!(found, [NO_INTEL_SUPPORT], "NVIDIA's setup being done changes nothing");
+        assert!(says(&found, NO_INTEL_SETUP), "{found:?}");
+        assert!(says(&found, "at 0000:00:02.0, isn't in this PC now"), "{found:?}");
+        assert!(!says(&found, NO_SETUP), "NVIDIA's setup is not this machine's");
     }
 
     #[test]

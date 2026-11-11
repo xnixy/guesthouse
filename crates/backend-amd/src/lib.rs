@@ -16,6 +16,7 @@
 //! lives in [`submit`] and is proven by the `amd-probe` binary, not by [`Backend::start_work`],
 //! which only checks the guest's private data for now.
 
+mod channel_order;
 mod copy_ib;
 mod device;
 mod info;
@@ -48,6 +49,7 @@ pub use memory::{
     map as map_buffer, unmap as unmap_buffer,
 };
 
+use channel_order::WrittenRows;
 use copy_ib::CopyIb;
 use guesthouse_backend::{
     AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, DriverFound, DriverSurvey, GpuRange,
@@ -267,12 +269,29 @@ impl AmdBackend {
         Ok(())
     }
 
-    /// A copy to the screen or a slot: tiled surfaces by the DMA engine, rows by the CPU.
+    /// A copy to the screen or a slot: tiled surfaces by the DMA engine, rows by the CPU. Both move
+    /// bytes as they are, so a target whose red and blue lie the other way round is put right after.
     fn copy_staging(&mut self, copy: &StagingCopy) -> Result<(), String> {
         match TiledCopy::of(copy, self.device.info().details.gfx_version) {
-            Some(plan) => self.copy_with_dma(copy.own_space, &plan),
-            None => self.copy_with_cpu(copy),
+            Some(plan) => self.copy_with_dma(copy.own_space, &plan)?,
+            None => self.copy_with_cpu(copy)?,
         }
+        if channel_order::differs(&copy.source, &copy.target) {
+            // The picture is there either way, so a target the CPU can't reach isn't a failed copy.
+            if let Err(reason) = self.swap_red_and_blue(copy) {
+                log::warn!("a copy's red and blue were left changed over: {reason}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Changes red and blue over in what a copy wrote. The copy has finished, as each is waited for.
+    fn swap_red_and_blue(&mut self, copy: &StagingCopy) -> Result<(), String> {
+        let rows = WrittenRows::of(copy).ok_or("a tiled target")?;
+        let target = self.cpu_address(copy.own_space, copy.target_address, rows.end())?;
+        // SAFETY: `cpu_address` gave an address good for the rows' end.
+        unsafe { rows.swap_red_and_blue(target) };
+        Ok(())
     }
 
     /// Where the CPU reaches `bytes` bytes at a GPU address of a space.

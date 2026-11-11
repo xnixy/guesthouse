@@ -214,7 +214,10 @@ fn get_gpu_ready(task: &mut Task) -> Result<()> {
     }
     check_gpu(task).map_err(|failure| after_failed_gpu(task, failure))?;
     restart_after_switch(task)?;
-    set_up_identity(task);
+    if set_up_identity(task) {
+        // The device took a new package while it was running, and Windows restarts once to use it.
+        restart_after_switch(task)?;
+    }
     Ok(())
 }
 

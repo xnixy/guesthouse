@@ -253,7 +253,8 @@ pub fn install(task: &mut Task) -> Result<()> {
     }
     check_guest(task)?;
     // Here, so the first start is already on the card maker's vendor number and needs no second VM.
-    set_up_identity(task);
+    // Windows shuts down next, so a restart for the package has nothing to add.
+    let _ = set_up_identity(task);
     task.step("Shutting down Windows");
     task.ask_guest("Stop-Computer -Force", QUICK_SECONDS);
     let end = task.now() + Duration::from_secs(INSTALL_STOP_SECONDS);

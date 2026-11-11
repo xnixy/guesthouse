@@ -12,7 +12,12 @@ use std::sync::Arc;
 
 const STAGED: &str = "signing: Valid\r\npackage in: oem7.inf\r\nidentity staged\r\n";
 const REFUSED: &str = "stay: Windows' driver store has no copy of vrd.sys.\r\n";
+const UPDATED: &str = "package in: oem9.inf
+identity updated
+identity staged
+";
 const SCRIPT_TEXT: &str = "make the package";
+const CARD_DRIVER: &str = "32.0.16.1742";
 
 struct Rig {
     context: Context,
@@ -49,6 +54,39 @@ impl Rig {
         let mut task = Task::new(&self.context, &host, "start", self.machine.clone());
         set_up_identity(&mut task);
         task.error
+    }
+
+    /// A start, and whether it says Windows has to restart.
+    fn boot_says_restart(&self) -> bool {
+        let host = RecordingHost::default();
+        let mut task = Task::new(&self.context, &host, "start", self.machine.clone());
+        set_up_identity(&mut task)
+    }
+
+    /// Puts NVIDIA's Windows driver at this version where setup keeps it.
+    fn with_card_driver(self, version: &str) -> Self {
+        let folder = driver_folder(&self.context);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("nv_dispi.inf"),
+            format!(
+                "[Version]
+DriverVer = 01/01/2026, {version}
+"
+            ),
+        )
+        .unwrap();
+        self
+    }
+
+    fn on_makers_number(self, package_version: &str) -> Self {
+        let state = IdentityState {
+            shown: Shown::Maker,
+            package_version: package_version.into(),
+            ..IdentityState::default()
+        };
+        write_state(&self.context, &self.machine, &state).unwrap();
+        self
     }
 
     fn asked(&self) -> Vec<String> {
@@ -199,4 +237,81 @@ fn a_build_without_the_script_keeps_microsofts_number_and_says_so() {
     assert_eq!(rig.boot(), "");
     assert_eq!(rig.asked().len(), 0);
     assert_eq!(rig.state().reason, no_script("NVIDIA"));
+}
+
+#[test]
+fn a_new_package_carries_the_card_drivers_version() {
+    let scratch = Scratch::new();
+    let rig = Rig::new(&scratch, true, &[STAGED]).with_card_driver(CARD_DRIVER);
+    assert!(!rig.boot_says_restart(), "the VM starts again for the number, which is restart enough");
+    let sent = "$vendor = '10DE'
+$device = '2BFE'
+$driverVersion = '32.0.16.1742'
+";
+    assert!(rig.asked()[0].starts_with(sent));
+    assert_eq!(rig.state().package_version, CARD_DRIVER);
+}
+
+#[test]
+fn with_no_card_driver_to_read_the_package_keeps_windows_own_version() {
+    let scratch = Scratch::new();
+    let rig = Rig::new(&scratch, true, &[STAGED]);
+    assert_eq!(rig.boot(), "");
+    assert!(rig.asked()[0].contains(
+        "$driverVersion = ''
+"
+    ));
+    assert_eq!(rig.state().package_version, "");
+}
+
+#[test]
+fn a_machine_whose_package_has_another_version_gets_a_new_one_and_restarts_windows() {
+    let scratch = Scratch::new();
+    let rig = Rig::new(&scratch, true, &[UPDATED]).with_card_driver(CARD_DRIVER).on_makers_number("");
+    assert!(rig.boot_says_restart());
+    assert_eq!(rig.asked().len(), 1);
+    assert!(rig.asked()[0].contains(
+        "$driverVersion = '32.0.16.1742'
+"
+    ));
+    let state = rig.state();
+    assert_eq!((state.shown, state.package_version.as_str()), (Shown::Maker, CARD_DRIVER));
+    assert!(state.restarts_windows());
+    assert!(!rig.boot_says_restart(), "the next start has nothing to change");
+    assert_eq!(rig.asked().len(), 1);
+}
+
+#[test]
+fn a_new_package_no_device_was_running_on_needs_no_restart() {
+    let scratch = Scratch::new();
+    let rig =
+        Rig::new(&scratch, true, &[STAGED]).with_card_driver(CARD_DRIVER).on_makers_number("32.0.15.9186");
+    assert!(!rig.boot_says_restart());
+    let state = rig.state();
+    assert_eq!(state.package_version, CARD_DRIVER);
+    assert!(!state.restarts_windows());
+}
+
+#[test]
+fn a_guest_that_wont_take_the_new_version_keeps_its_number_and_is_not_asked_again() {
+    let scratch = Scratch::new();
+    let rig =
+        Rig::new(&scratch, true, &[REFUSED, UPDATED]).with_card_driver(CARD_DRIVER).on_makers_number("");
+    assert!(!rig.boot_says_restart());
+    let state = rig.state();
+    assert_eq!((state.shown, state.package_version.as_str()), (Shown::Maker, ""));
+    assert_eq!(state.reason, "", "the machine works as it did, so the row has nothing to say");
+    assert!(!rig.boot_says_restart());
+    assert_eq!(rig.asked().len(), 1);
+    assert_eq!(shown_identity(&rig.context, &rig.machine), NVIDIA_RENDER);
+}
+
+#[test]
+fn only_a_plain_version_goes_into_the_script() {
+    assert!(is_version("32.0.16.1742"));
+    assert!(is_version("24.21.13.9924"));
+    for odd in ["", "32.0.16", "32.0.16.1742.1", "32.0.16.x", "32.0.16.'; calc", "32.0.16.123456", "32..16.1"]
+    {
+        assert!(!is_version(odd), "{odd}");
+    }
 }

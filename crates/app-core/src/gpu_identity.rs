@@ -102,6 +102,10 @@ pub struct IdentityState {
     /// The vendor number of the package Windows holds.
     #[serde(default = "nvidia_vendor")]
     pub package_vendor: u16,
+    /// The driver version the package gives the device, which is the card driver's. Empty for a
+    /// package from before it carried one, which gives Windows' own driver's.
+    #[serde(default)]
+    pub package_version: String,
 }
 
 impl Default for IdentityState {
@@ -113,6 +117,7 @@ impl Default for IdentityState {
             note: String::new(),
             restart_due: false,
             package_vendor: nvidia_vendor(),
+            package_version: String::new(),
         }
     }
 }

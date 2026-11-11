@@ -29,6 +29,13 @@ pub fn amd_driver_folder(context: &Context) -> Option<PathBuf> {
     folder.is_dir().then_some(folder)
 }
 
+/// The version of AMD's Windows driver that was unpacked, if one was.
+pub fn amd_driver_version(context: &Context) -> Option<String> {
+    let text = fs::read_to_string(amd_setup_file(context)).ok()?;
+    let setup: Value = serde_json::from_str(&text).ok()?;
+    Some(setup.get(DRIVER_VERSION_FIELD)?.as_str()?.to_owned())
+}
+
 /// Brings a driver unpacked by an older version of the app up to what the guest gets now, and says
 /// what it still lacks, if anything. Unpacking does the same, so after the first time this only looks.
 pub fn complete_amd_driver(context: &Context) -> Option<String> {

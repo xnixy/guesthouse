@@ -32,6 +32,8 @@ const ESCAPE_BYTES_SHOWN: usize = 32;
 pub enum QueryOutcome {
     Record(Status, Asked),
     DriverName(Status, NameAnswer),
+    /// OpenGL's query, answered with this driver.
+    OpenGl(Status, &'static str),
     /// Not one of this backend's, so the core answers it or says it can't.
     LeftToTheCore,
 }
@@ -45,9 +47,7 @@ impl fmt::Display for QueryOutcome {
             }
             Self::Record(status, Asked::Refused(why)) => write!(f, "refused={:#x} why=\"{why}\"", status.0),
             Self::DriverName(_, NameAnswer::Given(name)) => write!(f, "answered=driver-name driver={name}"),
-            Self::DriverName(status, NameAnswer::No32BitName) => {
-                write!(f, "refused={:#x} why=\"no 32-bit driver name is known\"", status.0)
-            }
+            Self::OpenGl(_, name) => write!(f, "answered=opengl-driver driver={name}"),
             Self::DriverName(status, NameAnswer::Withheld) => {
                 write!(f, "refused={:#x} why=\"held back by the software desktop switch\"", status.0)
             }
@@ -65,6 +65,7 @@ impl QueryOutcome {
             }
             Self::Record(status, asked) => (status.0, Some(asked), None),
             Self::DriverName(status, name) => (status.0, None, Some(name)),
+            Self::OpenGl(status, name) => (status.0, None, Some(NameAnswer::Given(name))),
             Self::LeftToTheCore => (0, None, None),
         }
     }
@@ -415,8 +416,12 @@ mod tests {
             "answered=record guest_build=0x10"
         );
         assert_eq!(QueryOutcome::LeftToTheCore.to_string(), "answered=left-to-the-core");
-        let refused = QueryOutcome::DriverName(Status::NOT_SUPPORTED, NameAnswer::No32BitName).to_string();
-        assert!(refused.starts_with("refused="), "{refused}");
+        let held = QueryOutcome::DriverName(Status::NOT_SUPPORTED, NameAnswer::Withheld).to_string();
+        assert!(held.starts_with("refused="), "{held}");
+        assert_eq!(
+            QueryOutcome::OpenGl(Status::SUCCESS, "x.dll").to_string(),
+            "answered=opengl-driver driver=x.dll"
+        );
     }
 
     #[test]

@@ -26,6 +26,18 @@ pub const DIRECT3D_12: u32 = 3;
 
 pub type Guest = Session<IntelBackend, SparseMemory>;
 
+/// A hwconfig table with the most slices, the most dual subslices and the threads per EU.
+pub fn hwconfig_of(values: &[u32; 3]) -> Hwconfig {
+    let pairs = [
+        (hwconfig::MAX_SLICES_SUPPORTED, values[0]),
+        (hwconfig::MAX_DUAL_SUBSLICES_SUPPORTED, values[1]),
+        (hwconfig::NUM_THREADS_PER_EU, values[2]),
+    ];
+    let table: Vec<u8> =
+        pairs.iter().flat_map(|&(key, value)| [key, 1, value]).flat_map(u32::to_le_bytes).collect();
+    Hwconfig::parse(&table)
+}
+
 /// A card like the Arc 140V, with numbers chosen for this test.
 pub fn card() -> CardFacts {
     let gt = |kind, id, minor| Gt {
@@ -37,11 +49,6 @@ pub fn card() -> CardFacts {
         far_memory: 0,
         ip: IpVersion { major: 20, minor, revision: 4 },
     };
-    let table: Vec<u8> = [(hwconfig::MAX_SLICES_SUPPORTED, 1), (hwconfig::NUM_THREADS_PER_EU, 8)]
-        .iter()
-        .flat_map(|&(key, value)| [key, 1, value])
-        .flat_map(u32::to_le_bytes)
-        .collect();
     CardFacts {
         driver: "xe".into(),
         pci: PciIdentity { vendor: 0x8086, device: 0x64A0, revision: 4, ..PciIdentity::default() },
@@ -57,20 +64,25 @@ pub fn card() -> CardFacts {
         engines: vec![
             Engine { class: Engine::RENDER, instance: 0, gt: 0 },
             Engine { class: Engine::COPY, instance: 0, gt: 0 },
+            Engine { class: Engine::COMPUTE, instance: 0, gt: 0 },
         ],
         gts: vec![gt(Gt::MAIN, 0, 4), gt(Gt::MEDIA, 1, 0)],
         topology: vec![
             TopologyMask { gt: 0, kind: TopologyMask::DSS_GEOMETRY, mask: vec![0xFF] },
             TopologyMask { gt: 0, kind: TopologyMask::SIMD16_EU_PER_DSS, mask: vec![0xFF] },
         ],
-        hwconfig: Hwconfig::parse(&table),
+        hwconfig: hwconfig_of(&[1, 8, 8]),
         frequencies: Frequencies { highest: Some(2050), lowest: Some(400), ..Frequencies::default() },
         ..CardFacts::default()
     }
 }
 
 pub fn guest() -> Guest {
-    let backend = IntelBackend::from_card(card()).unwrap();
+    guest_on(card())
+}
+
+pub fn guest_on(card: CardFacts) -> Guest {
+    let backend = IntelBackend::from_card(card).unwrap();
     let limits = MemoryLimits::new(backend.facts(), None, 16 << 30);
     let mut config = SessionConfig::new(limits);
     config.frame_wait = Duration::ZERO;
@@ -182,4 +194,90 @@ pub fn render_target() -> Vec<u8> {
     set_u64(&mut data, 0x108, 1024);
     set_u64(&mut data, 0x118, 0x1_0000);
     data
+}
+
+/// What compute-runtime's topology reader makes of a record: the slices that are enabled, the
+/// subslice indices of the single slice if there is one, and the totals it counts.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Mapping {
+    pub slice_indices: Vec<usize>,
+    pub subslice_indices: Vec<i32>,
+    pub slice_count: u32,
+    pub subslice_count: u32,
+    pub eu_count: u32,
+}
+
+/// The reader's walk, with the record's places in words: the slice count and the most slices at
+/// 0xB3C and 0xB98, the slices from 0xBA8 on in steps of 0x14C, in each the flat subslices at +4
+/// in steps of 12 and the dual subslices at +0x64 in steps of 0x1C holding two subslices each.
+/// Fails as the reader fails: with no slice, no subslice or no EU.
+pub fn translate_topology(record: &[u8]) -> Option<Mapping> {
+    const MAX_SLICES: usize = 0xB98;
+    const SLICE: usize = 0xBA8;
+    const SLICE_STRIDE: usize = 0x14C;
+    const FLAT: usize = 4;
+    const DUAL: usize = 0x64;
+    const DUAL_STRIDE: usize = 0x1C;
+    const SUBSLICE_STRIDE: usize = 12;
+    const DUALS_READ: usize = 6;
+    const SUBSLICES_PER_DUAL: usize = 2;
+    const FLAT_READ: usize = 8;
+    let dword = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().unwrap());
+    let flag = |at: usize| record[at] != 0;
+    // The record does not mark slices as dynamically populated, so the reader goes to the most.
+    let slices = dword(MAX_SLICES) as usize;
+    let mut mapping = Mapping {
+        slice_indices: Vec::new(),
+        subslice_indices: Vec::new(),
+        slice_count: 0,
+        subslice_count: 0,
+        eu_count: 0,
+    };
+    for x in 0..slices {
+        let slice = SLICE + SLICE_STRIDE * x;
+        if !flag(slice) {
+            continue;
+        }
+        mapping.slice_indices.push(x);
+        mapping.slice_count += 1;
+        let mut indices = Vec::new();
+        let mut index = -1i32;
+        let mut dual_enabled = false;
+        for dual in 0..DUALS_READ {
+            let at = slice + DUAL + DUAL_STRIDE * dual;
+            if !flag(at) {
+                index += 2;
+                continue;
+            }
+            for y in 0..SUBSLICES_PER_DUAL {
+                index += 1;
+                let sub = at + 4 + SUBSLICE_STRIDE * y;
+                if !flag(sub) {
+                    continue;
+                }
+                dual_enabled = true;
+                mapping.subslice_count += 1;
+                indices.push(index);
+                mapping.eu_count += dword(sub + 4);
+            }
+        }
+        if !dual_enabled {
+            for sub in 0..FLAT_READ {
+                let at = slice + FLAT + SUBSLICE_STRIDE * sub;
+                if flag(at) {
+                    mapping.subslice_count += 1;
+                    indices.push(sub as i32);
+                    mapping.eu_count += dword(at + 4);
+                }
+            }
+        }
+        if mapping.slice_count == 1 {
+            mapping.subslice_indices = indices;
+        }
+    }
+    if mapping.slice_count != 1 {
+        mapping.subslice_indices.clear();
+    }
+    let worked = mapping.slice_count != 0 && mapping.subslice_count != 0 && mapping.eu_count != 0;
+    worked.then_some(mapping)
 }

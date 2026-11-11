@@ -3,7 +3,7 @@
 //! own, with a memory manager escape.
 //!
 //! The block is [`SIZE`] bytes of eleven ranges, each a base and an inclusive limit. The first ten
-//! are in the order of compute-runtime's GMM_GFX_PARTITIONING: Standard, Standard64KB, two reserved,
+//! are in the order of compute-runtime's GMM_GFX_PARTITIONING: Standard, Standard64KB, two unnamed,
 //! SVM, TR and four 32-bit heaps. The eleventh has no name, and stays empty.
 //!
 //! Every range given lies in the upper of the core's GPU ranges, above the hole near 4 GiB and below

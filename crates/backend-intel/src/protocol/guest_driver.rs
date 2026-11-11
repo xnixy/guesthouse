@@ -2,15 +2,15 @@
 //! adapter for.
 //!
 //! The paravirtual adapter's kernel driver is Windows' own, and the user-mode drivers are Intel's.
-//! The guest asks for a Direct3D driver's path with adapter query type 1, and the other loaders ask
-//! the adapter for registry values by name. The file names are the ones Intel's INF gives this
+//! The guest asks for a Direct3D driver's path with adapter query type 1, OpenGL's with type 2, and
+//! the other loaders ask the adapter for registry values by name. The file names are the ones Intel's INF gives this
 //! card. The files have to be in the guest, under the host driver store, at [`DRIVER_STORE`].
 //! Nothing here copies them.
 
 use super::bytes::dword;
 use guesthouse_backend::guest_text::{self, utf16_list, utf16_zero};
 use guesthouse_backend::{RegistryName, RegistryValue, Status, VendorQuery};
-use guesthouse_messages::registry::TYPE_STRING_LIST;
+use guesthouse_messages::registry::{TYPE_NUMBER, TYPE_STRING, TYPE_STRING_LIST};
 
 /// The release of Intel's driver these answers are for. The adapter record and the private data
 /// change with the release, so any other is refused at start.
@@ -22,6 +22,9 @@ pub const DRIVER_STORE: &str = "C:\\Windows\\System32\\DriverStore\\FileReposito
 /// The user-mode drivers by the Direct3D version the guest asks for, as the INF lists them in
 /// UserModeDriverName: Direct3D 9, 10, 11 and 12. 10 and 11 share a driver.
 const USER_DRIVERS: [&str; 4] = ["igd9trinity64.dll", "igd10iumd64.dll", "igd10iumd64.dll", "igd12umd64.dll"];
+/// The same for a 32-bit process, from UserModeDriverNameWow.
+const USER_DRIVERS_32_BIT: [&str; 4] =
+    ["igd9trinity32.dll", "igd10iumd32.dll", "igd10iumd32.dll", "igd12umd32.dll"];
 /// Where the version sits in the query, KMTUMDVERSION: 0 for Direct3D 9 up to 3 for Direct3D 12.
 const VERSION_FIELD: usize = 0;
 const NEWEST: usize = USER_DRIVERS.len() - 1;
@@ -29,21 +32,46 @@ const NEWEST: usize = USER_DRIVERS.len() - 1;
 const DIRECT3D_12: usize = 3;
 const KERNEL_DRIVER: &str = "igdkmdn64.sys";
 
+/// The adapter query OpenGL's loader asks for its driver with.
+pub const QUERY_OPENGL: u32 = 2;
+/// The answer's path field: MAX_PATH UTF-16 units. The version and flags follow it.
+const OPENGL_NAME_BYTES: usize = 520;
+const OPENGL_DRIVER: &str = "igxe2lpgicd64.dll";
+const OPENGL_DRIVER_32_BIT: &str = "igxe2lpgicd32.dll";
+/// What the INF gives for the OpenGL driver's version, flags and installed marker. The 32-bit
+/// driver has the same.
+const OPENGL_VERSION: u32 = 1;
+const OPENGL_FLAGS: u32 = 3;
+const OPENGL_INSTALLED: u32 = 1;
+/// The one OpenGL value that has no 32-bit twin.
+const OPENGL_INSTALLED_VALUE: &str = "OpenGLInstalled";
+
+/// A value as the INF writes it, with file names in the driver store.
+enum Form {
+    File(&'static str),
+    Files(&'static [&'static str]),
+    Number(u32),
+}
+
 /// The values the loaders ask for, by the names the INF gives them. Registry names ignore case.
-const VALUES: [(&str, &str); 5] = [
-    ("OpenCLDriverName", "igdrcl64.dll"),
-    ("OpenCLDriverNameWow", "igdrcl32.dll"),
-    ("VulkanDriverName", "igvk64.json"),
-    ("VulkanDriverNameWow", "igvk32.json"),
-    ("LevelZeroDriverPath", "ze_intel_gpu64.dll"),
+const VALUES: [(&str, Form); 11] = [
+    ("OpenCLDriverName", Form::File("igdrcl64.dll")),
+    ("OpenCLDriverNameWow", Form::File("igdrcl32.dll")),
+    ("VulkanDriverName", Form::File("igvk64.json")),
+    ("VulkanDriverNameWow", Form::File("igvk32.json")),
+    ("LevelZeroDriverPath", Form::File("ze_intel_gpu64.dll")),
+    ("OpenGLDriverName", Form::Files(&[OPENGL_DRIVER])),
+    ("OpenGLDriverNameWow", Form::Files(&[OPENGL_DRIVER_32_BIT])),
+    ("OpenGLVersion", Form::Number(OPENGL_VERSION)),
+    ("OpenGLVersionWow", Form::Number(OPENGL_VERSION)),
+    ("OpenGLFlags", Form::Number(OPENGL_FLAGS)),
+    ("OpenGLFlagsWow", Form::Number(OPENGL_FLAGS)),
 ];
 
 /// What became of a driver name query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NameAnswer {
     Given(&'static str),
-    /// The 32-bit names for Direct3D aren't known yet, so a 32-bit process is refused.
-    No32BitName,
     /// Direct3D 9, 10 or 11, held back by the software desktop switch.
     Withheld,
 }
@@ -56,21 +84,34 @@ pub fn write_name(
     only_direct3d_12: bool,
     out: &mut Vec<u8>,
 ) -> (Status, NameAnswer) {
-    if query.process_is_32_bit {
-        return (Status::NOT_SUPPORTED, NameAnswer::No32BitName);
-    }
     let version = dword(query.data, VERSION_FIELD).map_or(NEWEST, |version| (version as usize).min(NEWEST));
     if only_direct3d_12 && version < DIRECT3D_12 {
         return (Status::NOT_SUPPORTED, NameAnswer::Withheld);
     }
-    let name = USER_DRIVERS[version];
+    let drivers = if query.process_is_32_bit { USER_DRIVERS_32_BIT } else { USER_DRIVERS };
+    let name = drivers[version];
     guest_text::user_driver_name(query, &format!("{DRIVER_STORE}\\{name}"), out);
     (Status::SUCCESS, NameAnswer::Given(name))
 }
 
-/// The driver paths, DXCore's attributes, and the loaders' values. The loaders' values go back as
-/// a list of one path with no type to match, as which type each loader asks with isn't known yet:
-/// read as a single string, the list's second zero is never reached.
+fn in_store(file: &str) -> String {
+    format!("{DRIVER_STORE}\\{file}")
+}
+
+/// Answers OpenGL's query: the driver's path, then its version and flags. Gives the driver's name.
+pub fn write_opengl_info(query: &VendorQuery<'_>, out: &mut Vec<u8>) -> &'static str {
+    let driver = if query.process_is_32_bit { OPENGL_DRIVER_32_BIT } else { OPENGL_DRIVER };
+    let start = out.len();
+    let mut path = utf16_zero(&in_store(driver));
+    path.truncate(OPENGL_NAME_BYTES);
+    out.extend_from_slice(&path);
+    out.resize(start + OPENGL_NAME_BYTES, 0);
+    out.extend_from_slice(&OPENGL_VERSION.to_le_bytes());
+    out.extend_from_slice(&OPENGL_FLAGS.to_le_bytes());
+    driver
+}
+
+/// The driver paths, DXCore's attributes, and the loaders' values, each of the type the INF gives it.
 pub fn registry(name: &RegistryName) -> Option<RegistryValue> {
     match name {
         RegistryName::DriverStorePath => {
@@ -84,9 +125,23 @@ pub fn registry(name: &RegistryName) -> Option<RegistryValue> {
             let attributes = utf16_list(guest_text::DXCORE_GRAPHICS_ATTRIBUTES);
             Some(RegistryValue { value_type: Some(TYPE_STRING_LIST), bytes: attributes })
         }
+        RegistryName::Value(name) if name.eq_ignore_ascii_case(OPENGL_INSTALLED_VALUE) => {
+            Some(RegistryValue {
+                value_type: Some(TYPE_NUMBER),
+                bytes: OPENGL_INSTALLED.to_le_bytes().to_vec(),
+            })
+        }
         RegistryName::Value(name) => {
-            let (_, file) = VALUES.iter().find(|(known, _)| known.eq_ignore_ascii_case(name))?;
-            Some(RegistryValue { value_type: None, bytes: utf16_list(&[format!("{DRIVER_STORE}\\{file}")]) })
+            let (_, form) = VALUES.iter().find(|(known, _)| known.eq_ignore_ascii_case(name))?;
+            let (value_type, bytes) = match form {
+                Form::File(file) => (TYPE_STRING, utf16_zero(&in_store(file))),
+                Form::Files(files) => {
+                    let paths: Vec<String> = files.iter().map(|file| in_store(file)).collect();
+                    (TYPE_STRING_LIST, utf16_list(&paths))
+                }
+                Form::Number(number) => (TYPE_NUMBER, number.to_le_bytes().to_vec()),
+            };
+            Some(RegistryValue { value_type: Some(value_type), bytes })
         }
     }
 }
@@ -142,19 +197,62 @@ mod tests {
     }
 
     #[test]
-    fn a_32_bit_process_is_refused_until_its_names_are_known() {
-        let (status, answer, out) = name_for(3, true);
-        assert_eq!((status, answer), (Status::NOT_SUPPORTED, NameAnswer::No32BitName));
-        assert!(out.is_empty());
+    fn a_32_bit_process_gets_the_32_bit_drivers_the_inf_lists() {
+        let wanted =
+            [(0, "igd9trinity32.dll"), (1, "igd10iumd32.dll"), (2, "igd10iumd32.dll"), (3, "igd12umd32.dll")];
+        for (version, file) in wanted {
+            let (status, answer, out) = name_for(version, true);
+            assert_eq!((status, answer), (Status::SUCCESS, NameAnswer::Given(file)));
+            assert_eq!(text(&out[4..]), format!("{DRIVER_STORE}\\{file}"));
+        }
+    }
+
+    fn opengl_answer(process_is_32_bit: bool) -> (&'static str, Vec<u8>) {
+        let query = VendorQuery { kind: QUERY_OPENGL, size: 528, data: &[], process_is_32_bit };
+        let mut out = Vec::new();
+        (write_opengl_info(&query, &mut out), out)
+    }
+
+    #[test]
+    fn the_opengl_answer_is_the_path_then_the_version_and_flags() {
+        let (driver, out) = opengl_answer(false);
+        assert_eq!((driver, out.len()), (OPENGL_DRIVER, OPENGL_NAME_BYTES + 8));
+        assert_eq!(text(&out), format!("{DRIVER_STORE}\\{OPENGL_DRIVER}"));
+        assert_eq!(out[OPENGL_NAME_BYTES..], [1, 0, 0, 0, 3, 0, 0, 0]);
+        let (driver, out) = opengl_answer(true);
+        assert_eq!(driver, OPENGL_DRIVER_32_BIT);
+        assert_eq!(text(&out), format!("{DRIVER_STORE}\\{OPENGL_DRIVER_32_BIT}"));
+    }
+
+    #[test]
+    fn the_opengl_registry_values_are_the_infs_with_their_types() {
+        let driver = registry(&RegistryName::Value("opengldrivernamewow".into())).unwrap();
+        assert_eq!(driver.value_type, Some(TYPE_STRING_LIST));
+        assert_eq!(driver.bytes, utf16_list(&[in_store(OPENGL_DRIVER_32_BIT)]));
+        let numbers = [
+            ("OpenGLVersion", 1u32),
+            ("OpenGLVersionWow", 1),
+            ("OpenGLFlags", 3),
+            ("OpenGLFlagsWow", 3),
+            ("OpenGLInstalled", 1),
+        ];
+        for (name, number) in numbers {
+            let value = registry(&RegistryName::Value(name.into())).unwrap();
+            assert_eq!(value.value_type, Some(TYPE_NUMBER), "{name}");
+            assert_eq!(value.bytes, number.to_le_bytes(), "{name}");
+        }
     }
 
     #[test]
     fn the_loaders_values_are_paths_in_the_store_by_any_case() {
         let value = registry(&RegistryName::Value("vulkandrivername".into())).unwrap();
-        assert_eq!(value.value_type, None);
-        assert_eq!(text(&value.bytes), format!("{DRIVER_STORE}\\igvk64.json"));
-        assert!(value.bytes.ends_with(&[0, 0, 0, 0]), "a list of one, closed twice");
-        assert!(registry(&RegistryName::Value("LEVELZERODRIVERPATH".into())).is_some());
+        assert_eq!(value.value_type, Some(TYPE_STRING), "the INF gives a single string");
+        assert_eq!(value.bytes, utf16_zero(&format!("{DRIVER_STORE}\\igvk64.json")));
+        for name in ["OpenCLDriverName", "OpenCLDriverNameWow", "VulkanDriverNameWow", "LEVELZERODRIVERPATH"]
+        {
+            let value = registry(&RegistryName::Value(name.into())).unwrap();
+            assert_eq!(value.value_type, Some(TYPE_STRING), "{name}");
+        }
         assert!(registry(&RegistryName::Value("openglvendorname".into())).is_none());
     }
 

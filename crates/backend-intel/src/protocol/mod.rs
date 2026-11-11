@@ -19,3 +19,4 @@ pub mod hw_queue;
 pub mod nodes;
 pub mod partition;
 pub mod record;
+pub mod shape;

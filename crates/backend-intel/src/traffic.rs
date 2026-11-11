@@ -12,6 +12,7 @@ use crate::protocol::context::{self, Context};
 use crate::protocol::escape::{self, Escape, PartitionAsk};
 use crate::protocol::guest_driver::NameAnswer;
 use crate::protocol::hw_queue::{self, Queue};
+use crate::protocol::nodes;
 use crate::protocol::partition;
 use crate::protocol::record::Asked;
 use crate::watch::{Hex, PREFIX, Seen, Undecoded, dump, tell};
@@ -154,9 +155,10 @@ impl Traffic {
         let telling = self.contexts.worth_telling(kind);
         tell!(
             telling,
-            "{PREFIX} context process={process:#x} node={node} size={} type={} guest_pid={} dwm={} protected={} \
+            "{PREFIX} context process={process:#x} node={node} node_name={} size={} type={} guest_pid={} dwm={} protected={} \
              media={} gpu_va={} id_pointer={:#x} ids={} instances={:#x} power_hint={} no_ring_flushes={} \
              queues={} wmtp_off={} preempt_notify={} preempt_event={:#x} token64={} sip={} undecoded=[{}]",
+            nodes::name(node),
             private.len(),
             context.umd_context_type,
             context.process_id,
@@ -274,10 +276,11 @@ impl Traffic {
         });
         tell!(
             telling,
-            "{PREFIX} submit source={source} queue={:#x} node={} hint={:#x} fence_value={} length={} \
+            "{PREFIX} submit source={source} queue={:#x} node={} node_name={} hint={:#x} fence_value={} length={} \
              kernel_would={kernel_would} answer=finished-unrun fields=[{}] undecoded=[{}]",
             work.queue,
             work.node,
+            nodes::name(work.node),
             work.client_hint,
             work.fence_value,
             header.length,
@@ -287,6 +290,16 @@ impl Traffic {
         if telling {
             dump(format_args!("submit queue={:#x}", work.queue), work.private);
         }
+    }
+
+    /// A context on a node past those offered.
+    pub fn context_refused(&mut self, node: u32, client_hint: u32) {
+        let telling = self.refusals.worth_telling(("context-node", node, client_hint));
+        tell!(
+            telling,
+            "{PREFIX} refused what=context why=\"node {node} is past those offered\" node_name={} hint={client_hint:#x}",
+            nodes::name(node)
+        );
     }
 
     /// How many submissions a queue had, once it has gone.

@@ -17,8 +17,8 @@
 //! - Escapes have no status of their own, so one the kernel driver would refuse can only be logged.
 //! - [`Backend::finish_queue_data`] sees the queue's data with the message's padding after it, so
 //!   its true size can't be checked.
-//! - The core describes every node but the first as a copy engine, and Intel's numbering of nodes
-//!   may differ.
+//! - The core describes every node but the first as a copy engine, whatever gmmlib's numbering
+//!   says the node is.
 
 mod books;
 pub mod card;
@@ -55,10 +55,6 @@ use xe_query::Gt;
 
 /// How this backend names the host driver's branch: the Linux kernel's xe.
 const HOST_BRANCH: &str = "xe";
-/// The nodes the guest is offered. Intel's own numbering of engines into nodes isn't known here,
-/// so the guest may name any of these and each context's node goes to the log. Nothing runs on
-/// them, so a node is only a label for now.
-const NODES_OFFERED: u32 = 16;
 /// The part of the system's memory offered as video memory, as Windows gives an integrated card
 /// half of the memory as shared.
 const SHARED_MEMORY_PART: u64 = 2;
@@ -99,7 +95,7 @@ impl IntelBackend {
             video_memory: shared,
             gtt_memory: 0,
             bar_size: shared,
-            node_count: NODES_OFFERED,
+            node_count: protocol::nodes::COUNT,
             engines: card.engine_families(),
             guest_driver_version: 0,
         };
@@ -370,11 +366,9 @@ impl Backend for IntelBackend {
     }
 
     fn context_allowed(&mut self, node: u32, client_hint: u32) -> bool {
-        let allowed = node < NODES_OFFERED;
+        let allowed = protocol::nodes::offered(node);
         if !allowed {
-            log::info!(
-                "{PREFIX} refused what=context why=\"node {node} is past those offered\" hint={client_hint:#x}"
-            );
+            self.traffic.context_refused(node, client_hint);
         }
         allowed
     }
@@ -457,7 +451,7 @@ mod tests {
         assert_eq!((facts.card.vendor, facts.card.device, facts.card.revision), (INTEL_VENDOR, 0x64A0, 4));
         assert_eq!(facts.video_memory, 16 << 30, "half the system memory");
         assert!(facts.engines.graphics && facts.engines.compute);
-        assert_eq!(facts.node_count, NODES_OFFERED);
+        assert_eq!(facts.node_count, 15);
     }
 
     #[test]

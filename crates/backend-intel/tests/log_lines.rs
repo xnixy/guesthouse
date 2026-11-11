@@ -74,7 +74,7 @@ fn every_kind_of_exchange_has_its_line() {
         ("intel query kind=0 size=9588 wow64=0 answered=record", 1),
         ("intel query kind=1 size=4 wow64=0 answered=driver-name driver=igd12umd64.dll", 1),
         ("intel query kind=77 size=16 wow64=0 answered=left-to-the-core", 1),
-        ("intel context process=0x40002000 node=0 size=144 type=3 guest_pid=4242", 1),
+        ("intel context process=0x40002000 node=0 node_name=3d size=144 type=3 guest_pid=4242", 1),
         ("intel queue id=", 1),
         ("intel allocation size=2352 type=2", 1),
         ("intel refused what=allocation", 1),

@@ -99,7 +99,7 @@ fn serve_amd(
     let node = guesthouse_backend_amd::amd_render_node(address.as_deref())
         .ok_or("No AMD graphics card was found at the address this guest was given.")?;
     log::info!("AMD card at {}", node.display());
-    serve_on_render_node::<AmdBackend>(slot, project, &setup, node)
+    serve_on_render_node::<AmdBackend>(slot, project, &setup, node, |_| {})
 }
 
 /// Starts the Intel backend on `card`, or with none, on the card in the Intel setup file, and
@@ -121,17 +121,27 @@ fn serve_intel(
     let node = guesthouse_backend_intel::intel_render_node(address.as_deref())
         .ok_or("No Intel graphics card on the xe driver was found at the address this guest was given.")?;
     log::info!("Intel card at {}", node.device_file.display());
-    serve_on_render_node::<IntelBackend>(slot, project, &setup, node.device_file)
+    let software_desktop = env::var_os(INTEL_SOFTWARE_DESKTOP).is_some();
+    serve_on_render_node::<IntelBackend>(slot, project, &setup, node.device_file, |backend| {
+        backend.set_software_desktop(software_desktop)
+    })
 }
 
+/// A lab switch for an Intel guest: set, the guest is refused the Direct3D 9, 10 and 11 drivers, so
+/// its desktop composes in software while Direct3D 12, compute and Vulkan still reach the backend.
+/// Untried on a guest.
+#[cfg(feature = "intel")]
+const INTEL_SOFTWARE_DESKTOP: &str = "GUESTHOUSE_INTEL_SOFTWARE_DESKTOP";
+
 /// Serves with a backend whose card is reached through one render node, which is the only device
-/// file the jail lets this process open.
+/// file the jail lets this process open. `configure` sets the backend's own switches once it is open.
 #[cfg(any(feature = "amd", feature = "intel"))]
 fn serve_on_render_node<B: guesthouse_backend::Backend>(
     slot: Slot,
     project: PathBuf,
     setup: &guesthouse_backend::Setup,
     node: PathBuf,
+    configure: impl FnOnce(&mut B),
 ) -> Result<(), Box<dyn std::error::Error>> {
     use guesthouse_core::{Config, MemoryLimits, Session};
     use guesthouse_daemon::environment::{guest_ram, video_cap};
@@ -146,7 +156,8 @@ fn serve_on_render_node<B: guesthouse_backend::Backend>(
     let needs = Needs::of_render_node(slot, &project, &setup.driver_folder, node);
     needs.prepare()?;
     let locked = lock_files(&needs)?;
-    let backend: B = start_backend(setup)?;
+    let mut backend: B = start_backend(setup)?;
+    configure(&mut backend);
     let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
     let limits = MemoryLimits::new(backend.facts(), video_cap(cap.as_deref()), guest_ram(ram.as_deref()));
     let config = Config::new(limits);

@@ -44,6 +44,9 @@ impl fmt::Display for QueryOutcome {
             Self::DriverName(status, NameAnswer::No32BitName) => {
                 write!(f, "refused={:#x} why=\"no 32-bit driver name is known\"", status.0)
             }
+            Self::DriverName(status, NameAnswer::Withheld) => {
+                write!(f, "refused={:#x} why=\"held back by the software desktop switch\"", status.0)
+            }
             Self::LeftToTheCore => f.write_str("answered=left-to-the-core"),
         }
     }

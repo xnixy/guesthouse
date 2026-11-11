@@ -25,6 +25,8 @@ const USER_DRIVERS: [&str; 4] = ["igd9trinity64.dll", "igd10iumd64.dll", "igd10i
 /// Where the version sits in the query, KMTUMDVERSION: 0 for Direct3D 9 up to 3 for Direct3D 12.
 const VERSION_FIELD: usize = 0;
 const NEWEST: usize = USER_DRIVERS.len() - 1;
+/// Direct3D 12's version in that field. Every version below it is Direct3D 9, 10 or 11.
+const DIRECT3D_12: usize = 3;
 const KERNEL_DRIVER: &str = "igdkmdn64.sys";
 
 /// The values the loaders ask for, by the names the INF gives them. Registry names ignore case.
@@ -42,14 +44,25 @@ pub enum NameAnswer {
     Given(&'static str),
     /// The 32-bit names for Direct3D aren't known yet, so a 32-bit process is refused.
     No32BitName,
+    /// Direct3D 9, 10 or 11, held back by the software desktop switch.
+    Withheld,
 }
 
-/// Writes the Direct3D driver's path into `out`, keeping the guest's version dword.
-pub fn write_name(query: &VendorQuery<'_>, out: &mut Vec<u8>) -> (Status, NameAnswer) {
+/// Writes the Direct3D driver's path into `out`, keeping the guest's version dword. With
+/// `only_direct3d_12`, the drivers for Direct3D 9, 10 and 11 are refused, so that those programs,
+/// the desktop's compositor among them, fall back to drawing in software.
+pub fn write_name(
+    query: &VendorQuery<'_>,
+    only_direct3d_12: bool,
+    out: &mut Vec<u8>,
+) -> (Status, NameAnswer) {
     if query.process_is_32_bit {
         return (Status::NOT_SUPPORTED, NameAnswer::No32BitName);
     }
     let version = dword(query.data, VERSION_FIELD).map_or(NEWEST, |version| (version as usize).min(NEWEST));
+    if only_direct3d_12 && version < DIRECT3D_12 {
+        return (Status::NOT_SUPPORTED, NameAnswer::Withheld);
+    }
     let name = USER_DRIVERS[version];
     guest_text::user_driver_name(query, &format!("{DRIVER_STORE}\\{name}"), out);
     (Status::SUCCESS, NameAnswer::Given(name))
@@ -96,8 +109,25 @@ mod tests {
             process_is_32_bit,
         };
         let mut out = Vec::new();
-        let (status, answer) = write_name(&query, &mut out);
+        let (status, answer) = write_name(&query, false, &mut out);
         (status, answer, out)
+    }
+
+    #[test]
+    fn the_software_desktop_switch_holds_back_all_but_direct3d_12() {
+        let mut out = Vec::new();
+        for (version, wanted) in
+            [(0u8, NameAnswer::Withheld), (2, NameAnswer::Withheld), (3, NameAnswer::Given("igd12umd64.dll"))]
+        {
+            let data = [version, 0, 0, 0];
+            let query = VendorQuery {
+                kind: guest_text::QUERY_USER_DRIVER_NAME,
+                size: 4,
+                data: &data,
+                process_is_32_bit: false,
+            };
+            assert_eq!(write_name(&query, true, &mut out).1, wanted, "{version}");
+        }
     }
 
     #[test]

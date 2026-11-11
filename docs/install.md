@@ -6,6 +6,8 @@ A Windows machine on NVIDIA needs NVIDIA's kernel module loaded, with `/dev/nvid
 
 A Windows machine on AMD needs the card on amdgpu, and AMD's Windows installer for that card, which the app unpacks. It has run on an integrated RDNA2 Radeon with driver 32.0.21045.20006. See [AMD](amd.md).
 
+A Windows machine on an Intel card is at a test stage, and only Lunar Lake's Arc 140V so far: it needs the card on `xe` and Intel's Windows installer, which the app unpacks, and nothing is drawn by the card yet. See [Intel](intel.md).
+
 A Linux machine's needs are in [`linux/`](../linux/README.md).
 
 A plain VM needs QEMU with its D-Bus display, which Fedora calls `qemu-ui-dbus`, plus `qemu-img`, `swtpm`, `genisoimage` and `7z` for installs. A QEMU built as `qemu/README.md` says has no `qemu-img` of its own, so install the system's.

@@ -3,9 +3,9 @@
 //! Everything here is GTK. What the app does is in `guesthouse-app-core`, and anything slow goes to a
 //! thread through [`common::in_background`] or to a task, so nothing can hold up the window.
 
-pub mod amd_driver_row;
 pub mod application;
 pub mod common;
+pub mod driver_row;
 pub mod log_dialog;
 pub mod new_machine;
 pub mod rows;

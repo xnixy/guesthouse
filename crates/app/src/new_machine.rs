@@ -1,7 +1,7 @@
 //! The dialog that makes a machine from an ISO. Looking inside the ISO decides what it will be.
 
-use crate::amd_driver_row::AmdDriverRow;
 use crate::common::{choose_file, in_background};
+use crate::driver_row::DriverRow;
 use crate::rows::{choice_row, number_row, row_button};
 use crate::window::Window;
 use adw::prelude::*;
@@ -19,6 +19,7 @@ use guesthouse_app_core::machine::{Kind, MIN_CORES, MIN_RAM_GIB, Machine};
 use guesthouse_app_core::setup::amd::NO_AMD_SETUP;
 use guesthouse_app_core::setup::checks::gpu_warning;
 use guesthouse_app_core::setup::guest_driver::guest_driver;
+use guesthouse_app_core::setup::intel::NO_INTEL_SETUP;
 use guesthouse_app_core::tasks::no_slot_text;
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -38,6 +39,8 @@ const CARD_TITLE: &str = "Card";
 /// Said plainly until a guest on an AMD card has drawn with it.
 const AMD_NOT_FINISHED: &str = "starts on the AMD card. GPU-PV on AMD is not finished, so Windows may have no \
                                 GPU there yet";
+/// Said plainly, as Intel's support only logs what the guest's driver asks for.
+const INTEL_NOT_FINISHED: &str = "starts on the Intel card. Intel support is at an early test stage: Windows                                   runs, but nothing is drawn by the card yet";
 const CARD_NOTE: &str = "Windows is installed for this card's maker. It can move to another card of the same maker \
                          later, but not to another maker's.";
 
@@ -69,7 +72,7 @@ struct Parts {
     /// Which card a Windows machine runs on, there only when this PC has more than one to choose.
     card: adw::ComboRow,
     cards: Vec<CardChoice>,
-    amd_driver: AmdDriverRow,
+    driver_row: DriverRow,
     note: gtk::Label,
     iso_path: RefCell<Option<String>>,
     iso: RefCell<Option<Iso>>,
@@ -163,7 +166,7 @@ impl NewMachineDialog {
         card.set_selected(default_choice(&context, &cards) as u32);
         card.set_visible(false);
         hardware.add(&card);
-        let amd_driver = AmdDriverRow::new(window, &hardware);
+        let driver_row = DriverRow::new(window, &hardware);
         let note = gtk::Label::builder()
             .wrap(true)
             .xalign(0.0)
@@ -201,7 +204,7 @@ impl NewMachineDialog {
             disk,
             card,
             cards,
-            amd_driver,
+            driver_row,
             note,
             iso_path: RefCell::default(),
             iso: RefCell::default(),
@@ -233,11 +236,11 @@ impl NewMachineDialog {
         let this = self.clone();
         self.0.card.connect_selected_notify(move |_| this.card_changed());
         let this = self.clone();
-        self.0.amd_driver.connect_ready(move || this.card_changed());
+        self.0.driver_row.connect_ready(move || this.card_changed());
         let window = self.0.window.clone();
-        let amd_driver = self.0.amd_driver.clone();
+        let driver_row = self.0.driver_row.clone();
         self.0.dialog.connect_closed(move |_| {
-            amd_driver.stop();
+            driver_row.stop();
             window.new_machine_closed();
         });
     }
@@ -316,8 +319,13 @@ impl NewMachineDialog {
         }
         let missing_driver = if windows { guest_driver(&context, &self.chosen_card()).err() } else { None };
         self.0.no_driver.set(missing_driver.is_some());
-        let amd_driver_missing = missing_driver == Some(NO_AMD_SETUP);
-        self.0.amd_driver.show_for(amd_driver_missing.then(|| self.chosen_device()));
+        // The maker whose installer the row asks for, when it's that driver that is missing.
+        let installer_for = match missing_driver {
+            Some(missing) if missing == NO_AMD_SETUP => Some(GpuMaker::Amd),
+            Some(missing) if missing == NO_INTEL_SETUP => Some(GpuMaker::Intel),
+            _ => None,
+        };
+        self.0.driver_row.show_for(installer_for.map(|maker| (maker, self.chosen_device())));
         if let Some(missing) = missing_driver {
             self.show_verdict(&iso.title, missing);
         } else if windows {
@@ -332,7 +340,7 @@ impl NewMachineDialog {
             let gpu = match maker {
                 GpuMaker::Nvidia => "starts with GPU-PV",
                 GpuMaker::Amd => AMD_NOT_FINISHED,
-                GpuMaker::Intel => "has no GPU-PV on Intel yet",
+                GpuMaker::Intel => INTEL_NOT_FINISHED,
             };
             let said = format!("Installs by itself and {gpu}. {display}{warning}");
             self.show_verdict(&iso.title, said.trim());

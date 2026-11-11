@@ -1,5 +1,6 @@
-//! The row that takes AMD's Windows driver out of AMD's installer, for a Windows machine on an AMD
-//! card. It's there only while the driver is missing, and says whether the installer covers the card.
+//! The row that takes a card maker's Windows driver out of the maker's installer, for a Windows machine
+//! on an AMD or Intel card. It's there only while the driver is missing, and says whether the
+//! installer covers the card.
 
 use crate::common::{choose_file, in_background};
 use crate::rows::row_button;
@@ -7,21 +8,38 @@ use crate::window::Window;
 use adw::prelude::*;
 use gtk::glib;
 use guesthouse_app_core::Failure;
+use guesthouse_app_core::gpu_maker::GpuMaker;
 use guesthouse_app_core::setup::amd_driver::{AMD_RELEASE, read_amd_installer, unpack_amd};
 use guesthouse_app_core::setup::driver::Extraction;
+use guesthouse_app_core::setup::intel_driver::{INTEL_WINDOWS_DRIVER, read_intel_installer, unpack_intel};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-const TITLE: &str = "AMD's driver";
-const ASK: &str = "Choose AMD's installer for Adrenalin {release}. The display driver is taken out of it.";
+/// What the row says for each maker whose driver is taken from an installer.
+fn title(maker: GpuMaker) -> String {
+    format!("{}'s driver", maker.name())
+}
+
+fn ask(maker: GpuMaker) -> String {
+    match maker {
+        GpuMaker::Amd => format!(
+            "Choose AMD's installer for Adrenalin {AMD_RELEASE}. The display driver is taken out of it."
+        ),
+        GpuMaker::Intel => format!(
+            "Choose Intel's installer for graphics driver {INTEL_WINDOWS_DRIVER}, gfx_win_101.9175.exe.              The drivers for the card are taken out of it."
+        ),
+        GpuMaker::Nvidia => String::new(),
+    }
+}
 
 struct Parts {
     window: Window,
     row: adw::ActionRow,
     choose: gtk::Button,
     bar: gtk::ProgressBar,
-    /// The card the installer must cover.
+    /// The maker whose installer is asked for, and the card it must cover.
+    maker: Cell<GpuMaker>,
     device: Cell<u32>,
     extraction: RefCell<Option<Arc<Extraction>>>,
     /// What runs once the driver is unpacked.
@@ -29,11 +47,11 @@ struct Parts {
 }
 
 #[derive(Clone)]
-pub struct AmdDriverRow(Rc<Parts>);
+pub struct DriverRow(Rc<Parts>);
 
-impl AmdDriverRow {
+impl DriverRow {
     pub fn new(window: &Window, group: &adw::PreferencesGroup) -> Self {
-        let row = adw::ActionRow::builder().title(TITLE).visible(false).build();
+        let row = adw::ActionRow::builder().title(title(GpuMaker::Amd)).visible(false).build();
         let choose = row_button("Choose");
         row.add_suffix(&choose);
         let bar = gtk::ProgressBar::builder().visible(false).valign(gtk::Align::Center).build();
@@ -44,6 +62,7 @@ impl AmdDriverRow {
             row,
             choose: choose.clone(),
             bar,
+            maker: Cell::new(GpuMaker::Amd),
             device: Cell::new(0),
             extraction: RefCell::default(),
             ready: RefCell::default(),
@@ -58,13 +77,16 @@ impl AmdDriverRow {
         *self.0.ready.borrow_mut() = Some(Rc::new(ready));
     }
 
-    /// Shows the row for the AMD card `device` while its driver is missing, and hides it otherwise.
-    pub fn show_for(&self, device: Option<u32>) {
+    /// Shows the row for the card `device` of `maker` while its driver is missing, and hides it
+    /// otherwise.
+    pub fn show_for(&self, wanted: Option<(GpuMaker, u32)>) {
         let parts = &self.0;
-        parts.row.set_visible(device.is_some());
-        if let Some(device) = device {
+        parts.row.set_visible(wanted.is_some());
+        if let Some((maker, device)) = wanted {
+            parts.maker.set(maker);
             parts.device.set(device);
-            parts.row.set_subtitle(&ASK.replace("{release}", AMD_RELEASE));
+            parts.row.set_title(&title(maker));
+            parts.row.set_subtitle(&ask(maker));
         }
     }
 
@@ -72,9 +94,10 @@ impl AmdDriverRow {
         let window = self.0.window.clone();
         let failing = window.clone();
         let this = self.clone();
+        let dialog = format!("Choose {}'s Driver Installer", self.0.maker.get().name());
         choose_file(
             window.widget(),
-            "Choose AMD's Driver Installer",
+            &dialog,
             "Windows installers",
             "exe",
             move |path| this.unpack(path),
@@ -98,20 +121,35 @@ impl AmdDriverRow {
                 bar.set_fraction(f64::from(percent) / 100.0);
             }
         });
-        let device = parts.device.get();
+        let (maker, device) = (parts.maker.get(), parts.device.get());
         let context = parts.window.context();
         let working = context.clone();
         let this = self.clone();
         in_background(
             &context,
             move || {
-                let package = read_amd_installer(&path, device)?;
-                if extraction.cancelled() {
-                    return Err(Failure::new("Stopped."));
-                }
-                unpack_amd(&extraction, &working, &package, &|percent| {
+                let progress = |percent| {
                     let _ = progress.try_send(percent);
-                })
+                };
+                let stopped = || Failure::new("Stopped.");
+                match maker {
+                    GpuMaker::Intel => {
+                        let package = read_intel_installer(&path, device)?;
+                        if extraction.cancelled() {
+                            return Err(stopped());
+                        }
+                        unpack_intel(&extraction, &working, &package, &progress)
+                    }
+                    GpuMaker::Amd => {
+                        let package = read_amd_installer(&path, device)?;
+                        if extraction.cancelled() {
+                            return Err(stopped());
+                        }
+                        unpack_amd(&extraction, &working, &package, &progress)
+                    }
+                    // Its driver comes from the setup page, and this row is never shown for it.
+                    GpuMaker::Nvidia => Err(Failure::new("NVIDIA's driver is set up from the setup page.")),
+                }
             },
             move |result| {
                 let parts = &this.0;

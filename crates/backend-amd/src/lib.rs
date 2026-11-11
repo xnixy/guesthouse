@@ -19,6 +19,7 @@
 mod channel_order;
 mod copy_ib;
 mod device;
+mod fault;
 mod info;
 mod ioctl;
 mod memory;
@@ -204,6 +205,11 @@ impl AmdBackend {
             Ok(Ran::Retired) => Ok(()),
             Ok(Ran::Refused) => Err("amdgpu kept saying try again".into()),
             Ok(Ran::Hung) => Err("it never finished".into()),
+            Ok(Ran::Faulted(fault)) => Err(format!(
+                "the daemon's own work on the card reached {:#x}, where nothing is mapped (fault status \
+                 {:#x}), so it sends the card no more",
+                fault.address, fault.status
+            )),
             Err(error) => Err(error.to_string()),
         }
     }
@@ -213,7 +219,7 @@ impl AmdBackend {
         match ran {
             Ok(Ran::Retired) => self.patience = Patience::RUN,
             Ok(Ran::Hung) => self.patience = Patience::AFTER_A_HANG,
-            Ok(Ran::Refused) | Err(_) => {}
+            Ok(Ran::Refused | Ran::Faulted(_)) | Err(_) => {}
         }
     }
 
@@ -450,7 +456,9 @@ impl Backend for AmdBackend {
     ) -> Result<(), BackendError> {
         let buffer = |id| self.memory.get(&id).copied().ok_or_else(|| BackendError::new("no such memory"));
         let (from, to) = (buffer(from)?, buffer(to)?);
-        let moved = if self.dma_known() {
+        // Once the daemon's own space has faulted nothing more is run there, so the CPU moves it.
+        let dma_stopped = self.spaces.get(&own_space).is_some_and(|space| space.vm.faulted().is_some());
+        let moved = if self.dma_known() && !dma_stopped {
             // A lock that fails is worse for the guest than a slow one, so the CPU has a go when the
             // engine refuses.
             self.move_with_dma(own_space, from, to, size).or_else(|reason| {
@@ -729,6 +737,18 @@ impl Backend for AmdBackend {
             Ok(Ran::Hung) => {
                 log::error!(
                     "work on engine family {} never finished, and the kernel didn't reset it",
+                    node.ip_type
+                );
+                WorkStart::QueueFailed
+            }
+            // The guest's driver hears its queue failed, as it would after a fault on its own card.
+            Ok(Ran::Faulted(fault)) => {
+                log::error!(
+                    "work in space {:?} reached {:#x} on the card, where nothing is mapped (fault status \
+                     {:#x}). No more work from that space is run, on engine family {} or any other",
+                    work.space,
+                    fault.address,
+                    fault.status,
                     node.ip_type
                 );
                 WorkStart::QueueFailed

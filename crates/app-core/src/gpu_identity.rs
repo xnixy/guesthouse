@@ -1,13 +1,14 @@
 //! Which PCI identity the virtual render device shows Windows. Windows' own virtual render driver
 //! only binds to Microsoft's, so every machine starts with that one. Browsers and streaming programs
 //! look at the vendor number before they use a GPU, and stay on the CPU when it's Microsoft's. So once
-//! a guest holds a driver package for its card maker's number, NVIDIA's or AMD's, written there from
+//! a guest holds a driver package for its card maker's number, NVIDIA's, AMD's or Intel's, written there from
 //! its own copy of Windows' driver, every VM after that shows that number. The choice is kept in the
 //! machine's folder, as it has to outlive a VM: a guest shown a number without its package would
 //! start with no GPU.
 
 use crate::context::Context;
 use crate::failure::Result;
+use crate::gpu_maker::GpuMaker;
 use crate::machine::Machine;
 use crate::settings::write_json;
 use serde::{Deserialize, Serialize};
@@ -31,15 +32,33 @@ pub const NVIDIA_RENDER: PciIdentity = PciIdentity { vendor: 0x10DE, device: 0x2
 /// AMD's vendor number with a device number AMD has never shipped, far from every range it uses.
 pub const AMD_RENDER: PciIdentity = PciIdentity { vendor: 0x1002, device: 0x7FFE };
 
+/// Intel's vendor number with a device number Intel has never shipped, in a block it has never used.
+pub const INTEL_RENDER: PciIdentity = PciIdentity { vendor: 0x8086, device: 0xCFFE };
+
+/// The number a guest on a card of this maker shows once it holds the package.
+pub fn identity_of(maker: GpuMaker) -> PciIdentity {
+    match maker {
+        GpuMaker::Nvidia => NVIDIA_RENDER,
+        GpuMaker::Amd => AMD_RENDER,
+        GpuMaker::Intel => INTEL_RENDER,
+    }
+}
+
+/// The maker of the machine's card. Only a Windows machine has one that matters here, and any other
+/// has always been counted as NVIDIA's.
+fn machine_maker(machine: &Machine) -> GpuMaker {
+    machine.windows_maker().unwrap_or(GpuMaker::Nvidia)
+}
+
 /// The number a machine shows once its guest holds the package: its card maker's. A Windows machine
 /// stays with one maker, so this never changes under a guest.
 pub fn maker_identity(machine: &Machine) -> PciIdentity {
-    if machine.windows_amd_card().is_some() { AMD_RENDER } else { NVIDIA_RENDER }
+    identity_of(machine_maker(machine))
 }
 
 /// The card maker's name, for what the user hears.
 pub fn maker_name(machine: &Machine) -> &'static str {
-    if machine.windows_amd_card().is_some() { "AMD" } else { "NVIDIA" }
+    machine_maker(machine).name()
 }
 
 impl PciIdentity {
@@ -168,6 +187,27 @@ mod tests {
     fn the_patterns_are_how_windows_writes_a_hardware_id() {
         assert_eq!(MICROSOFT_RENDER.windows_pattern(), r"PCI\VEN_1414&DEV_008E*");
         assert_eq!(NVIDIA_RENDER.windows_pattern(), r"PCI\VEN_10DE&DEV_2BFE*");
+        assert_eq!(INTEL_RENDER.windows_pattern(), r"PCI\VEN_8086&DEV_CFFE*");
+    }
+
+    #[test]
+    fn each_makers_identity_has_its_vendor_number_and_no_two_are_alike() {
+        for maker in GpuMaker::ALL {
+            assert_eq!(identity_of(maker).vendor, maker.vendor(), "{maker:?}");
+            assert_ne!(identity_of(maker), MICROSOFT_RENDER);
+        }
+        assert_ne!(identity_of(GpuMaker::Amd).device, identity_of(GpuMaker::Intel).device);
+    }
+
+    #[test]
+    fn an_intel_machine_shows_intels_number_and_says_intel() {
+        let mut machine = Machine::new("x", "x", "", "");
+        machine.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+        assert_eq!((maker_identity(&machine), maker_name(&machine)), (INTEL_RENDER, "Intel"));
+        assert_eq!(INTEL_RENDER.qemu_properties(), ",vendor-id=0x8086,device-id=0xcffe");
+        let mut amd = machine;
+        amd.use_windows_card(GpuMaker::Amd, "0000:7c:00.0");
+        assert_eq!((maker_identity(&amd), maker_name(&amd)), (AMD_RENDER, "AMD"));
     }
 
     #[test]

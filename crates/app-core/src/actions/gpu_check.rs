@@ -4,7 +4,8 @@
 use super::Task;
 use crate::daemon;
 use crate::failure::{Failure, Result};
-use crate::gpu_identity::{AMD_RENDER, MICROSOFT_RENDER, NVIDIA_RENDER};
+use crate::gpu_identity::{MICROSOFT_RENDER, identity_of};
+use crate::gpu_maker::GpuMaker;
 use std::fs;
 use std::time::Duration;
 
@@ -18,8 +19,10 @@ const DAEMON_ERROR_MARK: &str = "ERROR ";
 
 /// The virtual render device, under any identity the QEMU patch can give it.
 fn is_render_device() -> String {
-    let patterns = [MICROSOFT_RENDER, NVIDIA_RENDER, AMD_RENDER].map(|identity| identity.windows_pattern());
-    patterns.map(|pattern| format!("$_.PNPDeviceID -like '{pattern}'")).join(" -or ")
+    let identities = std::iter::once(MICROSOFT_RENDER).chain(GpuMaker::ALL.map(identity_of));
+    let patterns =
+        identities.map(|identity| format!("$_.PNPDeviceID -like '{}'", identity.windows_pattern()));
+    patterns.collect::<Vec<_>>().join(" -or ")
 }
 
 fn working_devices(task: &Task) -> Option<u32> {
@@ -54,4 +57,18 @@ pub(super) fn check_gpu(task: &Task) -> Result<()> {
         Some(reason) => format!("{NO_GPU} The daemon said: {reason}"),
         None => NO_GPU.to_owned(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu_identity::{AMD_RENDER, INTEL_RENDER, NVIDIA_RENDER};
+
+    #[test]
+    fn the_check_accepts_the_render_device_under_every_identity_a_vm_can_show() {
+        let test = is_render_device();
+        for identity in [MICROSOFT_RENDER, NVIDIA_RENDER, AMD_RENDER, INTEL_RENDER] {
+            assert!(test.contains(&identity.windows_pattern()), "{identity:?}: {test}");
+        }
+    }
 }

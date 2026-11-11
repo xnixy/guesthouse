@@ -125,7 +125,7 @@ new_test() {
     for library in libepoxy.so.0 libgbm.so.1 libEGL.so.1 libdrm.so.2; do printf 'gl' >"$T/libraries/$library"; done
     printf 'amdgpu_device_initialize2' >"$T/libraries/libdrm_amdgpu.so.1"
     printf 'capng' >"$T/libraries/libcap-ng.so.0"
-    unset LIBRARIES_PRESENT SUDO_FAILS FAKE_GPU_REFUSED FAKE_GTK FAKE_AMD HELPER_VERSION
+    unset LIBRARIES_PRESENT SUDO_FAILS FAKE_GPU_REFUSED FAKE_GTK FAKE_AMD FAKE_INTEL HELPER_VERSION
     FIRMWARE_HERE=no
     OSTREE=no
     KVM_CLOSED=no
@@ -150,7 +150,7 @@ sandbox() {
     [ "$WITHOUT_NAMESPACE" = no ] || wrapper=()
     env -i HOME="$H" PATH="$T/bin" XDG_RUNTIME_DIR="$T/runtime" STAND_IN_LOG="$T/log" \
         FAKE_RELEASES="$T/releases" FAKE_LIBRARIES="$T/libraries" LIBRARIES_PRESENT="${LIBRARIES_PRESENT:-}" \
-        FAKE_FIRMWARE="$T/firmware" SUDO_FAILS="${SUDO_FAILS:-}" FAKE_GPU_REFUSED="${FAKE_GPU_REFUSED:-}" FAKE_AMD="${FAKE_AMD:-}" FAKE_GTK="${FAKE_GTK-4.20}" \
+        FAKE_FIRMWARE="$T/firmware" SUDO_FAILS="${SUDO_FAILS:-}" FAKE_GPU_REFUSED="${FAKE_GPU_REFUSED:-}" FAKE_AMD="${FAKE_AMD:-}" FAKE_INTEL="${FAKE_INTEL:-}" FAKE_GTK="${FAKE_GTK-4.20}" \
         "${wrapper[@]}" "$@"
 }
 

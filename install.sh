@@ -425,10 +425,12 @@ ask_the_release() {
     HOST_REPORT=$STAGING/host-report
     GPU_ANSWER=no
     AMD_ANSWER=no
+    INTEL_ANSWER=no
     if [ -x "$TREE/guesthouse-check" ] &&
         GUESTHOUSE_PROGRAM=$TREE "$TREE/guesthouse-check" >"$HOST_REPORT" 2>/dev/null; then
         GPU_ANSWER=$(awk -F "$TAB" '$1 == "gpu" { print $2 }' "$HOST_REPORT")
         AMD_ANSWER=$(awk -F "$TAB" '$1 == "amd" { print $2 }' "$HOST_REPORT")
+        INTEL_ANSWER=$(awk -F "$TAB" '$1 == "intel" { print $2 }' "$HOST_REPORT")
     else
         : >"$HOST_REPORT"
     fi
@@ -459,6 +461,9 @@ decide_mode() {
     elif [ "$AMD_ANSWER" = yes ]; then
         MODE=gpu
         GPU_NOTE="The checks above say this PC can't run NVIDIA's GPU machines, but its AMD card can be a Linux guest's GPU."
+    elif [ "$INTEL_ANSWER" = yes ]; then
+        MODE=gpu
+        GPU_NOTE="The checks above say this PC can't run NVIDIA's GPU machines, but it has an Intel card that a Windows machine can be set up on, at an early test stage where nothing is drawn by the card yet."
     elif [ "$previous" = gpu ]; then
         MODE=gpu
         GPU_NOTE="The checks above say this PC can't run GPU machines right now. Often that's a driver update that moved to another branch: host and guest have to match. This update doesn't change that, and doesn't touch your driver. GPU machines won't start until it's fixed, your machines and disks stay as they are, and plain VMs still run."

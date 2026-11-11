@@ -9,6 +9,7 @@ use crate::linux::amd::default_linux_gpu;
 use crate::machine::Machine;
 use crate::render_cards::render_cards;
 use crate::setup::cards::{card_in_use, find_cards};
+use crate::setup::intel::supported_intel_cards;
 
 /// Whether a new machine, or a settings page, is offered Intel's cards. They are, as a test stage:
 /// Windows can be set up and started on one, but nothing is drawn by the card yet.
@@ -52,7 +53,11 @@ fn choices_offering(context: &Context, intel_offered: bool) -> Vec<CardChoice> {
         match maker {
             GpuMaker::Nvidia => choices.extend(nvidia_choice(context)),
             GpuMaker::Amd | GpuMaker::Intel => {
-                choices.extend(render_cards(context, maker).into_iter().map(|card| CardChoice {
+                let cards = match maker {
+                    GpuMaker::Intel => supported_intel_cards(context),
+                    _ => render_cards(context, maker),
+                };
+                choices.extend(cards.into_iter().map(|card| CardChoice {
                     maker,
                     label: format!("{} at {}", card.name, card.pci),
                     pci: card.pci,

@@ -8,7 +8,7 @@
 use crate::context::Context;
 use crate::failure::Result;
 use crate::gpu_maker::GpuMaker;
-use crate::render_cards::render_card;
+use crate::render_cards::{RenderCard, render_card, render_cards};
 use crate::settings::write_json;
 use serde_json::{Value, json};
 use std::fs;
@@ -34,6 +34,17 @@ pub const NAMED_FILES: [&str; 8] = [
     "igvk32.json",
     "ze_intel_gpu64.dll",
 ];
+/// The Intel cards the Intel daemon is written for, by PCI device id: Lunar Lake's Arc 140V. Intel's
+/// other cards are in this PC's list as well, and offering them would put an iGPU that can't work in
+/// the card choice of nearly every PC with an Intel processor.
+pub const SUPPORTED_DEVICES: [u32; 1] = [0x64A0];
+
+/// The Intel cards in this PC that a Windows machine can be set up for.
+pub fn supported_intel_cards(context: &Context) -> Vec<RenderCard> {
+    let cards = render_cards(context, GpuMaker::Intel);
+    cards.into_iter().filter(|card| SUPPORTED_DEVICES.contains(&card.device)).collect()
+}
+
 /// Vulkan's manifests name the library the loader opens, beside them.
 const VULKAN_MANIFESTS: [&str; 2] = ["igvk64.json", "igvk32.json"];
 const SAME_FOLDER: &str = ".\\";
@@ -138,6 +149,16 @@ mod tests {
     const CARD: &str = "0000:00:02.0";
     /// The kernel driver's name, which the daemon gives and the guest gets no file for.
     const KERNEL_DRIVER: &str = "igdkmdn64.sys";
+
+    #[test]
+    fn only_the_card_the_daemon_is_written_for_counts() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        fake_render_node(&scratch, 128, CARD, "0x8086", 0x46a6);
+        fake_render_node(&scratch, 129, "0000:00:03.0", "0x8086", 0x64a0);
+        let found: Vec<String> = supported_intel_cards(&context).into_iter().map(|card| card.pci).collect();
+        assert_eq!(found, ["0000:00:03.0"]);
+    }
 
     #[test]
     fn with_no_driver_and_no_card_both_are_said() {

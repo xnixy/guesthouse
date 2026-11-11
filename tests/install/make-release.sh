@@ -39,6 +39,7 @@ else
     printf 'gpu\tyes\n'
 fi
 printf 'amd\t%s\n' "${FAKE_AMD:-no}"
+printf 'intel\t%s\n' "${FAKE_INTEL:-no}"
 CHECK
 chmod +x "$tree"/guesthouse* "$tree/qemu/build/qemu-system-x86_64" "$tree/qemu/build/qemu-bridge-helper"
 cp "$repo/crates/app/data/io.github.xnixy.Guesthouse.desktop" "$tree/share/"

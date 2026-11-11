@@ -102,6 +102,28 @@ t_an_amd_card_keeps_the_linux_files_when_nvidias_cannot_run() {
     check_there "$H/.local/lib/guesthouse/1.0/linux"
 }
 
+t_an_intel_card_alone_gets_the_gpu_files_for_windows() {
+    release 1.0 "windows linux"
+    give_everything
+    export FAKE_GPU_REFUSED="No supported card."
+    export FAKE_INTEL=yes
+    install_version 1.0
+    check_exit 0
+    check_said "it has an Intel card that a Windows machine can be set up on"
+    check_there "$H/.local/lib/guesthouse/1.0/guest"
+}
+
+t_a_pc_with_no_card_the_release_supports_stays_plain_whatever_its_intel_processor_has() {
+    release 1.0 "windows linux"
+    give_everything
+    export FAKE_GPU_REFUSED="No supported card."
+    export FAKE_INTEL=no
+    install_version 1.0
+    check_exit 0
+    check_said "plain VMs only"
+    check_gone "$H/.local/lib/guesthouse/1.0/guest"
+}
+
 t_a_libdrm_too_old_for_qemu_stops_the_install() {
     release 1.0
     give_everything

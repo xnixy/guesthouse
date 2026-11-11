@@ -1,18 +1,17 @@
-//! The adapter record: what Intel's user-mode drivers read about the adapter when they open it.
+//! The adapter record: the answer to the private adapter query, KMTQAITYPE_UMDRIVERPRIVATE.
 //!
-//! They ask for it with the private adapter query, KMTQAITYPE_UMDRIVERPRIVATE. The first ask is
-//! four bytes, for the number of linked adapters, and the second is that many records of
-//! [`RECORD_SIZE`] bytes. The kernel driver refuses any other size, and so does this.
+//! A four-byte ask gets the number of linked adapters, which is one, and an ask of [`RECORD_SIZE`]
+//! bytes gets the record. Any other size is refused, as the vendor's kernel driver wouldn't take it.
 //!
-//! The record is built once, from the card and its generation. The guest's driver picks which of its
-//! modules to load from the render core family, so that has to be right; the rest is what is known
-//! of the hardware. Compression is off, as the host can't set up compressed memory yet, and the
-//! record says the guest is a virtual machine. With that flag the guest's driver leaves out the
-//! context IDs the kernel driver would otherwise write into the guest process's own memory, which
-//! the host can't reach. What is left at zero is listed in [`super::gaps::RECORD`].
+//! The record is built once, from the card and its generation: the platform and core families,
+//! the card's ids, clocks and shape, the feature flags this backend sets, and the GPU address
+//! partition. Compression is off, as the host can't set up compressed memory yet, and the byte that
+//! marks the adapter as a virtual machine's is set. What is left at zero is listed in
+//! [`super::gaps::RECORD`].
 
 use super::bytes::{dword, put_dword, put_qword, put_word};
 use super::features::{self, Feature};
+use super::partition;
 use guesthouse_backend::{Status, VendorQuery};
 
 /// KMTQAITYPE_UMDRIVERPRIVATE.
@@ -27,7 +26,7 @@ const LINKED_ADAPTERS: u32 = 1;
 /// Where the record's fields are. The names are those of gmmlib's ADAPTER_INFO and the structures
 /// in it, though the record's order is not that header's.
 mod at {
-    /// The user-mode driver's build, which it writes in its ask and which goes back as it came.
+    /// A word the guest writes in its ask, which goes back as it came.
     pub const BUILD_STAMP: usize = 0x004;
     pub const PRODUCT_FAMILY: usize = 0x208;
     pub const PCH_FAMILY: usize = 0x20C;
@@ -38,10 +37,6 @@ mod at {
     pub const REVISION: usize = 0x21E;
     pub const GT_TYPE: usize = 0x228;
     pub const RENDER_IP: usize = 0x238;
-    pub const MEDIA_IP: usize = 0x23C;
-    /// A four-bit entry of the workaround table, WaLLCCachingUnsupported, which the kernel driver
-    /// turns on for a virtual machine. It sits in this byte's low half.
-    pub const WA_NO_LLC_CACHING: usize = 0x584;
     pub const TIMESTAMP_FREQUENCY: usize = 0x998;
     pub const MIN_RENDER_FREQUENCY: usize = 0x9AC;
     pub const MAX_RENDER_FREQUENCY: usize = 0x9B0;
@@ -60,9 +55,11 @@ mod at {
     pub const MAX_SLICES: usize = 0xB98;
     pub const MAX_SUBSLICES: usize = 0xB9C;
     pub const MAX_DUAL_SUBSLICES: usize = 0xBA0;
-    /// A byte, set when the query came from a virtual machine.
+    /// GMM_GFX_PARTITIONING, [`super::partition`].
+    pub const PARTITION: usize = 0x23B8;
+    /// A byte that marks the adapter as a virtual machine's.
     pub const FROM_VIRTUAL_MACHINE: usize = 0x2468;
-    /// A byte, set when that machine is a secure one.
+    /// A byte that marks that machine as a secure one.
     pub const SECURE_VIRTUAL_MACHINE: usize = 0x2469;
 }
 
@@ -81,7 +78,6 @@ pub struct Platform {
     pub revision: u16,
     pub gt_type: u32,
     pub render_ip: IpWord,
-    pub media_ip: IpWord,
 }
 
 /// An IP version as the record packs it: architecture in bits 22 to 31, release in 14 to 21 and
@@ -133,7 +129,7 @@ pub struct RecordFacts {
     pub platform: Platform,
     pub gt: GtSystem,
     /// The GPU timestamp's frequency, in Hz.
-    pub timestamp_hz: u64,
+    pub timestamp_hz: u32,
     /// The render clock's least and most, in MHz.
     pub render_mhz: (u32, u32),
     pub memory: Memory,
@@ -152,14 +148,13 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
         (at::PLATFORM_TYPE, platform.platform_type),
         (at::GT_TYPE, platform.gt_type),
         (at::RENDER_IP, platform.render_ip.0),
-        (at::MEDIA_IP, platform.media_ip.0),
     ] {
         put_dword(&mut record, field, value);
     }
     put_word(&mut record, at::DEVICE_ID, platform.device_id);
     put_word(&mut record, at::REVISION, platform.revision);
 
-    put_qword(&mut record, at::TIMESTAMP_FREQUENCY, facts.timestamp_hz);
+    put_dword(&mut record, at::TIMESTAMP_FREQUENCY, facts.timestamp_hz);
     put_dword(&mut record, at::MIN_RENDER_FREQUENCY, facts.render_mhz.0);
     put_dword(&mut record, at::MAX_RENDER_FREQUENCY, facts.render_mhz.1);
     put_dword(&mut record, at::NUMBER_OF_EUS, facts.gt.eu_count);
@@ -184,9 +179,10 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     }
 
     set_features(&mut record, facts.local_memory);
+    let block = &mut record[at::PARTITION..at::PARTITION + partition::SIZE];
+    partition::write(block, &partition::ours());
     record[at::FROM_VIRTUAL_MACHINE] = 1;
     record[at::SECURE_VIRTUAL_MACHINE] = 0;
-    record[at::WA_NO_LLC_CACHING] |= 1;
     record
 }
 
@@ -296,7 +292,6 @@ pub(crate) mod tests {
                 revision: 4,
                 gt_type: 18,
                 render_ip: IpWord::new(20, 4, 4),
-                media_ip: IpWord::new(20, 0, 4),
                 ..Platform::default()
             },
             gt: GtSystem { eu_count: 64, thread_count: 512, dual_subslice_count: 8, ..GtSystem::default() },
@@ -328,7 +323,6 @@ pub(crate) mod tests {
         assert_eq!(IpWord::new(20, 4, 0x41).0 & 0x3F, 1, "the revision has six bits");
         let record = build(&facts());
         assert_eq!(dword(&record, at::RENDER_IP), Some(IpWord::new(20, 4, 4).0));
-        assert_eq!(dword(&record, at::MEDIA_IP), Some(IpWord::new(20, 0, 4).0));
     }
 
     #[test]
@@ -336,7 +330,6 @@ pub(crate) mod tests {
         let record = build(&facts());
         assert_eq!(record[at::FROM_VIRTUAL_MACHINE], 1);
         assert_eq!(record[at::SECURE_VIRTUAL_MACHINE], 0);
-        assert_eq!(record[at::WA_NO_LLC_CACHING] & 0xF, 1);
     }
 
     #[test]
@@ -364,7 +357,8 @@ pub(crate) mod tests {
     #[test]
     fn clocks_counts_and_memory_land_where_they_belong() {
         let record = build(&facts());
-        assert_eq!(qword(&record, at::TIMESTAMP_FREQUENCY), Some(19_200_000));
+        assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY), Some(19_200_000));
+        assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY + 4), Some(0), "a 32-bit field");
         assert_eq!(dword(&record, at::MIN_RENDER_FREQUENCY), Some(400));
         assert_eq!(dword(&record, at::MAX_RENDER_FREQUENCY), Some(2050));
         assert_eq!(dword(&record, at::NUMBER_OF_EUS), Some(64));
@@ -386,8 +380,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_gpu_address_partition_is_a_gap_left_at_zero() {
-        assert!(build(&facts())[0x23B8..0x2468].iter().all(|&byte| byte == 0));
+    fn the_record_carries_the_partition_the_escape_gives() {
+        let record = build(&facts());
+        assert_eq!(
+            partition::read(&record[at::PARTITION..at::PARTITION + partition::SIZE]),
+            partition::ours()
+        );
+        assert_eq!(
+            at::PARTITION + partition::SIZE,
+            at::FROM_VIRTUAL_MACHINE,
+            "it ends where the next field starts"
+        );
     }
 
     #[test]

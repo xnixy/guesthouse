@@ -1,20 +1,26 @@
 //! One log line for each exchange with the guest's driver, in a fixed form a tester's log can be
 //! searched by: `intel <kind> name=value ...`.
 //!
-//! The kinds are `query`, `registry`, `escape`, `context`, `queue`, `allocation`, `submit`,
-//! `queue-closed` and `refused`. Each line names the fields decoded, then `undecoded=` with the
-//! non-zero words nothing names yet. With `GUESTHOUSE_VERBOSE` the first few of each kind are dumped
-//! whole as well, and the repeats get their line at debug.
+//! The kinds are `query`, `registry`, `escape`, `partition`, `context`, `queue`, `allocation`,
+//! `submit`, `queue-closed`, `copy` and `refused`. Each line names the fields decoded, then
+//! `undecoded=` with the non-zero words nothing names yet. The first few of each kind are at info,
+//! told apart by the guest's process where the trait passes one (escapes and contexts) and by its
+//! address space for submissions, so a second program's traffic isn't hidden behind the first's.
+//! Queries, registry values, queues and allocations come with no process, so those are told apart
+//! by what they say alone. The repeats are at debug, and with `GUESTHOUSE_VERBOSE` every buffer is
+//! dumped whole as well, up to 4 KiB.
 
 use crate::protocol::allocation::{self, Resource};
 use crate::protocol::command_header::{self, Compact, Header};
 use crate::protocol::context::{self, Context};
-use crate::protocol::escape::{self, Escape};
+use crate::protocol::escape::{self, Escape, PartitionAsk};
 use crate::protocol::guest_driver::NameAnswer;
 use crate::protocol::hw_queue::{self, Queue};
+use crate::protocol::nodes;
+use crate::protocol::partition;
 use crate::protocol::record::Asked;
 use crate::watch::{Hex, PREFIX, Seen, Undecoded, dump, tell};
-use guesthouse_backend::{RegistryName, Status, VendorQuery, Work};
+use guesthouse_backend::{RegistryName, Status, VendorQuery, Work, WorkSource};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -41,6 +47,9 @@ impl fmt::Display for QueryOutcome {
             Self::DriverName(_, NameAnswer::Given(name)) => write!(f, "answered=driver-name driver={name}"),
             Self::DriverName(status, NameAnswer::No32BitName) => {
                 write!(f, "refused={:#x} why=\"no 32-bit driver name is known\"", status.0)
+            }
+            Self::DriverName(status, NameAnswer::Withheld) => {
+                write!(f, "refused={:#x} why=\"held back by the software desktop switch\"", status.0)
             }
             Self::LeftToTheCore => f.write_str("answered=left-to-the-core"),
         }
@@ -92,9 +101,7 @@ impl Traffic {
             query.size,
             bit(query.process_is_32_bit)
         );
-        if telling {
-            dump(format_args!("query kind={}", query.kind), query.data);
-        }
+        dump(format_args!("query kind={}", query.kind), query.data);
     }
 
     pub fn registry(&mut self, name: &RegistryName, found: bool) {
@@ -108,15 +115,16 @@ impl Traffic {
         tell!(telling, "{PREFIX} registry name=\"{shown}\" {answer}");
     }
 
-    pub fn escape(&mut self, process: u32, data: &[u8], escape: &Escape) {
-        let kind = (escape.code, escape.minor_code, escape.gmm_action, escape.length, escape.verdict);
+    pub fn escape(&mut self, process: u32, data: &[u8], escape: &Escape, partition: Option<PartitionAsk>) {
+        let kind =
+            (process, escape.code, escape.minor_code, escape.gmm_action, escape.length, escape.verdict);
         let telling = self.escapes.worth_telling(kind);
         let action = DisplayOption(escape.gmm_action.map(|action| HexNumber(action.into())));
         let payload = data.get(escape::HEADER_SIZE..).unwrap_or_default();
         tell!(
             telling,
             "{PREFIX} escape process={process:#x} length={} payload_size={} checksum={:#x} code={:#x} minor={:#x} \
-             gmm_action={action} kernel_would={} why=\"{}\" answer=echoed payload={}",
+             gmm_action={action} kernel_would={} why=\"{}\" answer={} payload={}",
             escape.length,
             escape.payload_size,
             escape.checksum,
@@ -124,21 +132,38 @@ impl Traffic {
             escape.minor_code,
             escape.verdict.word(),
             escape.verdict.why(),
+            match partition {
+                Some(PartitionAsk::Get) => "partition",
+                _ => "echoed",
+            },
             Hex { bytes: payload, most: ESCAPE_BYTES_SHOWN }
         );
-        if telling {
-            dump(format_args!("escape code={:#x}", escape.code), data);
+        dump(format_args!("escape code={:#x}", escape.code), data);
+        match partition {
+            Some(PartitionAsk::Get) => log::info!(
+                "{PREFIX} partition process={process:#x} ask=get answered=[{}]",
+                partition::Text(partition::read(&data[escape::HEADER_SIZE + 8..]))
+            ),
+            Some(PartitionAsk::Set(theirs)) => {
+                log::info!(
+                    "{PREFIX} partition process={process:#x} ask=set kept=[{}]",
+                    partition::Text(theirs)
+                )
+            }
+            None => {}
         }
     }
 
     pub fn context(&mut self, process: u32, node: u32, private: &[u8], context: &Context) {
-        let kind = (node, private.len(), context.umd_context_type, context.dwm, context.engine_instances);
+        let kind =
+            (process, node, private.len(), context.umd_context_type, context.dwm, context.engine_instances);
         let telling = self.contexts.worth_telling(kind);
         tell!(
             telling,
-            "{PREFIX} context process={process:#x} node={node} size={} type={} guest_pid={} dwm={} protected={} \
+            "{PREFIX} context process={process:#x} node={node} node_name={} size={} type={} guest_pid={} dwm={} protected={} \
              media={} gpu_va={} id_pointer={:#x} ids={} instances={:#x} power_hint={} no_ring_flushes={} \
              queues={} wmtp_off={} preempt_notify={} preempt_event={:#x} token64={} sip={} undecoded=[{}]",
+            nodes::name(node),
             private.len(),
             context.umd_context_type,
             context.process_id,
@@ -159,9 +184,7 @@ impl Traffic {
             bit(context.debug_sip_installed),
             Undecoded { bytes: private, decoded: &context::DECODED }
         );
-        if telling {
-            dump(format_args!("context node={node}"), private);
-        }
+        dump(format_args!("context node={node}"), private);
     }
 
     /// `private` is the guest's data and the padding after it, as the core passes it on.
@@ -180,9 +203,7 @@ impl Traffic {
             bit(fields.flag),
             Undecoded { bytes: data, decoded: &hw_queue::DECODED }
         );
-        if telling {
-            dump(format_args!("queue id={queue:#x}"), private);
-        }
+        dump(format_args!("queue id={queue:#x}"), private);
     }
 
     pub fn allocation(&mut self, private: &[u8], resource: &Resource) {
@@ -230,65 +251,51 @@ impl Traffic {
             })),
             Undecoded { bytes: private, decoded: &allocation::DECODED }
         );
-        if telling {
-            dump(format_args!("allocation type={}", resource.resource_type), private);
-        }
+        dump(format_args!("allocation type={}", resource.resource_type), private);
     }
 
     pub fn submission(&mut self, work: &Work<'_>, header: &Header) {
         if let Some(count) = self.submitted.get_mut(&work.queue) {
             *count += 1;
         }
-        let telling = self.submissions.worth_telling((
-            work.node,
-            work.client_hint,
-            command_header::kind_of(work.private),
-        ));
-        match header {
-            Header::Compact(compact) => self.compact_submission(telling, work, compact),
-            Header::Full => tell!(
-                telling,
-                "{PREFIX} submit queue={:#x} node={} fence_value={} size={} form=full layout=unknown first={}",
-                work.queue,
-                work.node,
-                work.fence_value,
-                work.private.len(),
-                Hex { bytes: work.private, most: ESCAPE_BYTES_SHOWN }
-            ),
-        }
-        if telling {
-            dump(format_args!("submit queue={:#x}", work.queue), work.private);
-        }
-    }
-
-    fn compact_submission(&self, telling: bool, work: &Work<'_>, header: &Compact) {
+        let kind = (work.space, work.node, work.client_hint, work.source == WorkSource::Context);
+        let telling = self.submissions.worth_telling((kind, command_header::kind_of(work.private)));
+        // Only a hardware queue's submissions are known to carry this header.
+        let kernel_would = match work.source {
+            WorkSource::HardwareQueue => header.verdict.word(),
+            WorkSource::Context => "unknown",
+        };
+        let source = match work.source {
+            WorkSource::HardwareQueue => "hardware-queue",
+            WorkSource::Context => "context",
+        };
+        let undecoded = header.compact.map(|_| Undecoded {
+            bytes: &work.private[..work.private.len().min(command_header::FULL_SIZE)],
+            decoded: &command_header::DECODED,
+        });
         tell!(
             telling,
-            "{PREFIX} submit queue={:#x} node={} hint={:#x} fence_value={} size={} form=compact stamp={:#x} type={} \
-             patch_list={} first_flags={:#x} requests={:#x}/{:#x} slice_state={} subslices={} eus={} \
-             bit23={} flags={:#x} unnamed_flags={:#x} perf_tag={:#x} tag={} monitor_fence={} answer=finished-unrun \
-             undecoded=[{}]",
+            "{PREFIX} submit source={source} queue={:#x} node={} node_name={} hint={:#x} fence_value={} length={} \
+             kernel_would={kernel_would} answer=finished-unrun fields=[{}] undecoded=[{}]",
             work.queue,
             work.node,
+            nodes::name(work.node),
             work.client_hint,
             work.fence_value,
-            work.private.len(),
-            header.stamp,
-            header.context_type,
-            bit(header.patch_list),
-            header.first_flags,
-            header.request_low,
-            header.request_high,
-            header.slice_state,
-            header.subslice_count,
-            header.eu_count,
-            bit(header.request_bit_23),
-            header.flags,
-            header.unnamed_flags(),
-            header.perf_tag,
-            DisplayOption(header.tag.map(|(address, value)| Pair(address, value.into()))),
-            DisplayOption(header.monitor_fence.map(|(address, value)| Pair(address, value))),
-            Undecoded { bytes: work.private, decoded: &command_header::DECODED }
+            header.length,
+            DisplayOption(header.compact.as_ref().map(CompactText)),
+            DisplayOption(undecoded)
+        );
+        dump(format_args!("submit queue={:#x}", work.queue), work.private);
+    }
+
+    /// A context on a node past those offered.
+    pub fn context_refused(&mut self, node: u32, client_hint: u32) {
+        let telling = self.refusals.worth_telling(("context-node", node, client_hint));
+        tell!(
+            telling,
+            "{PREFIX} refused what=context why=\"node {node} is past those offered\" node_name={} hint={client_hint:#x}",
+            nodes::name(node)
         );
     }
 
@@ -298,7 +305,7 @@ impl Traffic {
         log::info!("{PREFIX} queue-closed id={queue:#x} submissions={count}");
     }
 
-    /// Something the kernel driver would refuse, or this backend does.
+    /// Something this backend refuses, as the vendor's kernel driver wouldn't take it.
     pub fn refused(&mut self, what: &str, why: &str, private: &[u8]) {
         let telling = self.refusals.worth_telling((what, why, private.len()));
         tell!(
@@ -307,9 +314,7 @@ impl Traffic {
             private.len(),
             Hex { bytes: private, most: ESCAPE_BYTES_SHOWN }
         );
-        if telling {
-            dump(format_args!("refused {what}"), private);
-        }
+        dump(format_args!("refused {what}"), private);
     }
 
     /// A copy to the screen, which this stage answers as done without copying.
@@ -346,6 +351,35 @@ struct HexNumber(u64);
 impl fmt::Display for HexNumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:#x}", self.0)
+    }
+}
+
+/// A compact header's fields, by name.
+struct CompactText<'a>(&'a Compact);
+
+impl fmt::Display for CompactText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header = self.0;
+        write!(
+            f,
+            "stamp={:#x} type={} patch_list={} first_flags={:#x} requests={:#x}/{:#x} slice_state={} \
+             subslices={} eus={} bit23={} flags={:#x} unnamed_flags={:#x} perf_tag={:#x} tag={} monitor_fence={}",
+            header.stamp,
+            header.context_type,
+            bit(header.patch_list),
+            header.first_flags,
+            header.request_low,
+            header.request_high,
+            header.slice_state,
+            header.subslice_count,
+            header.eu_count,
+            bit(header.request_bit_23),
+            header.flags,
+            header.unnamed_flags(),
+            header.perf_tag,
+            DisplayOption(header.tag.map(|(address, value)| Pair(address, value.into()))),
+            DisplayOption(header.monitor_fence.map(|(address, value)| Pair(address, value)))
+        )
     }
 }
 
@@ -409,8 +443,8 @@ mod tests {
             may_run: true,
             queue_failed: false,
         };
-        traffic.submission(&work, &Header::Full);
-        traffic.submission(&work, &Header::Full);
+        traffic.submission(&work, &Header::read(&[]));
+        traffic.submission(&work, &Header::read(&[]));
         assert_eq!(traffic.submitted.get(&7), Some(&2));
         traffic.queue_closed(7);
         assert!(traffic.submitted.is_empty());

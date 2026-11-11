@@ -2,9 +2,9 @@
 //! to its kernel driver.
 //!
 //! This is a first stage, a stand-in that listens. It reads the card through sysfs and xe's
-//! read-only queries, builds the adapter record the guest's user-mode drivers open with, and
-//! answers the guest well enough for them to make devices, contexts, queues and allocations and to
-//! submit. Nothing reaches the card: a submission comes back finished, unrun, and video memory is
+//! read-only queries, builds the adapter record the guest's user-mode drivers ask for, and is meant
+//! to answer the guest so that they can make devices, contexts, queues and allocations and submit.
+//! None of it has met a guest yet. Nothing reaches the card: a submission comes back finished, unrun, and video memory is
 //! only a name, as nothing writes it. What it is for is the log: every exchange that is Intel's own
 //! gets a line, in [`traffic`], so one guest run says what the real backend has to do.
 //!
@@ -14,11 +14,11 @@
 //! Where the trait does not fit Intel:
 //! - A submission's batch address and length are in the submission message, not in Intel's private
 //!   data, and [`Work`] doesn't carry them. A backend that runs work will need them.
-//! - Escapes have no status of their own, so one the kernel driver would refuse can only be logged.
+//! - Escapes have no status of their own, so one this backend's rules refuse can only be logged.
 //! - [`Backend::finish_queue_data`] sees the queue's data with the message's padding after it, so
 //!   its true size can't be checked.
-//! - The core describes every node but the first as a copy engine, and Intel's numbering of nodes
-//!   may differ.
+//! - The core describes every node but the first as a copy engine, whatever gmmlib's numbering
+//!   says the node is.
 
 mod books;
 pub mod card;
@@ -55,10 +55,6 @@ use xe_query::Gt;
 
 /// How this backend names the host driver's branch: the Linux kernel's xe.
 const HOST_BRANCH: &str = "xe";
-/// The nodes the guest is offered. Intel's own numbering of engines into nodes isn't known here,
-/// so the guest may name any of these and each context's node goes to the log. Nothing runs on
-/// them, so a node is only a label for now.
-const NODES_OFFERED: u32 = 16;
 /// The part of the system's memory offered as video memory, as Windows gives an integrated card
 /// half of the memory as shared.
 const SHARED_MEMORY_PART: u64 = 2;
@@ -73,6 +69,8 @@ pub struct IntelBackend {
     books: Books,
     traffic: Traffic,
     started: Instant,
+    /// See [`IntelBackend::set_software_desktop`].
+    software_desktop: bool,
 }
 
 impl IntelBackend {
@@ -83,6 +81,14 @@ impl IntelBackend {
         let generation = generation::for_render_ip(ip).ok_or_else(|| {
             Refusal(format!("This Intel card's graphics IP is {ip}, which this build has no profile for."))
         })?;
+        // compute-runtime works out threads per EU by dividing the thread count by the EU count, so a
+        // record with none would stop it at the start, or worse.
+        if card.eu_count() == 0 {
+            return Err(Refusal(
+                "The xe driver reported no EUs for this Intel card, so the guest can't be told its shape."
+                    .into(),
+            ));
+        }
         let shared = card.system_memory() / SHARED_MEMORY_PART;
         let record = record::build(&record_facts(&card, generation, shared));
         let facts = AdapterFacts {
@@ -91,7 +97,7 @@ impl IntelBackend {
             video_memory: shared,
             gtt_memory: 0,
             bar_size: shared,
-            node_count: NODES_OFFERED,
+            node_count: protocol::nodes::COUNT,
             engines: card.engine_families(),
             guest_driver_version: 0,
         };
@@ -103,9 +109,22 @@ impl IntelBackend {
             books: Books::default(),
             traffic: Traffic::default(),
             started: Instant::now(),
+            software_desktop: false,
         };
         backend.log_start();
         Ok(backend)
+    }
+
+    /// A lab switch, off unless set: the guest is refused the drivers for Direct3D 9, 10 and 11, so
+    /// that the desktop composes in software and stays usable, while Direct3D 12, compute and
+    /// Vulkan still come here. Nothing has tried it on a guest.
+    pub fn set_software_desktop(&mut self, on: bool) {
+        self.software_desktop = on;
+        let state = if on { "on" } else { "off" };
+        log::info!(
+            "{PREFIX} software-desktop {state}: Direct3D 9, 10 and 11 drivers {}",
+            if on { "refused" } else { "given" }
+        );
     }
 
     pub fn card(&self) -> &CardFacts {
@@ -148,6 +167,7 @@ impl IntelBackend {
             log::warn!("{PREFIX} card query=\"{what}\" unanswered=\"{error}\"");
         }
         log::info!("{PREFIX} record {}", record::summary(&self.record));
+        log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
         for gap in gaps::RECORD {
             log::info!("{PREFIX} record-gap \"{gap}\"");
         }
@@ -176,11 +196,10 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
             revision: card.pci.revision.into(),
             gt_type: generation.gt_type,
             render_ip: ip(card.main_gt()),
-            media_ip: ip(card.media_gt()),
         },
         gt: GtSystem {
             eu_count: eus,
-            thread_count: eus * threads_per_eu,
+            thread_count: eus.saturating_mul(threads_per_eu),
             slice_count: card.slices().unwrap_or(0),
             subslice_count: dual_subslices,
             dual_subslice_count: dual_subslices,
@@ -189,7 +208,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
             max_subslices: most_dual_subslices,
             max_dual_subslices: most_dual_subslices,
         },
-        timestamp_hz: card.main_gt().map_or(0, |gt| gt.reference_clock.into()),
+        timestamp_hz: card.main_gt().map_or(0, |gt| gt.reference_clock),
         render_mhz: (card.frequencies.lowest.unwrap_or(0), card.frequencies.highest.unwrap_or(0)),
         memory: Memory { dedicated: 0, system_shared: shared, system_video: 0 },
         local_memory: card.config.has_vram(),
@@ -201,20 +220,24 @@ impl Backend for IntelBackend {
         card.vendor == INTEL_VENDOR
     }
 
-    /// The host is the Linux kernel's xe and the guest one release of Intel's driver. They are
-    /// different drivers on purpose, so the pair is let through when the guest's release is the one
-    /// this backend knows. Nothing has been tested yet, so a start always warns.
+    /// The host is the Linux kernel's xe and the guest one release of Intel's driver. xe has no
+    /// branches of its own: the host's side of that release's data is this backend, written for it,
+    /// so the host is said to be on the guest release's branch. That is all that lets the pair
+    /// through, and only for the release this backend knows. Nothing has been tested yet, so a start
+    /// always warns.
     fn survey(setup: &Setup) -> Result<DriverSurvey, Refusal> {
         let version = setup.guest_driver_version.to_string();
         let known = guest_driver::GUEST_RELEASES.contains(&version.as_str());
         let kernel = sysfs::kernel_release().unwrap_or_else(|| "kernel".into());
+        let host = format!("{HOST_BRANCH} {kernel}");
+        let branch = if known { setup.guest_branch.clone() } else { HOST_BRANCH.into() };
         Ok(DriverSurvey {
-            host: DriverFound { version: kernel, branch: HOST_BRANCH.into() },
+            host: DriverFound { version: host, branch },
             guest: DriverFound { version, branch: setup.guest_branch.clone() },
             host_branch_known: true,
             guest_branch_known: known,
             host_version_tested: false,
-            mixed_branches_tested: known,
+            mixed_branches_tested: false,
             card: CardLabel::Experimental,
         })
     }
@@ -279,12 +302,19 @@ impl Backend for IntelBackend {
         self.books.unmap(unmap)
     }
 
-    /// Data the kernel driver would refuse gets a page, as the call fails anyway once
+    /// Data this backend refuses gets a page, as the call fails anyway once
     /// [`Backend::allocation_data_valid`] says so.
     fn describe_allocation(&mut self, private: &[u8]) -> AllocationShape {
         match Resource::parse(private) {
             Ok(resource) => {
                 self.traffic.allocation(private, &resource);
+                if !resource.size_is_sane() {
+                    self.traffic.refused(
+                        "allocation-size",
+                        "past every GPU address, given one page",
+                        private,
+                    );
+                }
                 resource.shape()
             }
             Err(_) => Resource::default().shape(),
@@ -299,7 +329,7 @@ impl Backend for IntelBackend {
         refused.is_none()
     }
 
-    /// The kernel driver writes nothing back into an allocation's data.
+    /// Nothing is written back into an allocation's data.
     fn finish_allocation_data(&mut self, _private: &mut [u8], _size: u64) {}
 
     fn finish_queue_data(&mut self, queue: u32, private: &mut [u8], serial: u32) -> Result<(), BackendError> {
@@ -315,10 +345,12 @@ impl Backend for IntelBackend {
         log::info!("{PREFIX} guest-restarted");
     }
 
-    /// Answered by leaving the guest's buffer as it came.
+    /// A partition escape asking for one gets the record's. Every other is answered by leaving the
+    /// guest's buffer as it came.
     fn escape(&mut self, process: u32, data: &mut [u8], _books: &GuestBooks<'_>) {
         let escape = Escape::parse(data);
-        self.traffic.escape(process, data, &escape);
+        let partition = protocol::escape::answer_partition(data, &protocol::partition::ours());
+        self.traffic.escape(process, data, &escape, partition);
     }
 
     fn adapter_answer(&mut self, query: &VendorQuery<'_>, out: &mut Vec<u8>) -> Option<Status> {
@@ -328,7 +360,7 @@ impl Backend for IntelBackend {
                 QueryOutcome::Record(status, asked)
             }
             QUERY_USER_DRIVER_NAME => {
-                let (status, name) = guest_driver::write_name(query, out);
+                let (status, name) = guest_driver::write_name(query, self.software_desktop, out);
                 QueryOutcome::DriverName(status, name)
             }
             _ => QueryOutcome::LeftToTheCore,
@@ -353,11 +385,9 @@ impl Backend for IntelBackend {
     }
 
     fn context_allowed(&mut self, node: u32, client_hint: u32) -> bool {
-        let allowed = node < NODES_OFFERED;
+        let allowed = protocol::nodes::offered(node);
         if !allowed {
-            log::info!(
-                "{PREFIX} refused what=context why=\"node {node} is past those offered\" hint={client_hint:#x}"
-            );
+            self.traffic.context_refused(node, client_hint);
         }
         allowed
     }
@@ -383,19 +413,11 @@ impl Backend for IntelBackend {
         log::debug!("{PREFIX} process-gone process={process:#x}");
     }
 
-    /// A header the kernel driver would refuse fails the queue, as the guest's driver then takes the
-    /// device as lost, the way it would on its own hardware. Any other is finished unrun.
+    /// Nothing runs in this stage, so no submission fails: each is logged with what its header
+    /// says, as far as it can be read, and finished unrun.
     fn start_work(&mut self, _host: &mut dyn HostServices, work: &Work<'_>) -> WorkStart {
-        match Header::parse(work.private) {
-            Ok(header) => {
-                self.traffic.submission(work, &header);
-                WorkStart::Finished
-            }
-            Err(refused) => {
-                self.traffic.refused("submission", refused.0, work.private);
-                WorkStart::QueueFailed
-            }
-        }
+        self.traffic.submission(work, &Header::read(work.private));
+        WorkStart::Finished
     }
 
     fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<(), BackendError> {
@@ -437,6 +459,7 @@ mod tests {
         let survey = IntelBackend::survey(&setup_for(guest_driver::GUEST_RELEASES[0])).unwrap();
         assert!(matches!(decide_start(&survey), StartDecision::RunWithWarning(_)));
         assert_eq!(survey.card, CardLabel::Experimental);
+        assert!(!survey.mixed_branches_tested && !survey.host_version_tested, "nothing is claimed tested");
         let survey = IntelBackend::survey(&setup_for("31.0.101.5000")).unwrap();
         assert!(matches!(decide_start(&survey), StartDecision::Refuse(_)));
     }
@@ -448,7 +471,7 @@ mod tests {
         assert_eq!((facts.card.vendor, facts.card.device, facts.card.revision), (INTEL_VENDOR, 0x64A0, 4));
         assert_eq!(facts.video_memory, 16 << 30, "half the system memory");
         assert!(facts.engines.graphics && facts.engines.compute);
-        assert_eq!(facts.node_count, NODES_OFFERED);
+        assert_eq!(facts.node_count, 15);
     }
 
     #[test]
@@ -458,6 +481,14 @@ mod tests {
         assert_eq!((summary.product_family, summary.render_core, summary.device_id), (1275, 0xC09, 0x64A0));
         assert_eq!(summary.render_ip, IpWord::new(20, 4, 4).0);
         assert_eq!((summary.eu_count, summary.virtual_machine, summary.compression), (64, 1, false));
+    }
+
+    #[test]
+    fn a_card_with_no_eus_is_refused_in_plain_words() {
+        let mut card = card::tests::lunar_lake();
+        card.topology.clear();
+        let refusal = IntelBackend::from_card(card).unwrap_err();
+        assert!(refusal.0.contains("no EUs"), "{}", refusal.0);
     }
 
     #[test]

@@ -59,10 +59,10 @@ fn submissions_do_not_allocate_with_every_line_formatted() {
     log::set_logger(&FORMATTING).unwrap();
     log::set_max_level(LevelFilter::Debug);
     let mut session = guest();
-    let context = context(&mut session, 0, &direct3d_12_context());
+    let context = context(&mut session, 0, &context_data());
     let (queue, _) = queue(&mut session, context);
     let mut out = Vec::with_capacity(4096);
-    let mut work = submission(queue, 1, &direct3d_12_header());
+    let mut work = submission(queue, 1, &compact_header());
 
     let mut run = |round: u64| {
         set_u64(&mut work, 0x20, round + 1);

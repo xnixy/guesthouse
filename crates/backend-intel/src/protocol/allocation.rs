@@ -1,9 +1,10 @@
 //! An allocation's private data: a copy of the guest's memory manager's description of the
-//! resource, gmmlib's GmmResourceInfo, which the kernel driver reads to place the memory.
+//! resource, gmmlib's GmmResourceInfo.
 //!
-//! It is [`OBJECT_SIZE`] bytes. When the resource has a companion, a second resource placed after
-//! it in the same memory, a trailer follows that says where. The kernel driver takes only those two
-//! sizes, and refuses a resource type past [`LAST_RESOURCE_TYPE`]. Nothing is written back.
+//! This backend takes it at [`OBJECT_SIZE`] bytes, or that and a trailer when the resource has a
+//! companion, a second resource placed after it in the same memory. Any other size, or a resource
+//! type past [`LAST_RESOURCE_TYPE`], is refused, as the vendor's kernel driver wouldn't take it.
+//! Nothing is written back.
 //!
 //! The object starts with a pointer from the guest's process, which means nothing here. Its texture
 //! description (`Surf`, gmmlib's GMM_TEXTURE_INFO) starts at [`SURFACE`] and holds what the host
@@ -17,13 +18,15 @@ use guesthouse_backend::{AllocationShape, MemoryKind, SurfaceShape};
 pub const OBJECT_SIZE: usize = 0x930;
 /// The trailer that follows it for a resource with a companion.
 pub const TRAILER_SIZE: usize = 0x28;
-/// The highest GMM_RESOURCE_TYPE the kernel driver takes.
+/// The highest GMM_RESOURCE_TYPE taken.
 pub const LAST_RESOURCE_TYPE: u32 = 0x22;
 /// GMM_RESOURCE_TYPE's RESOURCE_2D.
 const RESOURCE_2D: u32 = 2;
 /// The size given for an allocation whose data says nothing usable, a page.
 const SMALLEST: u64 = 0x1000;
 const PAGE: u64 = 0x1000;
+/// The largest size taken as meant: every GPU address the core hands out, which ends at 1 TiB.
+pub const LARGEST: u64 = guesthouse_backend::GPU_RANGES[1].end;
 
 /// Where the object's fields are.
 mod at {
@@ -105,7 +108,7 @@ pub const DECODED: [(usize, usize); 11] = [
     (OBJECT_SIZE, OBJECT_SIZE + TRAILER_SIZE),
 ];
 
-/// Why the kernel driver would refuse this data.
+/// Why this backend refuses the data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Refused(pub &'static str);
 
@@ -146,7 +149,7 @@ pub struct Resource {
 }
 
 impl Resource {
-    /// Reads and checks the data as the kernel driver would. Data of no length is taken, with
+    /// Reads and checks the data. Data of no length is taken, with
     /// nothing in it, as the guest's kernel makes some allocations of its own with none.
     pub fn parse(data: &[u8]) -> Result<Self, Refused> {
         if data.is_empty() {
@@ -180,7 +183,7 @@ impl Resource {
             companion: None,
         };
         if resource.resource_type > LAST_RESOURCE_TYPE {
-            return Err(Refused("its resource type is past the last the kernel driver takes"));
+            return Err(Refused("its resource type is past the last taken"));
         }
         let tail = &data[OBJECT_SIZE..];
         if tail.is_empty() {
@@ -220,12 +223,18 @@ impl Resource {
         own.max(companion)
     }
 
+    /// Whether the size is one an allocation can have: no larger than every GPU address there is.
+    pub fn size_is_sane(&self) -> bool {
+        self.bytes() <= LARGEST
+    }
+
     /// The shape the core gives the allocation. Video memory is whole pages; memory the guest
-    /// lends is locked to the byte.
+    /// lends is locked to the byte. A size past [`LARGEST`] can only be a wrong number, so it gets
+    /// the one page that data saying nothing usable gets.
     pub fn shape(&self) -> AllocationShape {
-        let exact = self.bytes().max(SMALLEST);
+        let exact = if self.size_is_sane() { self.bytes().max(SMALLEST) } else { SMALLEST };
         AllocationShape {
-            size: exact.div_ceil(PAGE) * PAGE,
+            size: exact.next_multiple_of(PAGE),
             exact_size: exact,
             surface: self.surface(),
             gpu_cached: false,
@@ -329,6 +338,34 @@ pub(crate) mod tests {
         put_qword(&mut data, at::SIZE, 0x1234);
         let shape = Resource::parse(&data).unwrap().shape();
         assert_eq!((shape.size, shape.exact_size, shape.surface), (0x2000, 0x1234, None));
+    }
+
+    #[test]
+    fn a_size_no_allocation_can_have_gets_one_page_and_no_overflow() {
+        for size in [u64::MAX, u64::MAX - 0xFFF, LARGEST + 1] {
+            let mut data = render_target();
+            put_qword(&mut data, at::SIZE, size);
+            let resource = Resource::parse(&data).unwrap();
+            assert!(!resource.size_is_sane(), "{size:#x}");
+            let shape = resource.shape();
+            assert_eq!((shape.size, shape.exact_size), (SMALLEST, SMALLEST), "{size:#x}");
+        }
+    }
+
+    #[test]
+    fn a_companion_whose_end_runs_past_every_number_gets_one_page() {
+        let mut data = with_trailer(MARKER, TRAILER_VERSION);
+        put_qword(&mut data[OBJECT_SIZE..], trailer::COMPANION_OFFSET, u64::MAX);
+        let resource = Resource::parse(&data).unwrap();
+        assert_eq!(resource.bytes(), u64::MAX, "the end saturates rather than wraps");
+        assert_eq!(resource.shape().size, SMALLEST);
+    }
+
+    #[test]
+    fn the_largest_sane_size_is_kept_whole() {
+        let mut data = render_target();
+        put_qword(&mut data, at::SIZE, LARGEST);
+        assert_eq!(Resource::parse(&data).unwrap().shape().size, LARGEST);
     }
 
     #[test]

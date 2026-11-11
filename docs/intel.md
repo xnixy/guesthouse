@@ -1,10 +1,10 @@
 # Windows on an Intel card
 
-This doesn't work yet. It's the first step towards Intel's integrated graphics, starting with Lunar Lake (Arc 130V and 140V) on Linux's `xe` driver. Only the Arc 140V, PCI id 8086:64A0, is offered so far.
+This doesn't work yet, and none of it has met a guest. It's the first step towards Intel's integrated graphics, starting with Lunar Lake (Arc 130V and 140V) on Linux's `xe` driver. Only the Arc 140V, PCI id 8086:64A0, is offered so far.
 
-## What's there
+## What it's meant to do
 
-The daemon built with the `intel` feature answers Intel's Windows driver in the guest well enough for it to load and make its devices, contexts, queues and memory. Nothing runs on the card yet: every bit of work the guest sends comes back as finished without running, so the guest's screen won't show anything drawn by the GPU. The desktop may be black, or stop moving. What this step is for is the log. Every exchange that is Intel's own gets a line in `daemon.out` starting with `intel`, so one run tells me what the real backend has to do.
+The daemon built with the `intel` feature is meant to answer Intel's Windows driver in the guest well enough for it to load and make its devices, contexts, queues and memory. That's untested. Nothing runs on the card: every bit of work the guest sends comes back as finished without running, so the guest's screen won't show anything drawn by the GPU. The desktop may be black, or stop moving. What this step is for is the log. Every exchange that is Intel's own gets a line in `daemon.out` starting with `intel`, and with `GUESTHOUSE_VERBOSE` set the log holds the whole of each one too, so one run should tell me how far the guest got and where it stopped.
 
 It only takes Intel's driver 32.0.101.9175 in the guest, as the data it passes around changes from one release to the next.
 
@@ -27,6 +27,10 @@ You need a Lunar Lake laptop, Linux with the `xe` driver on that card, and a tes
 7. Open an issue and attach those three files. If step 6 says the agent didn't answer, or dxdiag never finished, the guest has probably stopped. Then attach `daemon.out` from `$XDG_RUNTIME_DIR/guesthouse/run` (usually `/run/user/1000/guesthouse/run`) and say so. It's the more useful of the three.
 
 You can shut the machine down afterwards. If you build from source, `guesthouse-task` and `intel-probe` are in `target/release`, and `cargo build --release -p guesthouse-app-core -p guesthouse-daemon --features guesthouse-daemon/intel` makes the daemon.
+
+## A desktop you can use
+
+Setting `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP` in the daemon's environment refuses the guest Intel's Direct3D 9, 10 and 11 drivers. Windows should then draw its desktop in software, so you can use it, while Direct3D 12, OpenCL, Level Zero and Vulkan still come to the card and the log. It's off unless set, the log says which way it is, and I haven't tried it on a guest.
 
 ## intel-probe
 

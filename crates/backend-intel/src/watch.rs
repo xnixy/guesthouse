@@ -4,7 +4,7 @@
 //! vendor exchange gets a line at info level, each starting with [`PREFIX`] and a word for the kind,
 //! so the log can be searched. A busy guest repeats the same kinds of exchange thousands of times,
 //! so [`Seen`] lets the first few of each kind through at info, and the rest go to debug, where
-//! `GUESTHOUSE_VERBOSE` shows them. Full dumps go to debug only.
+//! `GUESTHOUSE_VERBOSE` shows them. With it, every buffer is dumped too, up to [`DUMP_BYTES`].
 //!
 //! The message path must not allocate, so the views here write straight into the log line, and
 //! [`Seen`] takes all the room it will ever have when it is made.
@@ -21,8 +21,8 @@ const INFO_REPEATS: u32 = 3;
 /// How many kinds are told apart. Past this every new kind counts as seen, which only moves its
 /// lines to debug.
 const KINDS_KEPT: usize = 1024;
-/// The bytes a dump shows on one line.
-const DUMP_LINE_BYTES: usize = 32;
+/// The most a dump shows of one buffer.
+pub const DUMP_BYTES: usize = 4096;
 /// The most non-zero words a line lists from what isn't decoded.
 pub const UNDECODED_WORDS: usize = 12;
 
@@ -134,19 +134,10 @@ impl fmt::Display for Undecoded<'_> {
     }
 }
 
-/// Logs a whole buffer at debug, a line of [`DUMP_LINE_BYTES`] at a time, under a label. Nothing is
-/// done unless debug lines are on.
+/// Logs a buffer at debug, whole up to [`DUMP_BYTES`], on one line under a label, with its length.
+/// Nothing is done unless debug lines are on, as with `GUESTHOUSE_VERBOSE`.
 pub fn dump(label: fmt::Arguments<'_>, bytes: &[u8]) {
-    if !log::log_enabled!(log::Level::Debug) {
-        return;
-    }
-    for (index, line) in bytes.chunks(DUMP_LINE_BYTES).enumerate() {
-        log::debug!(
-            "{PREFIX} dump {label} {:#06x}: {}",
-            index * DUMP_LINE_BYTES,
-            Hex { bytes: line, most: DUMP_LINE_BYTES }
-        );
-    }
+    log::debug!("{PREFIX} dump {label} length={} bytes={}", bytes.len(), Hex { bytes, most: DUMP_BYTES });
 }
 
 #[cfg(test)]

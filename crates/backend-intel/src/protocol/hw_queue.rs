@@ -1,15 +1,15 @@
 //! A new hardware queue's private data, CREATEHWQUEUE_PVTDATA: [`SIZE`] bytes.
 //!
-//! The kernel driver doesn't check its size. It reads the priority and one flag, and writes a
-//! 64-bit value back at [`WRITTEN_BACK`] for queues that use the newer native fences, which the
-//! guest's driver keeps with the queue. What that value is isn't known yet, so nothing is written
-//! and the guest gets back what it sent.
+//! This backend reads its priority, one flag, and the 64-bit field at [`WRITTEN_BACK`] where the
+//! vendor's kernel driver may write a value back. It checks nothing, as the core passes the data
+//! with the message's padding after it. What a value written back would be isn't known, so nothing
+//! is written and the guest gets back what it sent.
 
 use super::bytes::{dword, qword};
 
 pub const SIZE: usize = 0x18;
 const PRIORITY: usize = 0x00;
-/// Where the kernel driver writes its value back.
+/// Where the vendor's kernel driver may write a value back.
 pub const WRITTEN_BACK: usize = 0x08;
 const FLAGS: usize = 0x10;
 const FLAG_BIT: u32 = 1;

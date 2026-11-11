@@ -9,7 +9,7 @@ mod common;
 
 use common::*;
 use guesthouse_backend::GuestMemory;
-use guesthouse_backend_intel::protocol::{context, escape, record};
+use guesthouse_backend_intel::protocol::{context, escape, partition, record};
 use guesthouse_messages::wire::{set_u32, set_u64, u32_at, u64_at};
 use guesthouse_messages::{Command, HEADER_SIZE, Status};
 
@@ -61,7 +61,7 @@ fn the_direct3d_12_driver_is_named_in_the_driver_store() {
 #[test]
 fn a_context_a_queue_an_allocation_and_a_submission_go_through_and_the_fence_moves() {
     let mut session = guest();
-    let context = context(&mut session, 0, &direct3d_12_context());
+    let context = context(&mut session, 0, &context_data());
     assert_ne!(context, 0);
     let (queue, fence) = queue(&mut session, context);
 
@@ -73,7 +73,7 @@ fn a_context_a_queue_an_allocation_and_a_submission_go_through_and_the_fence_mov
     assert_ne!(u64_at(&send(&mut session, &map), 0), Ok(0));
 
     for value in 1..=3 {
-        let reply = send(&mut session, &submission(queue, value, &direct3d_12_header()));
+        let reply = send(&mut session, &submission(queue, value, &compact_header()));
         assert_eq!(reply, SUCCESS.to_le_bytes());
         assert_eq!(session.memory().read_u64(fence), Ok(value), "finished unrun, so the fence moves at once");
     }
@@ -95,17 +95,47 @@ fn an_allocation_whose_data_the_kernel_driver_would_refuse_fails_the_call() {
 }
 
 #[test]
-fn a_header_of_the_wrong_size_stops_the_queue_and_leaves_nothing_waiting() {
+fn a_header_of_any_size_is_finished_unrun_and_the_queue_goes_on() {
     let mut session = guest();
-    let context = context(&mut session, 0, &direct3d_12_context());
+    let context = context(&mut session, 0, &context_data());
     let (queue, fence) = queue(&mut session, context);
-    let reply = send(&mut session, &submission(queue, 1, &[0; 0x18]));
-    assert_eq!(reply, Status::UNSUCCESSFUL.0.to_le_bytes(), "the program has to hear of it");
-    assert_eq!(session.memory().read_u64(fence), Ok(1));
+    for (value, header) in [(1, vec![0; 0x18]), (2, vec![]), (3, compact_header())] {
+        assert_eq!(send(&mut session, &submission(queue, value, &header)), SUCCESS.to_le_bytes());
+        assert_eq!(session.memory().read_u64(fence), Ok(value));
+    }
 }
 
 #[test]
-fn an_escape_comes_back_as_it_was_sent() {
+fn a_submission_to_a_context_is_finished_unrun_too() {
+    const CONTEXT: usize = 0x34;
+    const PRIVATE_SIZE: usize = 0x140;
+    const PRIVATE: usize = 0x198;
+    let mut session = guest();
+    let context = context(&mut session, 0, &context_data());
+    let mut request = message(Command::SubmitToContext, PRIVATE);
+    set_u32(&mut request, CONTEXT, context);
+    set_u32(&mut request, PRIVATE_SIZE, 0x40);
+    request.extend_from_slice(&[0x11; 0x40]);
+    assert_eq!(send(&mut session, &request), SUCCESS.to_le_bytes());
+}
+
+#[test]
+fn an_escape_that_is_not_a_partition_comes_back_as_it_was_sent() {
+    let mut session = guest();
+    const PAYLOAD: usize = 0x18;
+    let mut data = vec![0u8; escape::HEADER_SIZE + PAYLOAD];
+    set_u32(&mut data, 0, PAYLOAD as u32);
+    set_u32(&mut data, 8, escape::GMM_CONTROL);
+    set_u32(&mut data, escape::HEADER_SIZE, 0x1B);
+    let mut request = message(Command::DriverEscape, HEADER_SIZE + 24);
+    set_u32(&mut request, HEADER_SIZE + 16, data.len() as u32);
+    request.extend_from_slice(&data);
+    let reply = send(&mut session, &request);
+    assert_eq!(reply[..data.len()], data);
+}
+
+#[test]
+fn an_empty_partition_escape_gets_the_partition_the_record_has() {
     let mut session = guest();
     const PAYLOAD: usize = 0xC0;
     let mut data = vec![0u8; escape::HEADER_SIZE + PAYLOAD];
@@ -116,5 +146,8 @@ fn an_escape_comes_back_as_it_was_sent() {
     set_u32(&mut request, HEADER_SIZE + 16, data.len() as u32);
     request.extend_from_slice(&data);
     let reply = send(&mut session, &request);
-    assert_eq!(reply[..data.len()], data);
+    let given = partition::read(&reply[escape::HEADER_SIZE + 8..]);
+    assert_eq!(given, partition::ours());
+    let record = query(&mut session, record::QUERY_TYPE, &vec![0; record::RECORD_SIZE]);
+    assert_eq!(partition::read(&record[4 + 0x23B8..]), given);
 }

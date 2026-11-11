@@ -641,6 +641,7 @@ version = "0.4.1"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-backend-amd",
+ "guesthouse-backend-intel",
  "guesthouse-backend-nvidia",
  "guesthouse-backend-standin",
  "guesthouse-core",

@@ -1074,12 +1074,45 @@ mod mappings {
     }
 
     fn update(session: &mut TestSession, fence: u32, value: u64, operations: &[Vec<u8>]) -> Vec<u8> {
+        update_with_flags(session, fence, value, 0, operations)
+    }
+
+    fn update_with_flags(
+        session: &mut TestSession,
+        fence: u32,
+        value: u64,
+        flags: u32,
+        operations: &[Vec<u8>],
+    ) -> Vec<u8> {
         let mut request = message(Command::UpdateGpuAddresses, 0x38);
         set_u64(&mut request, 0x18, value);
         set_u32(&mut request, 0x28, fence);
         set_u32(&mut request, 0x2C, operations.len() as u32);
+        set_u32(&mut request, 0x30, flags);
         operations.iter().for_each(|operation| request.extend_from_slice(operation));
         send(session, &request)
+    }
+
+    #[test]
+    fn an_update_told_not_to_wait_maps_before_its_fence_is_reached() {
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x2000));
+        let (sync, _, fence) = create_fence(&mut session, 0);
+        let operations = [operation(0, 0x5000_0000, 0x2000, u64::from(handle), 0)];
+        assert_eq!(status_of(&update_with_flags(&mut session, sync, 1, 1, &operations)), SUCCESS);
+        assert_eq!(session.memory().read_u64(fence).unwrap(), 2);
+        assert_eq!(session.allocations[&handle].mappings.len(), 1);
+    }
+
+    #[test]
+    fn an_update_that_may_wait_stays_unmapped_until_its_fence_is_reached() {
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x2000));
+        let (sync, _, fence) = create_fence(&mut session, 0);
+        let operations = [operation(0, 0x5000_0000, 0x2000, u64::from(handle), 0)];
+        assert_eq!(status_of(&update(&mut session, sync, 1, &operations)), SUCCESS);
+        assert_eq!(session.memory().read_u64(fence).unwrap(), 0);
+        assert!(session.allocations[&handle].mappings.is_empty());
     }
 
     #[test]

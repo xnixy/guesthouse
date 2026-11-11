@@ -83,12 +83,15 @@ pub fn freed_address(message: &[u8]) -> Result<u64, Malformed> {
     u64_at(message, 0x20)
 }
 
-/// A batch of address changes, which waits for a fence to reach a value.
+/// A batch of address changes. It waits for a fence to reach a value, unless the guest says it
+/// mustn't wait, and the fence goes one past that value when it's done.
 #[derive(Debug, Clone, Copy)]
 pub struct UpdateRequest<'a> {
     pub fence_value: u64,
     pub fence: u32,
     pub count: usize,
+    /// The guest asked for the changes now, whatever the fence is at.
+    pub no_wait: bool,
     operations: &'a [u8],
 }
 
@@ -96,6 +99,8 @@ impl<'a> UpdateRequest<'a> {
     const FENCE_VALUE: usize = 0x18;
     const FENCE: usize = 0x28;
     const COUNT: usize = 0x2C;
+    const FLAGS: usize = 0x30;
+    const NO_WAIT: u32 = 1;
     const OPERATIONS: usize = 0x38;
     pub const OPERATION_SIZE: usize = 64;
 
@@ -105,6 +110,7 @@ impl<'a> UpdateRequest<'a> {
             fence_value: u64_at(message, Self::FENCE_VALUE)?,
             fence: u32_at(message, Self::FENCE)?,
             count,
+            no_wait: u32_at(message, Self::FLAGS)? & Self::NO_WAIT != 0,
             operations: clamped(message, Self::OPERATIONS, count.saturating_mul(Self::OPERATION_SIZE)),
         })
     }

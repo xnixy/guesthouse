@@ -19,6 +19,8 @@
 mod channel_order;
 mod copy_ib;
 mod device;
+mod fault;
+mod guest_dma;
 mod info;
 mod ioctl;
 mod memory;
@@ -51,6 +53,7 @@ pub use memory::{
 
 use channel_order::WrittenRows;
 use copy_ib::CopyIb;
+use guest_dma::Reach;
 use guesthouse_backend::{
     AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, DriverFound, DriverSurvey, GpuRange,
     GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
@@ -204,6 +207,11 @@ impl AmdBackend {
             Ok(Ran::Retired) => Ok(()),
             Ok(Ran::Refused) => Err("amdgpu kept saying try again".into()),
             Ok(Ran::Hung) => Err("it never finished".into()),
+            Ok(Ran::Faulted(fault)) => Err(format!(
+                "the daemon's own work on the card reached {:#x}, where nothing is mapped (fault status \
+                 {:#x}), so it sends the card no more",
+                fault.address, fault.status
+            )),
             Err(error) => Err(error.to_string()),
         }
     }
@@ -213,7 +221,7 @@ impl AmdBackend {
         match ran {
             Ok(Ran::Retired) => self.patience = Patience::RUN,
             Ok(Ran::Hung) => self.patience = Patience::AFTER_A_HANG,
-            Ok(Ran::Refused) | Err(_) => {}
+            Ok(Ran::Refused | Ran::Faulted(_)) | Err(_) => {}
         }
     }
 
@@ -343,6 +351,39 @@ fn ranges_fit(ranges: &[GpuRange], start: u64, end: u64) -> bool {
     ranges.iter().all(|range| range.start >= start && range.end <= end && range.start <= range.end)
 }
 
+/// A command buffer's dwords, if it lies in guest pages, which the CPU reads where they are. A
+/// guest writes its commands with its CPU, so that is where they are.
+fn guest_commands(memory: &HashMap<MemoryId, Bo>, space: &SpaceVm, ib: &Ib) -> Option<Vec<u32>> {
+    let (buffer, offset) = space.locate(ib.address)?;
+    let bo = memory.values().find(|bo| bo.handle == buffer)?;
+    let Origin::HostPages { address, size } = bo.origin else {
+        return None;
+    };
+    if offset.checked_add(u64::from(ib.bytes))? > size {
+        return None;
+    }
+    let mut commands = vec![0u32; ib.bytes as usize / size_of::<u32>()];
+    // SAFETY: the pages are mapped in this process for `size` bytes while the buffer lives, and the
+    // read ends inside them. The guest can write them meanwhile, which a copy of bytes takes as it
+    // finds them.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (address + offset) as *const u8,
+            commands.as_mut_ptr().cast::<u8>(),
+            size_of_val(commands.as_slice()),
+        )
+    };
+    Some(commands)
+}
+
+/// The first run of bytes a guest's DMA commands name that isn't mapped in its space. The card
+/// would fault there.
+fn unmapped_dma_reach(memory: &HashMap<MemoryId, Bo>, space: &SpaceVm, ibs: &[Ib]) -> Option<Reach> {
+    let commands = ibs.iter().filter_map(|ib| guest_commands(memory, space, ib));
+    let mut named = commands.flat_map(|commands| guest_dma::reaches(&commands));
+    named.find(|reach| !space.covers(reach.address, reach.bytes))
+}
+
 /// Builds the facts the guest is told from the card's own readings.
 fn facts_from(info: &DeviceInfo) -> AdapterFacts {
     AdapterFacts {
@@ -450,7 +491,9 @@ impl Backend for AmdBackend {
     ) -> Result<(), BackendError> {
         let buffer = |id| self.memory.get(&id).copied().ok_or_else(|| BackendError::new("no such memory"));
         let (from, to) = (buffer(from)?, buffer(to)?);
-        let moved = if self.dma_known() {
+        // Once the daemon's own space has faulted nothing more is run there, so the CPU moves it.
+        let dma_stopped = self.spaces.get(&own_space).is_some_and(|space| space.vm.faulted().is_some());
+        let moved = if self.dma_known() && !dma_stopped {
             // A lock that fails is worse for the guest than a slow one, so the CPU has a go when the
             // engine refuses.
             self.move_with_dma(own_space, from, to, size).or_else(|reason| {
@@ -716,6 +759,18 @@ impl Backend for AmdBackend {
             );
             return WorkStart::QueueFailed;
         }
+        if node.ip_type == HW_IP_DMA
+            && let Some(reach) = unmapped_dma_reach(&self.memory, &space.vm, &ibs)
+        {
+            log::warn!(
+                "work on the DMA engine in space {:?} names {:#x} for {:#x} bytes, which isn't all mapped \
+                 there, so it isn't run",
+                work.space,
+                reach.address,
+                reach.bytes
+            );
+            return WorkStart::QueueFailed;
+        }
         log::debug!("run on engine family {} in space {:?}: {:x?}", node.ip_type, work.space, ibs);
         // The run is waited for here, so the core then completes the fence itself. A
         // completion that arrives on its own, as amdgpu's eventfd allows, would free this thread.
@@ -729,6 +784,18 @@ impl Backend for AmdBackend {
             Ok(Ran::Hung) => {
                 log::error!(
                     "work on engine family {} never finished, and the kernel didn't reset it",
+                    node.ip_type
+                );
+                WorkStart::QueueFailed
+            }
+            // The guest's driver hears its queue failed, as it would after a fault on its own card.
+            Ok(Ran::Faulted(fault)) => {
+                log::error!(
+                    "work in space {:?} reached {:#x} on the card, where nothing is mapped (fault status \
+                     {:#x}). No more work from that space is run, on engine family {} or any other",
+                    work.space,
+                    fault.address,
+                    fault.status,
                     node.ip_type
                 );
                 WorkStart::QueueFailed

@@ -270,6 +270,18 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             self.queue_of_context(handle, message)?;
         }
         let queues = self.context_queues.get(&handle).cloned().unwrap_or_else(|| vec![handle]);
+        log::debug!(
+            "wait on gpu for {handle:#x}: {} queues {queues:x?}, gated now {:?}, signals {signals:x?}",
+            queues.len(),
+            queues.iter().map(|queue| self.gates.contains_key(queue)).collect::<Vec<_>>()
+        );
+        for &(object, value) in &signals {
+            if !self.fence_known(object) {
+                log::warn!(
+                    "wait on gpu names {object:#x} for {value}, which is no sync object or queue here, so it counts as reached"
+                );
+            }
+        }
         let deadline = Instant::now() + GATE_TIMEOUT;
         let id = self.next_wait;
         self.next_wait += 1;
@@ -315,6 +327,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                         let held = GateStep::Wait { signals, deadline, id };
                         self.gates.get_mut(&queue).expect("just read").push_front(held);
                         return false;
+                    }
+                    if !can_go {
+                        log::warn!(
+                            "a wait on queue {queue:#x} gave up at its deadline, and its work goes on: {signals:x?}"
+                        );
                     }
                     self.leave_wait(id, &signals, can_go);
                 }

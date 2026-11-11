@@ -223,6 +223,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.run_deferred();
         let request = SubmitToQueue::parse(message)?;
         let value = request.fence_value;
+        self.note_waiting_updates(request.queue);
         match self.start_on_gpu(request.queue, WorkSource::HardwareQueue, request.private, value) {
             GpuTook::Work(work) => self.hold_if_ring_is_full(request.queue, value, work),
             GpuTook::NoRoom => {
@@ -259,6 +260,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let queue = self.queue_of_context(request.context, message)?;
         let record = self.queues.get(&queue).ok_or(Malformed)?;
         let (fence, value) = (record.fence, record.last_fence.unwrap_or(0).saturating_add(1));
+        self.note_waiting_updates(queue);
         match self.start_on_gpu(queue, WorkSource::Context, request.private, value) {
             GpuTook::Work(_) => {}
             GpuTook::NoRoom => {

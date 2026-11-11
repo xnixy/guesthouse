@@ -392,11 +392,33 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     /// Runs an update that waited, and raises its fence for the next.
     pub(crate) fn finish_update(&mut self, operations: &[u8], space: SpaceId, fence: u32, value: u64) {
+        log::debug!("waiting update runs in {space:?}: {}", describe_operations(operations));
         if let Err(failure) = self.apply_updates(operations, space) {
             log::error!("a waiting address update failed: {failure}");
             self.stop_space(space);
         }
         self.write_fence(fence, value.saturating_add(1));
+    }
+
+    /// Says so when work starts in a space whose address updates are still waiting, as the GPU may
+    /// reach addresses that are not mapped yet. Only logs.
+    pub(crate) fn note_waiting_updates(&self, queue: u32) {
+        let Some(space) = self.queues.get(&queue).map(|queue| queue.space) else { return };
+        let mut waiting = self.pending.iter().filter_map(|item| match item {
+            Pending::Update { fence, value, space: waits, operations } if *waits == space => {
+                Some((*fence, *value, operations))
+            }
+            _ => None,
+        });
+        if let Some((fence, value, operations)) = waiting.next() {
+            let more = waiting.count();
+            log::debug!(
+                "work starts on queue {queue:#x} in {space:?} (gated: {}) with {} address updates still waiting;                  the first needs fence {fence:#x} to reach {value}: {}",
+                self.gates.contains_key(&queue),
+                more + 1,
+                describe_operations(operations)
+            );
+        }
     }
 
     /// Takes every queue of an address space off the GPU, after an update that didn't happen.
@@ -428,7 +450,18 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let request = UpdateRequest::parse(message)?;
         let space = self.space_for(MessageHeader::process_of(message)?)?;
         let (fence, value) = (request.fence, request.fence_value);
-        if self.fence_reached(fence, value) {
+        if !self.fence_known(fence) {
+            log::warn!(
+                "address update waits on {fence:#x}, which is no sync object or queue here, so it runs now"
+            );
+        }
+        if request.no_wait || self.fence_reached(fence, value) {
+            if request.no_wait && !self.fence_reached(fence, value) {
+                log::debug!(
+                    "update in {space:?} runs now as asked, with fence {fence:#x} not yet at {value}: {}",
+                    describe_operations(request.raw_operations())
+                );
+            }
             let applied = self.apply_updates(request.raw_operations(), space);
             if applied.is_err() {
                 self.stop_space(space);
@@ -441,6 +474,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             self.write_fence(fence, value.saturating_add(1));
         } else {
             let operations = request.raw_operations().to_vec();
+            log::debug!(
+                "update waits in {space:?} for fence {fence:#x} to reach {value}: {}",
+                describe_operations(&operations)
+            );
             self.pending.push(Pending::Update { fence, value, space, operations });
         }
         answer_status(Status::SUCCESS, out);
@@ -477,6 +514,19 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.add_mapping(handle, Mapping { address, first: 0, length: size, space });
         Ok(address)
     }
+}
+
+/// The first few operations of a batch, for the log.
+fn describe_operations(operations: &[u8]) -> String {
+    let parsed: Vec<_> = operations
+        .chunks(UpdateRequest::OPERATION_SIZE)
+        .take(3)
+        .map(|bytes| {
+            UpdateOperation::parse(bytes).map_or_else(|_| "unreadable".to_string(), |op| format!("{op:x?}"))
+        })
+        .collect();
+    let total = operations.len().div_ceil(UpdateRequest::OPERATION_SIZE);
+    format!("{total} operations, first {}", parsed.join(", "))
 }
 
 const UNKNOWN_ALLOCATION: BackendError = BackendError(std::borrow::Cow::Borrowed("no such allocation"));

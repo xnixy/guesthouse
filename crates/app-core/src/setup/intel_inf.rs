@@ -198,10 +198,12 @@ pub mod stand_in {
     pub const DRIVER_VERSION: &str = "32.0.101.9175";
 
     /// The user-mode files a guest on `DEVICE` gets from the INF below, as the INF lists them.
-    pub const GUEST_FILES: [&str; 11] = [
+    pub const GUEST_FILES: [&str; 15] = [
+        "igd10iumd32.dll",
         "igd10iumd64.dll",
         "igd12umd32.dll",
         "igd12umd64.dll",
+        "igd9trinity32.dll",
         "igd9trinity64.dll",
         "igdrcl32.dll",
         "igdrcl64.dll",
@@ -209,6 +211,8 @@ pub mod stand_in {
         "igvk32.json",
         "igvk64.dll",
         "igvk64.json",
+        "igxe2lpgicd32.dll",
+        "igxe2lpgicd64.dll",
         "ze_intel_gpu64.dll",
     ];
 
@@ -266,8 +270,12 @@ pub mod stand_in {
              igd12umd64.dll\n\
              igd10iumd64.dll\n\
              igd9trinity64.dll ; the oldest API\n\
+             igxe2lpgicd64.dll\n\
              [Direct3D32]\n\
              igd12umd32.dll\n\
+             igd10iumd32.dll\n\
+             igd9trinity32.dll\n\
+             igxe2lpgicd32.dll\n\
              [Loaders]\n\
              vulkan-1.dll, vulkan-1-64.dll,,0x4020\n\
              vulkaninfo.exe, vulkaninfo-64.exe,,0x4020\n\

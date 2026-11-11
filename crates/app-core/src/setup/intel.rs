@@ -23,14 +23,19 @@ const DRIVER_VERSION_FIELD: &str = "driver_version";
 pub const NO_INTEL_SETUP: &str = "A Windows machine on an Intel card needs Intel's Windows driver unpacked first, \
                                   and it hasn't been.";
 
-/// The files the Intel daemon names to Windows, apart from the kernel driver: the Direct3D drivers,
-/// the OpenCL and Level Zero drivers, and the Vulkan manifests. The kernel driver is named too, as
-/// the adapter is said to have one, but no file of it goes to the guest. A test holds the daemon to
-/// this list.
-pub const NAMED_FILES: [&str; 8] = [
+/// The files the Intel daemon names to Windows, apart from the kernel driver: the Direct3D drivers
+/// for 64-bit and 32-bit programs, the OpenGL, OpenCL and Level Zero drivers, and the Vulkan
+/// manifests. The kernel driver is named too, as the adapter is said to have one, but no file of it
+/// goes to the guest. A test holds the daemon to this list.
+pub const NAMED_FILES: [&str; 13] = [
     "igd9trinity64.dll",
     "igd10iumd64.dll",
     "igd12umd64.dll",
+    "igd9trinity32.dll",
+    "igd10iumd32.dll",
+    "igd12umd32.dll",
+    "igxe2lpgicd64.dll",
+    "igxe2lpgicd32.dll",
     "igdrcl64.dll",
     "igdrcl32.dll",
     "igvk64.json",

@@ -289,11 +289,6 @@ impl Machine {
         Some(self.amd_gpu.as_str()).filter(|pci| self.kind == Kind::Windows && !pci.is_empty())
     }
 
-    /// The AMD card a Windows guest's GPU-PV runs on, by its PCI address. None is any other maker's.
-    pub fn windows_amd_card(&self) -> Option<&str> {
-        self.windows_card_address().filter(|_| self.windows_maker() == Some(GpuMaker::Amd))
-    }
-
     /// Puts a Windows guest on the card at `pci`, which is `maker`'s. Empty is NVIDIA's.
     pub fn use_windows_card(&mut self, maker: GpuMaker, pci: &str) {
         self.amd_gpu = pci.to_owned();
@@ -471,11 +466,15 @@ mod tests {
 
     #[test]
     fn a_windows_guest_on_an_amd_card_names_it_and_a_linux_one_does_not_count() {
-        assert_eq!(sample().windows_amd_card(), None);
+        assert_eq!(
+            (sample().windows_maker(), sample().windows_card_address()),
+            (Some(GpuMaker::Nvidia), None)
+        );
         let on_amd = Machine { amd_gpu: "0000:7c:00.0".into(), ..sample() };
-        assert_eq!(on_amd.windows_amd_card(), Some("0000:7c:00.0"));
+        assert_eq!(on_amd.windows_maker(), Some(GpuMaker::Amd));
+        assert_eq!(on_amd.windows_card_address(), Some("0000:7c:00.0"));
         let linux = Machine { kind: Kind::Linux, ..on_amd };
-        assert_eq!(linux.windows_amd_card(), None);
+        assert_eq!((linux.windows_maker(), linux.windows_card_address()), (None, None));
     }
 
     #[test]
@@ -539,7 +538,7 @@ mod tests {
             machine,
             "the id is the folder's name"
         );
-        assert_eq!((read.windows_maker(), read.windows_amd_card()), (Some(GpuMaker::Intel), None));
+        assert_eq!(read.windows_maker(), Some(GpuMaker::Intel));
         // The released app's Machine rejects fields it doesn't know, which is what keeps it from taking
         // this one for an AMD machine. This build rejects an unknown field the same way.
         let mut unknown: serde_json::Value = serde_json::from_str(&text).unwrap();

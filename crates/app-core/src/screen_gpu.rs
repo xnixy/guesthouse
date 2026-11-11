@@ -3,6 +3,7 @@
 //! asks for its frames in memory instead, and copies them.
 
 use crate::context::Context;
+use crate::gpu_maker::GpuMaker;
 use crate::machine::Machine;
 use crate::setup::cards::card_in_use;
 use crate::usb::sysfs_text;
@@ -14,11 +15,15 @@ const CONNECTED: &str = "connected";
 /// Set to 1 or 0 to choose, whatever the check says.
 pub const MEMORY_FRAMES_VARIABLE: &str = "GUESTHOUSE_MEMORY_FRAMES";
 
-/// Where on the PCI bus the card a machine's GPU-PV runs on is, as `0000:01:00.0`: its AMD card, or
-/// the NVIDIA card setup chose. Empty if it isn't known.
+/// Where on the PCI bus the card a machine's GPU-PV runs on is, as `0000:01:00.0`: the card it chose,
+/// or the NVIDIA card setup chose. Empty if it isn't known.
 pub fn machine_card(context: &Context, machine: &Machine) -> String {
-    if !machine.amd_gpu.is_empty() {
-        return machine.amd_gpu.clone();
+    match machine.windows_maker() {
+        Some(GpuMaker::Amd | GpuMaker::Intel) => return machine.amd_gpu.clone(),
+        Some(GpuMaker::Nvidia) => {}
+        // A guest that isn't Windows has its card in the same place, if it has one.
+        None if !machine.amd_gpu.is_empty() => return machine.amd_gpu.clone(),
+        None => {}
     }
     card_in_use(context).map(|card| card.pci).unwrap_or_default()
 }

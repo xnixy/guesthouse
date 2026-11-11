@@ -8,6 +8,7 @@ use adw::prelude::*;
 use guesthouse_app_core::account::{default_user, name_problem, password_problem};
 use guesthouse_app_core::card_choice::{CardChoice, default_choice, windows_card_choices};
 use guesthouse_app_core::display::DriverPackage;
+use guesthouse_app_core::gpu_maker::GpuMaker;
 use guesthouse_app_core::gpu_support::{kind_offered, plain_reason, ubuntu_note};
 use guesthouse_app_core::host::{RamField, physical_cores};
 use guesthouse_app_core::iso::{Iso, read_iso};
@@ -321,13 +322,18 @@ impl NewMachineDialog {
             self.show_verdict(&iso.title, missing);
         } else if windows {
             // The warning is about NVIDIA's card and setup.
-            let on_nvidia = self.chosen_card_pci().is_empty();
+            let maker = self.chosen_choice().map_or(GpuMaker::Nvidia, |choice| choice.maker);
+            let on_nvidia = maker == GpuMaker::Nvidia;
             let warning = gpu_warning(&context)
                 .filter(|_| on_nvidia)
                 .map_or_else(String::new, |text| format!(" {text}"));
             // A build from source has no driver to add, so it says nothing about one.
             let display = DriverPackage::find(&context).map_or("", |_| DISPLAY_DRIVER_NOTE);
-            let gpu = if on_nvidia { "starts with GPU-PV" } else { AMD_NOT_FINISHED };
+            let gpu = match maker {
+                GpuMaker::Nvidia => "starts with GPU-PV",
+                GpuMaker::Amd => AMD_NOT_FINISHED,
+                GpuMaker::Intel => "has no GPU-PV on Intel yet",
+            };
             let said = format!("Installs by itself and {gpu}. {display}{warning}");
             self.show_verdict(&iso.title, said.trim());
         } else {

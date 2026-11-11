@@ -14,6 +14,7 @@ pub mod driver;
 pub mod guest_driver;
 pub mod guest_files;
 pub mod inf;
+pub mod intel;
 pub mod toolkit;
 
 use crate::context::Context;

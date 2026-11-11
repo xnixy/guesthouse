@@ -262,8 +262,8 @@ impl LocalHost<'_> {
         if !choice.daemon_jailed {
             start = start.without_jail();
         }
-        if let Some(pci) = machine.windows_amd_card() {
-            start = start.on_amd_card(pci);
+        if let Some(maker) = machine.windows_maker() {
+            start = start.on_card(maker, &machine.amd_gpu)?;
         }
         let mut daemon = start.spawn(&plan.run_folder, &memory)?;
         self.wait_for_daemon(&mut daemon)?;

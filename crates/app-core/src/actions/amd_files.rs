@@ -5,6 +5,7 @@
 use super::Task;
 use super::guest_upload::{put_big_file, quoted};
 use crate::failure::Result;
+use crate::gpu_maker::GpuMaker;
 use crate::log::write_log;
 use crate::setup::amd::complete_amd_driver;
 use crate::setup::guest_driver::guest_driver;
@@ -24,7 +25,7 @@ const NOT_PLACED: &str = "Some of AMD's driver files did not reach Windows, so V
 
 /// Any problem is said and doesn't stop the task: Direct3D works without what's missing.
 pub(super) fn complete_host_driver(task: &mut Task) -> Result<()> {
-    if task.machine.windows_amd_card().is_none() {
+    if task.machine.windows_maker() != Some(GpuMaker::Amd) {
         return Ok(());
     }
     if let Some(problem) = complete_amd_driver(task.context) {

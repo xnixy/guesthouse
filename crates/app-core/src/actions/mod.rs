@@ -31,6 +31,7 @@ use crate::context::Context;
 use crate::disk_image::disk_size_gib;
 use crate::failure::{Failure, Result};
 use crate::gpu_identity::{PciIdentity, read_state};
+use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::is_no_room;
 use crate::host::{GIB, cpu_list, fits_now, ram_limit_for, vcache_cpus};
 use crate::library::MAX_DISK_GIB;
@@ -40,6 +41,7 @@ use crate::monitor::Command as Qmp;
 use crate::network_settings::other_machines;
 use crate::processes::qemu_pid;
 use crate::settings::max_vram_gib;
+use crate::setup::intel::NO_INTEL_SUPPORT;
 use crate::snapshots::{delete_snapshot, go_back, take_snapshot};
 use crate::start_checks::{start_problems, video_cap};
 use crate::tasks::{TaskRecord, write_task};
@@ -197,12 +199,23 @@ fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
         get_gpu_ready(task)?;
     }
     set_up_desktop(task)?;
-    if task.machine.windows_amd_card().is_some() {
-        // What follows places NVIDIA's files and settings store, which a guest on AMD has no use for.
-        return bring_amd_driver_up_to_date(task);
+    place_files_for_maker(task)
+}
+
+/// What the guest is given for its card, by the card's maker. Each maker's files and settings are for
+/// its own driver only.
+fn place_files_for_maker(task: &mut Task) -> Result<()> {
+    match task.machine.windows_maker() {
+        Some(GpuMaker::Nvidia) => {
+            place_driver_files(task)?;
+            place_profile_store(task)
+        }
+        Some(GpuMaker::Amd) => bring_amd_driver_up_to_date(task),
+        // A start of this machine is refused before it gets here. Placing another maker's files would
+        // put a driver in the guest that isn't its card's.
+        Some(GpuMaker::Intel) => Err(Failure::new(NO_INTEL_SUPPORT)),
+        None => Ok(()),
     }
-    place_driver_files(task)?;
-    place_profile_store(task)
 }
 
 /// Up to the point where it's known which identity the VM should show, before any work on a desktop

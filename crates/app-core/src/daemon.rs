@@ -2,8 +2,10 @@
 //! knows it: `guesthouse-daemon BASE`, with the slot in `GUESTHOUSE_SLOT`, serves `BASE/run[-N]`.
 
 use crate::context::{Context, SLOT_VARIABLE};
-use crate::failure::Result;
+use crate::failure::{Failure, Result};
+use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::GuestMemory;
+use crate::setup::intel::NO_INTEL_SUPPORT;
 use guesthouse_daemon::slot::Slot;
 use guesthouse_daemon::{card_choice, jail};
 use std::collections::BTreeMap;
@@ -42,10 +44,26 @@ impl DaemonStart {
         }
     }
 
+    /// For a guest on the card at `pci`, which is `maker`'s. NVIDIA's is the one setup chose, which the
+    /// daemon opens when it's told no other.
+    pub fn on_card(self, maker: GpuMaker, pci: &str) -> Result<Self> {
+        match maker {
+            GpuMaker::Nvidia => Ok(self),
+            GpuMaker::Amd => Ok(self.on_amd_card(pci)),
+            GpuMaker::Intel => self.on_intel_card(pci),
+        }
+    }
+
     /// For a guest on an AMD card, which the daemon then opens instead of the NVIDIA card.
-    pub fn on_amd_card(mut self, pci: &str) -> Self {
+    fn on_amd_card(mut self, pci: &str) -> Self {
         self.environment.insert(card_choice::AMD_CARD_VARIABLE.to_owned(), pci.to_owned());
         self
+    }
+
+    /// For a guest on an Intel card. This is where the variable that names the card goes once the
+    /// daemon opens one. Until then the start is refused, as the daemon would open NVIDIA's card.
+    fn on_intel_card(self, _pci: &str) -> Result<Self> {
+        Err(Failure::new(NO_INTEL_SUPPORT))
     }
 
     /// For a machine allowed to start with no jail, on a PC that can't give it one.
@@ -119,8 +137,19 @@ mod tests {
         let context = scratch_context(&scratch);
         let start = DaemonStart::new(&context, slots::first(), "16G", None);
         assert!(!start.environment.contains_key("GUESTHOUSE_AMD_CARD"));
-        let start = start.on_amd_card("0000:7c:00.0");
+        let start = start.on_card(GpuMaker::Amd, "0000:7c:00.0").unwrap();
         assert_eq!(start.environment["GUESTHOUSE_AMD_CARD"], "0000:7c:00.0");
+    }
+
+    #[test]
+    fn a_guest_on_nvidia_names_no_card_and_one_on_intel_is_refused() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let start = DaemonStart::new(&context, slots::first(), "16G", None);
+        let on_nvidia = start.clone().on_card(GpuMaker::Nvidia, "").unwrap();
+        assert_eq!(on_nvidia, start);
+        let refused = start.on_card(GpuMaker::Intel, "0000:00:02.0").unwrap_err();
+        assert_eq!(refused.0, NO_INTEL_SUPPORT);
     }
 
     #[test]

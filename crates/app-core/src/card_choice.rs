@@ -151,7 +151,6 @@ mod tests {
 
     #[test]
     fn intel_cards_are_found_but_not_offered_until_the_switch_is_turned_on() {
-        assert!(!OFFER_INTEL_CARDS, "turning this on is its own change, with Windows set up for Intel");
         let scratch = Scratch::new();
         let context = with_cards(&scratch, true);
         let offered_now: Vec<GpuMaker> =

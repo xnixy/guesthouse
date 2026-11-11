@@ -3,6 +3,7 @@
 
 use crate::context::Context;
 use crate::failure::Result;
+use crate::gpu_maker::GpuMaker;
 use crate::gpu_support::{NO_GPU_PART, gpu_ready};
 use crate::held_memory::used_by_others;
 use crate::host::{self, GIB, physical_cores, ram_limit_for, vcache_cpus};
@@ -12,6 +13,7 @@ use crate::processes::{memory_taken, qemu_pid};
 use crate::settings::max_vram_gib;
 use crate::setup::amd::amd_start_problems;
 use crate::setup::cards::card_problem;
+use crate::setup::intel::NO_INTEL_SUPPORT;
 use crate::setup::setup_done;
 use crate::tasks::no_slot_text;
 use std::path::Path;
@@ -116,6 +118,22 @@ pub fn share_problem(context: &Context, folder: &str) -> Option<String> {
     (folder == home || home.starts_with(&folder) || holds_ours || hidden).then(|| SHARE_REFUSAL.to_owned())
 }
 
+/// Says why a GPU machine can't start on its card, by the maker whose setup and card it needs.
+fn card_start_problems(context: &Context, machine: &Machine) -> Vec<String> {
+    match machine.windows_maker() {
+        Some(GpuMaker::Nvidia) => {
+            if setup_done(context) {
+                card_problem(context).into_iter().collect()
+            } else {
+                vec![NO_SETUP.to_owned()]
+            }
+        }
+        Some(GpuMaker::Amd) => amd_start_problems(context, &machine.amd_gpu),
+        Some(GpuMaker::Intel) => vec![NO_INTEL_SUPPORT.to_owned()],
+        None => Vec::new(),
+    }
+}
+
 /// Says why this machine can't start on this host now.
 pub fn start_problems(context: &Context, machine: &Machine) -> Result<Vec<String>> {
     let mut found = machine.problems(max_vram_gib(context));
@@ -134,13 +152,7 @@ pub fn start_problems(context: &Context, machine: &Machine) -> Result<Vec<String
     if machine.kind == Kind::Windows && !gpu_ready(context) {
         found.push(NO_GPU_PART.to_owned());
     } else if machine.has_gpu() {
-        if let Some(pci) = machine.windows_amd_card() {
-            found.extend(amd_start_problems(context, pci));
-        } else if !setup_done(context) {
-            found.push(NO_SETUP.to_owned());
-        } else {
-            found.extend(card_problem(context));
-        }
+        found.extend(card_start_problems(context, machine));
         if !machine.token_file(context).exists() {
             found.push(NO_TOKEN.to_owned());
         }
@@ -366,6 +378,19 @@ mod tests {
         assert!(says(&found, NO_AMD_SETUP), "{found:?}");
         assert!(says(&found, "at 0000:7c:00.0, isn't in this PC now"), "{found:?}");
         assert!(!says(&found, NO_SETUP), "NVIDIA's setup is not this machine's");
+    }
+
+    #[test]
+    fn a_windows_machine_on_an_intel_card_is_refused_plainly_even_when_the_other_makers_are_set_up() {
+        let scratch = Scratch::new();
+        let (context, machine) = startable(&scratch);
+        finish_setup(&context);
+        let mut on_intel = Machine { kind: Kind::Windows, ..machine };
+        on_intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+        fs::create_dir_all(on_intel.folder(&context)).unwrap();
+        crate::agent::make_token(&context, &on_intel).unwrap();
+        let found = start_problems(&context, &on_intel).unwrap();
+        assert_eq!(found, [NO_INTEL_SUPPORT], "NVIDIA's setup being done changes nothing");
     }
 
     #[test]

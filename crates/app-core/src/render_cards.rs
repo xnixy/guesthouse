@@ -57,6 +57,11 @@ pub fn render_cards(context: &Context, maker: GpuMaker) -> Vec<RenderCard> {
     cards
 }
 
+/// The card of `maker` at this address, if it's still in this PC.
+pub fn render_card(context: &Context, maker: GpuMaker, pci: &str) -> Option<RenderCard> {
+    render_cards(context, maker).into_iter().find(|card| card.pci == pci)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

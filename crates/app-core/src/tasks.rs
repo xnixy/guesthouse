@@ -6,6 +6,7 @@ use crate::daemon::detached;
 use crate::display::{read_state, ring_in, screen_text};
 use crate::failure::{Failure, Result};
 use crate::gpu_identity::read_state as read_identity;
+use crate::gpu_maker::GpuMaker;
 use crate::jailing;
 use crate::linux::amd::{amd_mode, fallback_reason};
 use crate::linux::{amd_says, guest_says};
@@ -13,6 +14,7 @@ use crate::log::open_for_appending;
 use crate::machine::Machine;
 use crate::process_stat::{self, Seen};
 use crate::processes::{leftovers, memory_taken, running_machine, running_slots, still_running};
+use crate::render_cards::render_card;
 use crate::settings::write_json;
 use crate::setup::cards::card_in_use_note;
 use crate::slots;
@@ -208,9 +210,9 @@ pub fn status_since(context: &Context, machine: &Machine, before: Option<(u8, Se
         found.display_problem = shown.problem(found.state == State::Running).to_owned();
         let identity = read_identity(context, machine);
         found.identity_note = identity.problem(found.state == State::Running).to_owned();
-        found.card_note = match machine.windows_amd_card() {
-            Some(pci) => amd_card_note(context, pci),
-            None => card_in_use_note(context).unwrap_or_default(),
+        found.card_note = match machine.windows_maker() {
+            Some(maker @ (GpuMaker::Amd | GpuMaker::Intel)) => card_note(context, maker, &machine.amd_gpu),
+            Some(GpuMaker::Nvidia) | None => card_in_use_note(context).unwrap_or_default(),
         };
         if found.state == State::Running {
             let slot = found.slot.map(slots::number);
@@ -223,10 +225,10 @@ pub fn status_since(context: &Context, machine: &Machine, before: Option<(u8, Se
     found
 }
 
-/// Which AMD card a Windows machine runs on, as a machine on AMD is the rarer case.
-fn amd_card_note(context: &Context, pci: &str) -> String {
-    crate::linux::amd::amd_card(context, pci).map_or_else(
-        || format!("Runs on the AMD card at {pci}."),
+/// Which card a Windows machine runs on, as a machine on a card other than NVIDIA's is the rarer case.
+fn card_note(context: &Context, maker: GpuMaker, pci: &str) -> String {
+    render_card(context, maker, pci).map_or_else(
+        || format!("Runs on the {} card at {pci}.", maker.name()),
         |card| format!("Runs on the {} at {pci}.", card.name),
     )
 }
@@ -337,6 +339,26 @@ mod tests {
         let monitor = format!("unix:{}/qmp.sock,server=on", context.run_folder(None).display());
         let disk = format!("file={},format=qcow2", vm.disk);
         fake_process(context, 40, &[&qemu, "-qmp", &monitor, &disk], &[], "");
+    }
+
+    #[test]
+    fn the_card_note_names_the_card_by_its_maker_and_still_says_so_when_the_card_is_gone() {
+        use crate::linux::amd::stand_in::fake_render_node;
+        let scratch = Scratch::new();
+        let mut context = scratch_context(&scratch);
+        context.drm_class = scratch.path("drm");
+        const NAMES: &str = "1001  Other\n8086  Intel Corporation\n\t64a0  Lunar Lake [Intel Arc 140V]\n";
+        context.pci_names = scratch.write("pci.ids", NAMES);
+        fake_render_node(&scratch, 128, "0000:00:02.0", "0x8086", 0x64a0);
+        assert_eq!(
+            card_note(&context, GpuMaker::Intel, "0000:00:02.0"),
+            "Runs on the Intel Arc 140V at 0000:00:02.0."
+        );
+        assert_eq!(
+            card_note(&context, GpuMaker::Amd, "0000:00:02.0"),
+            "Runs on the AMD card at 0000:00:02.0.",
+            "an Intel card is not found as an AMD one"
+        );
     }
 
     #[test]

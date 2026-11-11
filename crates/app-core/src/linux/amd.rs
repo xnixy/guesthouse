@@ -129,6 +129,16 @@ mod tests {
     }
 
     #[test]
+    fn an_intel_card_is_never_a_linux_guests_gpu() {
+        let scratch = Scratch::new();
+        fake_render_node(&scratch, 128, "0000:00:02.0", "0x8086", 0x64a0);
+        let context = context(&scratch);
+        assert!(amd_cards(&context).is_empty());
+        assert_eq!(default_linux_gpu(&context), "", "a new Linux guest gets no Intel card");
+        assert!(amd_card(&context, "0000:00:02.0").is_none());
+    }
+
+    #[test]
     fn a_card_pci_ids_does_not_know_still_has_a_name() {
         let scratch = Scratch::new();
         fake_render_node(&scratch, 128, "0000:05:00.0", "0x1002", 0x7fff);

@@ -94,6 +94,27 @@ impl Books {
         let end = start.saturating_add(placed.length);
         address.checked_add(bytes).is_some_and(|wanted| wanted <= end)
     }
+
+    /// Whether every byte of `bytes` from `address` is mapped here, in one mapping or in several that
+    /// follow one another, as a guest may lay two buffers end to end.
+    pub fn covers(&self, address: u64, bytes: u64) -> bool {
+        let Some(end) = address.checked_add(bytes) else {
+            return false;
+        };
+        let mut reached = address;
+        while reached < end {
+            let mapped_to = self
+                .mappings
+                .range(..=reached)
+                .next_back()
+                .map(|(&start, placed)| start.saturating_add(placed.length));
+            match mapped_to {
+                Some(mapped_to) if mapped_to > reached => reached = mapped_to,
+                _ => return false,
+            }
+        }
+        true
+    }
 }
 
 /// Where a buffer on the backend's first open came from, which says how a space takes it in.
@@ -147,6 +168,11 @@ impl SpaceVm {
     /// Whether `bytes` from `address` lie inside one mapping here.
     pub fn holds(&self, address: u64, bytes: u64) -> bool {
         self.books.holds(address, bytes)
+    }
+
+    /// Whether every byte of `bytes` from `address` is mapped here, in one mapping or several.
+    pub fn covers(&self, address: u64, bytes: u64) -> bool {
+        self.books.covers(address, bytes)
     }
 
     /// The first command buffer not wholly mapped here. The card would fault reading it, and a fault
@@ -319,6 +345,22 @@ mod tests {
         assert_eq!(books.locate(AT + 0x10), Some((BUFFER, 0x3010)));
         assert_eq!(books.locate(AT + SIZE), None);
         assert_eq!(books.locate(AT - 1), None);
+    }
+
+    #[test]
+    fn a_range_is_covered_across_mappings_that_follow_one_another() {
+        let mut books = Books::default();
+        books.add(BUFFER, HERE, AT, 0, SIZE);
+        books.add(GemHandle(8), GemHandle(4), AT + SIZE, 0, SIZE);
+        books.add(GemHandle(9), GemHandle(5), AT + 3 * SIZE, 0, SIZE);
+        assert!(books.covers(AT, SIZE));
+        assert!(books.covers(AT + 0x100, 2 * SIZE - 0x100));
+        assert!(books.covers(AT, 0));
+        assert!(!books.covers(AT, 2 * SIZE + 1));
+        assert!(!books.covers(AT + SIZE, 3 * SIZE));
+        assert!(!books.covers(AT - 1, 2));
+        assert!(!books.covers(AT + 2 * SIZE, 1));
+        assert!(!books.covers(u64::MAX - 1, 4));
     }
 
     #[test]

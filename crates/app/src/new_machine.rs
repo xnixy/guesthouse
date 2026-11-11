@@ -421,8 +421,11 @@ impl NewMachineDialog {
 
     /// The PCI address of the card chosen, empty for NVIDIA's, as a machine keeps it.
     fn chosen_card_pci(&self) -> String {
-        let at = self.0.card.selected() as usize;
-        self.0.cards.get(at).map(|choice| choice.pci.clone()).unwrap_or_default()
+        self.chosen_choice().map(|choice| choice.pci.clone()).unwrap_or_default()
+    }
+
+    fn chosen_choice(&self) -> Option<&CardChoice> {
+        self.0.cards.get(self.0.card.selected() as usize)
     }
 
     fn chosen_device(&self) -> u32 {
@@ -431,7 +434,11 @@ impl NewMachineDialog {
 
     /// A Windows machine on the card chosen, to ask what it would need.
     fn chosen_card(&self) -> Machine {
-        Machine { amd_gpu: self.chosen_card_pci(), ..Machine::new("", "", "", "") }
+        let mut machine = Machine::new("", "", "", "");
+        if let Some(choice) = self.chosen_choice() {
+            machine.use_windows_card(choice.maker, &choice.pci);
+        }
+        machine
     }
 
     /// Another card can need another maker's driver, which may not be here.
@@ -469,6 +476,7 @@ impl NewMachineDialog {
             user: account_name(iso.kind, parts.user.text().trim()),
             password: parts.password.text().to_string(),
             amd_gpu: (iso.kind == Kind::Windows).then(|| self.chosen_card_pci()),
+            gpu_maker: self.chosen_choice().map(|choice| choice.maker),
         };
         let context = parts.window.context();
         let working = context.clone();

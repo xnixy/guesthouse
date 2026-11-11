@@ -240,6 +240,7 @@ fn install_setup(scratch: &Scratch) -> (Context, Machine) {
         user: String::new(),
         password: String::new(),
         amd_gpu: None,
+        gpu_maker: None,
     };
     let vm = crate::library::create(&context, &new).unwrap();
     (context, vm)

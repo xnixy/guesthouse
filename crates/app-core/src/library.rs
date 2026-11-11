@@ -3,6 +3,7 @@
 use crate::account;
 use crate::context::Context;
 use crate::failure::{Failure, Result};
+use crate::gpu_maker::GpuMaker;
 use crate::gpu_support::{NO_GPU_PART, gpu_ready};
 use crate::host::{free_gib, host_ram_limit, plain_ram_limit};
 use crate::machine::{Kind, Machine, load_all, sorted_names};
@@ -89,6 +90,8 @@ pub struct NewMachine {
     /// The AMD card its GPU runs on, by PCI address, or empty for the NVIDIA card. None takes this
     /// PC's usual choice.
     pub amd_gpu: Option<String>,
+    /// Whose card that is, for a Windows machine. None is what the address says.
+    pub gpu_maker: Option<GpuMaker>,
 }
 
 /// Says why this new machine can't be made now.
@@ -172,6 +175,7 @@ pub fn create(context: &Context, new: &NewMachine) -> Result<Machine> {
         tpm: windows,
         mac: unused_mac(context),
         amd_gpu: new.amd_gpu.clone().unwrap_or_else(|| crate::linux::amd::default_linux_gpu(context)),
+        gpu_maker: new.gpu_maker.and_then(GpuMaker::recorded).filter(|_| windows),
         user: if installs { new.user.trim().to_owned() } else { String::new() },
         ..Machine::new(&id, new.name.trim(), &disk.to_string_lossy(), &firmware)
     };
@@ -304,6 +308,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             amd_gpu: None,
+            gpu_maker: None,
         }
     }
 
@@ -337,6 +342,7 @@ mod tests {
             user: "ana".into(),
             password: "chosen".into(),
             amd_gpu: None,
+            gpu_maker: None,
         };
         let made = create(&context, &new).unwrap();
         assert_eq!(made.account(), "ana");
@@ -411,6 +417,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             amd_gpu: None,
+            gpu_maker: None,
         };
         assert!(create(&context, &new).unwrap_err().0.contains("room for 6 GiB"));
     }
@@ -431,6 +438,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             amd_gpu: None,
+            gpu_maker: None,
         };
         assert_eq!(create(&context, &new).unwrap_err().0, NO_FIRMWARE);
     }
@@ -452,6 +460,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             amd_gpu: None,
+            gpu_maker: None,
         };
         let made = create(&context, &new).unwrap();
         assert!(made.installing && made.tpm && !made.has_gpu());
@@ -484,6 +493,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             amd_gpu: None,
+            gpu_maker: None,
         };
         let made = create(&context, &new).unwrap();
         assert!(made.installing && !made.tpm && made.vars.is_empty());
@@ -506,6 +516,7 @@ mod tests {
             user: String::new(),
             password: String::new(),
             amd_gpu: None,
+            gpu_maker: None,
         };
         assert_eq!(create(&context, &new).unwrap_err().0, NO_DRIVER_FILES);
     }

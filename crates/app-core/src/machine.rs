@@ -3,6 +3,7 @@
 use crate::account;
 use crate::context::Context;
 use crate::failure::{Failure, Result};
+use crate::gpu_maker::GpuMaker;
 use crate::network::{self, Forward, Mode};
 use crate::settings::write_json;
 use serde::{Deserialize, Serialize};
@@ -75,6 +76,10 @@ fn default_refresh() -> u32 {
 
 fn is_on(setting: &bool) -> bool {
     *setting
+}
+
+fn is_implied_by_address(maker: &Option<GpuMaker>) -> bool {
+    maker.and_then(GpuMaker::recorded).is_none()
 }
 
 fn is_off(setting: &bool) -> bool {
@@ -168,6 +173,13 @@ pub struct Machine {
     /// empty, so an older build can still read it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub amd_gpu: String,
+    /// The maker of a Windows guest's card, when its address can't say. An empty `amd_gpu` is the
+    /// NVIDIA card and an address is AMD's, which is how every machine from before other makers is
+    /// read, so those two are never written. A maker that came later is, with its card's address in
+    /// `amd_gpu`. The released app refuses a file with this field, so it can't take such a machine for
+    /// an AMD one.
+    #[serde(default, skip_serializing_if = "is_implied_by_address")]
+    pub gpu_maker: Option<GpuMaker>,
     /// The name of the account the install makes, if the user chose one. Empty is the name the guest
     /// scripts have always used, which every machine from before this setting has. Left out of the
     /// file when empty, so an older build can still read it.
@@ -207,6 +219,7 @@ impl Machine {
             linux_gpu: false,
             sound: true,
             amd_gpu: String::new(),
+            gpu_maker: None,
             user: String::new(),
         }
     }
@@ -263,16 +276,35 @@ impl Machine {
         Some(self.amd_gpu.as_str()).filter(|pci| linux_gpu && !pci.is_empty())
     }
 
-    /// The AMD card a Windows guest's GPU-PV runs on, by its PCI address. None is setup's NVIDIA card.
-    pub fn windows_amd_card(&self) -> Option<&str> {
+    /// The maker of the card a Windows guest's GPU-PV runs on. None for any other kind of machine.
+    pub fn windows_maker(&self) -> Option<GpuMaker> {
+        if self.kind != Kind::Windows {
+            return None;
+        }
+        Some(self.gpu_maker.unwrap_or(if self.amd_gpu.is_empty() { GpuMaker::Nvidia } else { GpuMaker::Amd }))
+    }
+
+    /// The PCI address of the card a Windows guest's GPU-PV runs on, if it isn't setup's NVIDIA card.
+    pub fn windows_card_address(&self) -> Option<&str> {
         Some(self.amd_gpu.as_str()).filter(|pci| self.kind == Kind::Windows && !pci.is_empty())
     }
 
-    /// Why this machine can't move to the card at `pci`, empty being the NVIDIA card. A Windows guest
-    /// was installed with its card maker's driver, so it stays with that maker.
-    pub fn card_change_problem(&self, pci: &str) -> Option<&'static str> {
-        let same_maker = self.amd_gpu.is_empty() == pci.is_empty();
-        (self.kind == Kind::Windows && !same_maker).then_some(OTHER_MAKER)
+    /// The AMD card a Windows guest's GPU-PV runs on, by its PCI address. None is any other maker's.
+    pub fn windows_amd_card(&self) -> Option<&str> {
+        self.windows_card_address().filter(|_| self.windows_maker() == Some(GpuMaker::Amd))
+    }
+
+    /// Puts a Windows guest on the card at `pci`, which is `maker`'s. Empty is NVIDIA's.
+    pub fn use_windows_card(&mut self, maker: GpuMaker, pci: &str) {
+        self.amd_gpu = pci.to_owned();
+        self.gpu_maker = maker.recorded();
+    }
+
+    /// Why this machine can't move to a card made by `to`. A Windows guest was installed with its card
+    /// maker's driver, so it stays with that maker.
+    pub fn card_change_problem(&self, to: GpuMaker) -> Option<&'static str> {
+        let same_maker = self.windows_maker().is_none_or(|own| own == to);
+        (!same_maker).then_some(OTHER_MAKER)
     }
 
     /// Whether its disk and firmware file live in its folder, so deleting that takes them too.
@@ -448,13 +480,71 @@ mod tests {
 
     #[test]
     fn a_windows_guest_moves_only_to_a_card_of_the_same_maker() {
+        use GpuMaker::{Amd, Intel, Nvidia};
         let on_amd = Machine { amd_gpu: "0000:7c:00.0".into(), ..sample() };
-        assert_eq!(on_amd.card_change_problem("0000:03:00.0"), None);
-        assert!(on_amd.card_change_problem("").unwrap().contains("make a new machine"));
-        assert!(sample().card_change_problem("0000:7c:00.0").is_some());
-        assert_eq!(sample().card_change_problem(""), None);
+        let on_intel = Machine { gpu_maker: Some(Intel), ..on_amd.clone() };
+        for (machine, own) in [(sample(), Nvidia), (on_amd, Amd), (on_intel, Intel)] {
+            for card in GpuMaker::ALL {
+                let problem = machine.card_change_problem(card);
+                assert_eq!(problem.is_none(), card == own, "{own:?} to {card:?}");
+                assert!(problem.is_none_or(|text| text.contains("make a new machine")));
+            }
+        }
         let linux = Machine { kind: Kind::Linux, ..sample() };
-        assert_eq!(linux.card_change_problem("0000:7c:00.0"), None, "a Linux guest builds its Mesa again");
+        assert_eq!(linux.card_change_problem(Amd), None, "a Linux guest builds its Mesa again");
+    }
+
+    #[test]
+    fn a_file_from_before_other_makers_says_nvidia_for_no_address_and_amd_for_one() {
+        let nvidia: Machine = serde_json::from_str(&without_maker(&sample())).unwrap();
+        assert_eq!(nvidia.windows_maker(), Some(GpuMaker::Nvidia));
+        let on_amd = Machine { amd_gpu: "0000:7c:00.0".into(), ..sample() };
+        let amd: Machine = serde_json::from_str(&without_maker(&on_amd)).unwrap();
+        assert_eq!(
+            (amd.windows_maker(), amd.windows_card_address()),
+            (Some(GpuMaker::Amd), Some("0000:7c:00.0"))
+        );
+        let linux = Machine { kind: Kind::Linux, ..on_amd };
+        assert_eq!(linux.windows_maker(), None, "only Windows has a GPU-PV card");
+    }
+
+    fn without_maker(machine: &Machine) -> String {
+        let mut file: serde_json::Value = serde_json::to_value(machine).unwrap();
+        file.as_object_mut().unwrap().remove("gpu_maker");
+        file.to_string()
+    }
+
+    #[test]
+    fn nvidia_and_amd_machines_are_written_as_the_released_app_reads_them() {
+        let mut machine = sample();
+        for (maker, pci) in [(GpuMaker::Nvidia, ""), (GpuMaker::Amd, "0000:7c:00.0")] {
+            machine.use_windows_card(maker, pci);
+            let text = serde_json::to_string(&machine).unwrap();
+            assert!(!text.contains("gpu_maker"), "{maker:?}: {text}");
+            assert_eq!(text.contains("amd_gpu"), !pci.is_empty());
+            let read: Machine = serde_json::from_str(&text).unwrap();
+            assert_eq!(read.windows_maker(), Some(maker));
+        }
+    }
+
+    #[test]
+    fn an_intel_machine_keeps_its_maker_through_a_round_trip_and_an_old_file_reader_refuses_it() {
+        let mut machine = sample();
+        machine.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+        let text = serde_json::to_string(&machine).unwrap();
+        assert!(text.contains(r#""gpu_maker":"intel""#), "{text}");
+        let read: Machine = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            Machine { id: machine.id.clone(), ..read.clone() },
+            machine,
+            "the id is the folder's name"
+        );
+        assert_eq!((read.windows_maker(), read.windows_amd_card()), (Some(GpuMaker::Intel), None));
+        // The released app's Machine rejects fields it doesn't know, which is what keeps it from taking
+        // this one for an AMD machine. This build rejects an unknown field the same way.
+        let mut unknown: serde_json::Value = serde_json::from_str(&text).unwrap();
+        unknown["a_later_field"] = true.into();
+        assert!(serde_json::from_value::<Machine>(unknown).is_err());
     }
 
     #[test]

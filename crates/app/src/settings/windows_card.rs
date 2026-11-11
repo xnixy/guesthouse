@@ -42,7 +42,7 @@ impl WindowsCard {
             if saving.machine.borrow().amd_gpu == choice.pci {
                 return;
             }
-            saving.machine.borrow_mut().amd_gpu.clone_from(&choice.pci);
+            saving.machine.borrow_mut().use_windows_card(choice.maker, &choice.pci);
             saving.save();
         });
         group.add(&row);

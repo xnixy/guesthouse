@@ -39,8 +39,7 @@ fn card_of(drm_class: &Path, names: &Path, node: &str, maker: GpuMaker) -> Optio
     let number = hex_number(&sysfs_text(&device.join("device")))?;
     // Where the maker's devices start in pci.ids.
     let names_start = format!("\n{:04x}  ", maker.vendor());
-    let product =
-        product_name(&names_start, number, names).unwrap_or_else(|| format!("card {number:04x}"));
+    let product = product_name(&names_start, number, names).unwrap_or_else(|| format!("card {number:04x}"));
     let render_node = Path::new(RENDER_NODES).join(node);
     // Intel's own product names say who made them already.
     let name =

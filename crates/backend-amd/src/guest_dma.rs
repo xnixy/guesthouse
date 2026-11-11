@@ -82,7 +82,7 @@ fn layout(packet: &[u32]) -> Option<Layout> {
         }
         (OPCODE_COPY, COPY_LINEAR_WINDOW) => (13, vec![(1, Extent::Start), (6, Extent::Start)]),
         (OPCODE_COPY, COPY_TILED_WINDOW) => (14 + compressed, vec![(1, Extent::Start), (7, Extent::Start)]),
-        (OPCODE_COPY, COPY_TILED_TO_TILED) => (15 + compressed, vec![(1, Extent::Start), (8, Extent::Start)]),
+        (OPCODE_COPY, COPY_TILED_TO_TILED) => (15 + compressed, vec![(1, Extent::Start), (7, Extent::Start)]),
         (OPCODE_WRITE, WRITE_LINEAR) => {
             let dwords = (*packet.get(3)? & WRITE_COUNT_MASK) as usize + 1;
             (4 + dwords, vec![(1, Extent::Bytes(dwords as u64 * DWORD_BYTES))])
@@ -183,6 +183,19 @@ mod tests {
             named,
             [Reach { address: copy.tiled_address, bytes: 1 }, Reach { address: TARGET, bytes: 1 }]
         );
+    }
+
+    #[test]
+    fn a_copy_between_tiled_surfaces_names_where_both_start() {
+        let header = OPCODE_COPY | COPY_TILED_TO_TILED << SUB_OPCODE_SHIFT;
+        let mut copy = [0u32; 15];
+        copy[0] = header;
+        copy[1] = SOURCE as u32;
+        copy[2] = (SOURCE >> 32) as u32;
+        copy[7] = TARGET as u32;
+        copy[8] = (TARGET >> 32) as u32;
+        let named = reaches(&copy);
+        assert_eq!(named, [Reach { address: SOURCE, bytes: 1 }, Reach { address: TARGET, bytes: 1 }]);
     }
 
     #[test]

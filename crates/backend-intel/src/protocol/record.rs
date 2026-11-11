@@ -38,10 +38,6 @@ mod at {
     pub const REVISION: usize = 0x21E;
     pub const GT_TYPE: usize = 0x228;
     pub const RENDER_IP: usize = 0x238;
-    pub const MEDIA_IP: usize = 0x23C;
-    /// A four-bit entry of the workaround table, WaLLCCachingUnsupported, which the kernel driver
-    /// turns on for a virtual machine. It sits in this byte's low half.
-    pub const WA_NO_LLC_CACHING: usize = 0x584;
     pub const TIMESTAMP_FREQUENCY: usize = 0x998;
     pub const MIN_RENDER_FREQUENCY: usize = 0x9AC;
     pub const MAX_RENDER_FREQUENCY: usize = 0x9B0;
@@ -81,7 +77,6 @@ pub struct Platform {
     pub revision: u16,
     pub gt_type: u32,
     pub render_ip: IpWord,
-    pub media_ip: IpWord,
 }
 
 /// An IP version as the record packs it: architecture in bits 22 to 31, release in 14 to 21 and
@@ -133,7 +128,7 @@ pub struct RecordFacts {
     pub platform: Platform,
     pub gt: GtSystem,
     /// The GPU timestamp's frequency, in Hz.
-    pub timestamp_hz: u64,
+    pub timestamp_hz: u32,
     /// The render clock's least and most, in MHz.
     pub render_mhz: (u32, u32),
     pub memory: Memory,
@@ -152,14 +147,13 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
         (at::PLATFORM_TYPE, platform.platform_type),
         (at::GT_TYPE, platform.gt_type),
         (at::RENDER_IP, platform.render_ip.0),
-        (at::MEDIA_IP, platform.media_ip.0),
     ] {
         put_dword(&mut record, field, value);
     }
     put_word(&mut record, at::DEVICE_ID, platform.device_id);
     put_word(&mut record, at::REVISION, platform.revision);
 
-    put_qword(&mut record, at::TIMESTAMP_FREQUENCY, facts.timestamp_hz);
+    put_dword(&mut record, at::TIMESTAMP_FREQUENCY, facts.timestamp_hz);
     put_dword(&mut record, at::MIN_RENDER_FREQUENCY, facts.render_mhz.0);
     put_dword(&mut record, at::MAX_RENDER_FREQUENCY, facts.render_mhz.1);
     put_dword(&mut record, at::NUMBER_OF_EUS, facts.gt.eu_count);
@@ -186,7 +180,6 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     set_features(&mut record, facts.local_memory);
     record[at::FROM_VIRTUAL_MACHINE] = 1;
     record[at::SECURE_VIRTUAL_MACHINE] = 0;
-    record[at::WA_NO_LLC_CACHING] |= 1;
     record
 }
 
@@ -296,7 +289,6 @@ pub(crate) mod tests {
                 revision: 4,
                 gt_type: 18,
                 render_ip: IpWord::new(20, 4, 4),
-                media_ip: IpWord::new(20, 0, 4),
                 ..Platform::default()
             },
             gt: GtSystem { eu_count: 64, thread_count: 512, dual_subslice_count: 8, ..GtSystem::default() },
@@ -328,7 +320,6 @@ pub(crate) mod tests {
         assert_eq!(IpWord::new(20, 4, 0x41).0 & 0x3F, 1, "the revision has six bits");
         let record = build(&facts());
         assert_eq!(dword(&record, at::RENDER_IP), Some(IpWord::new(20, 4, 4).0));
-        assert_eq!(dword(&record, at::MEDIA_IP), Some(IpWord::new(20, 0, 4).0));
     }
 
     #[test]
@@ -336,7 +327,6 @@ pub(crate) mod tests {
         let record = build(&facts());
         assert_eq!(record[at::FROM_VIRTUAL_MACHINE], 1);
         assert_eq!(record[at::SECURE_VIRTUAL_MACHINE], 0);
-        assert_eq!(record[at::WA_NO_LLC_CACHING] & 0xF, 1);
     }
 
     #[test]
@@ -364,7 +354,8 @@ pub(crate) mod tests {
     #[test]
     fn clocks_counts_and_memory_land_where_they_belong() {
         let record = build(&facts());
-        assert_eq!(qword(&record, at::TIMESTAMP_FREQUENCY), Some(19_200_000));
+        assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY), Some(19_200_000));
+        assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY + 4), Some(0), "a 32-bit field");
         assert_eq!(dword(&record, at::MIN_RENDER_FREQUENCY), Some(400));
         assert_eq!(dword(&record, at::MAX_RENDER_FREQUENCY), Some(2050));
         assert_eq!(dword(&record, at::NUMBER_OF_EUS), Some(64));

@@ -83,6 +83,14 @@ impl IntelBackend {
         let generation = generation::for_render_ip(ip).ok_or_else(|| {
             Refusal(format!("This Intel card's graphics IP is {ip}, which this build has no profile for."))
         })?;
+        // compute-runtime works out threads per EU by dividing the thread count by the EU count, so a
+        // record with none would stop it at the start, or worse.
+        if card.eu_count() == 0 {
+            return Err(Refusal(
+                "The xe driver reported no EUs for this Intel card, so the guest can't be told its shape."
+                    .into(),
+            ));
+        }
         let shared = card.system_memory() / SHARED_MEMORY_PART;
         let record = record::build(&record_facts(&card, generation, shared));
         let facts = AdapterFacts {
@@ -176,7 +184,6 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
             revision: card.pci.revision.into(),
             gt_type: generation.gt_type,
             render_ip: ip(card.main_gt()),
-            media_ip: ip(card.media_gt()),
         },
         gt: GtSystem {
             eu_count: eus,
@@ -189,7 +196,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
             max_subslices: most_dual_subslices,
             max_dual_subslices: most_dual_subslices,
         },
-        timestamp_hz: card.main_gt().map_or(0, |gt| gt.reference_clock.into()),
+        timestamp_hz: card.main_gt().map_or(0, |gt| gt.reference_clock),
         render_mhz: (card.frequencies.lowest.unwrap_or(0), card.frequencies.highest.unwrap_or(0)),
         memory: Memory { dedicated: 0, system_shared: shared, system_video: 0 },
         local_memory: card.config.has_vram(),
@@ -465,6 +472,14 @@ mod tests {
         assert_eq!((summary.product_family, summary.render_core, summary.device_id), (1275, 0xC09, 0x64A0));
         assert_eq!(summary.render_ip, IpWord::new(20, 4, 4).0);
         assert_eq!((summary.eu_count, summary.virtual_machine, summary.compression), (64, 1, false));
+    }
+
+    #[test]
+    fn a_card_with_no_eus_is_refused_in_plain_words() {
+        let mut card = card::tests::lunar_lake();
+        card.topology.clear();
+        let refusal = IntelBackend::from_card(card).unwrap_err();
+        assert!(refusal.0.contains("no EUs"), "{}", refusal.0);
     }
 
     #[test]

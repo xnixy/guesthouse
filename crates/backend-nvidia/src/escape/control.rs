@@ -167,7 +167,15 @@ pub(super) fn run<R: Rm>(
         return Ok(());
     }
     let target = device.control_target(command);
-    let status = device.rm.control(target, command, params)?;
+    let status = match device.guest_control(command).and_then(|control| control.host) {
+        Some(layout) => {
+            let mut host = layout.to_host(params);
+            let status = device.rm.control(target, command, &mut host)?;
+            layout.to_guest(&host, params);
+            status
+        }
+        None => device.rm.control(target, command, params)?,
+    };
     put(data, CONTROL_STATUS, status);
     Ok(())
 }
@@ -260,6 +268,36 @@ mod tests {
             Call::Control { command, .. } => *command == wanted,
             _ => false,
         })
+    }
+
+    const ECC_STATUS: u32 = 0x2080_012F;
+
+    #[test]
+    fn a_control_that_grew_on_the_hosts_branch_is_carried_across() {
+        let mut rm = FakeRm::new();
+        rm.answer(crate::rm::classes::CONTROL_GET_GPU_ID, |params| {
+            params[..4].copy_from_slice(&0x300u32.to_le_bytes());
+            0
+        });
+        rm.answer(ECC_STATUS, |params| {
+            params[1800] = 1;
+            params[1804..1808].copy_from_slice(&7u32.to_le_bytes());
+            0
+        });
+        let mut device = Device::open(rm, &crate::profile::HOST_620).unwrap();
+        let mut data = control(ECC_STATUS, 1664);
+        put(&mut data, CONTROL_PARAMS + 1648, 0xABCD);
+        run(&mut device, &NO_FACTS, &mut data).unwrap();
+        let sent = device.rm.calls.iter().find_map(|call| match call {
+            Call::Control { command: ECC_STATUS, params, .. } => Some(params.clone()),
+            _ => None,
+        });
+        let sent = sent.expect("it reached the RM");
+        assert_eq!(sent.len(), 1824);
+        assert_eq!(get(&sent, 1808), Some(0xABCD));
+        assert_eq!(data[CONTROL_PARAMS + 1640], 1);
+        assert_eq!(get(&data, CONTROL_PARAMS + 1644), Some(7));
+        assert_eq!(get(&data, CONTROL_STATUS), Some(0));
     }
 
     #[test]

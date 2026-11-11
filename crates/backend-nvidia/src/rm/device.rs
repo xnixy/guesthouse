@@ -8,7 +8,7 @@ use super::instance::device_instance_at;
 use super::listing::CardPlace;
 use super::{DmaMap, Handle, Rm, RmError};
 use crate::guest_clock::GuestClock;
-use crate::profile::HostBranch;
+use crate::profile::{GuestControl, HostBranch};
 use guesthouse_backend::{MemoryKind, PciAddress};
 use std::os::fd::OwnedFd;
 
@@ -165,10 +165,19 @@ impl<R: Rm> Device<R> {
         RmError::check(|| format!("control {command:#x}"), status)
     }
 
+    /// A control a guest may run, if it's on this branch's list.
+    pub fn guest_control(&self, command: u32) -> Option<GuestControl> {
+        self.sizes.guest_controls.iter().find(|control| control.command == command).copied()
+    }
+
     /// The size of a control's parameters, if a guest may run it.
     pub fn guest_control_size(&self, command: u32) -> Option<usize> {
-        let found = self.sizes.guest_controls.iter().find(|control| control.command == command);
-        found.map(|control| control.params_size)
+        self.guest_control(command).map(|control| control.params_size)
+    }
+
+    /// The size this branch's driver takes for a listed control.
+    pub fn host_control_size(&self, command: u32) -> Option<usize> {
+        self.guest_control(command).map(|control| control.host_size())
     }
 
     /// The object a control belongs on, from the class in the top half of its number.

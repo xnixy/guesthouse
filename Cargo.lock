@@ -555,6 +555,7 @@ name = "guesthouse-app-core"
 version = "0.4.1"
 dependencies = [
  "chrono",
+ "guesthouse-backend-nvidia",
  "guesthouse-daemon",
  "guesthouse-jail",
  "guesthouse-sensors",

@@ -30,10 +30,15 @@ pub fn branch(version: &str) -> &str {
     version.split('.').next().unwrap_or(version)
 }
 
-/// Says why a driver's branch can't run here, or `None` if it's known.
+/// Says why a driver's branch can't run a Linux guest, or `None` if it's known.
 pub fn branch_refusal(loaded: &str) -> Option<String> {
     let mut known: Vec<&str> = TESTED_VERSIONS.iter().map(|version| branch(version)).collect();
     known.dedup();
+    branch_refusal_among(loaded, &known)
+}
+
+/// Says why a driver's branch isn't one of these, or `None` if it is.
+pub fn branch_refusal_among(loaded: &str, known: &[&str]) -> Option<String> {
     (!known.contains(&branch(loaded))).then(|| {
         format!(
             "The host's driver {loaded} is from branch {}, and I only know branch {}. Install a driver from \

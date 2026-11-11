@@ -24,6 +24,8 @@ name = "guesthouse-jail"
 path = "src/bin/jail.rs"
 
 [dependencies]
+# The NVIDIA backend's driver profiles, so setup knows the daemon's branches. It opens nothing.
+guesthouse-backend-nvidia.workspace = true
 # Only for its slot names, so the app and the daemon can never disagree about what a VM owns.
 guesthouse-daemon.workspace = true
 # The jail QEMU runs in, which guesthouse-jail puts it in, and what this PC's kernel offers for one.

@@ -63,9 +63,10 @@ impl<'a, R: Rm> CardReader<'a, R> {
         Self { device }
     }
 
-    /// Runs a control with these parameters at the front.
+    /// Runs a control with these parameters at the front, at the size this branch's driver takes.
     pub fn read(&mut self, control: Control, params: &[u8]) -> Result<Vec<u8>, RmError> {
         let (command, size) = control;
+        let size = self.device.host_control_size(command).unwrap_or(size);
         let mut buffer = params.to_vec();
         buffer.resize(size.max(params.len()), 0);
         let target = self.device.control_target(command);

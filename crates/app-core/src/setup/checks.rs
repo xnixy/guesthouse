@@ -5,10 +5,11 @@ use crate::context::Context;
 use crate::host::{RamOffer, free_gib, total_ram};
 use crate::iso::any_iso_maker;
 use crate::library::INSTALL_ROOM_GIB;
-use crate::linux::driver_versions::{branch_refusal, untested_warning};
+use crate::linux::driver_versions::{branch_refusal, branch_refusal_among, untested_warning};
 use crate::machine::MIN_RAM_GIB;
 use crate::usb::sysfs_text;
 use crate::vm_args::on_path;
+use guesthouse_backend_nvidia::profile::BRANCHES;
 use rustix::fs::{Access, access};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -302,12 +303,20 @@ pub fn check_pc(context: &Context) -> Vec<Check> {
     ]
 }
 
+/// The branches the NVIDIA backend has a profile for, which a Windows guest can run on. Linux guests
+/// forward the driver's own calls, and know only the branches in `driver_versions`.
+fn windows_host_branches() -> Vec<&'static str> {
+    BRANCHES.iter().map(|branch| branch.name).collect()
+}
+
 /// A host driver on a branch this build has no profile for runs nothing on the card, whatever else is
 /// right, so the GPU's verdict needs this as well as the version check above.
 fn check_driver_branch(context: &Context) -> Option<Check> {
     const TITLE: &str = "Host driver branch";
     let version = sysfs_text(&context.driver_version_file);
-    let refusal = Some(version).filter(|text| !text.is_empty()).and_then(|text| branch_refusal(&text))?;
+    let refusal = Some(version)
+        .filter(|text| !text.is_empty())
+        .and_then(|text| branch_refusal_among(&text, &windows_host_branches()))?;
     Some(Check::new(TITLE, CheckState::Failed, refusal, BRANCH_FIX))
 }
 
@@ -343,16 +352,18 @@ mod tests {
         assert!(check_driver_branch(&context).is_none(), "the driver check says when none is loaded");
         context.driver_version_file = scratch.write("version", "615.90.01\n");
         assert!(check_driver_branch(&context).is_none(), "another point release only warns");
-        fs::write(&context.driver_version_file, "620.11\n").unwrap();
+        fs::write(&context.driver_version_file, "620.70.06\n").unwrap();
+        assert!(check_driver_branch(&context).is_none(), "the backend has a profile for 620");
+        fs::write(&context.driver_version_file, "999.11\n").unwrap();
         let found = check_driver_branch(&context).unwrap();
-        assert!(found.state == CheckState::Failed && found.text.contains("620"));
+        assert!(found.state == CheckState::Failed && found.text.contains("999"));
     }
 
     #[test]
     fn a_failed_host_check_turns_the_gpu_off_and_room_does_not() {
         let scratch = Scratch::new();
         let mut context = scratch_context(&scratch);
-        context.driver_version_file = scratch.write("version", "620.11\n");
+        context.driver_version_file = scratch.write("version", "999.11\n");
         let report = check_host(&context);
         assert!(!report.gpu);
         assert!(report.checks.iter().any(|check| check.title == "Host driver branch"));

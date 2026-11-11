@@ -30,6 +30,7 @@ They're in `crates/`, listed here from the bottom up. Each depends only on crate
 | `backend-standin` | A pretend GPU, for tests only. |
 | `backend-nvidia` | The NVIDIA backend: the host's resource manager, channels, and what the guest's driver expects to hear. |
 | `backend-amd` | The AMD backend: the host's amdgpu through its DRM ioctls, and the private data AMD's Windows driver sends. Experimental. |
+| `backend-intel` | The Intel backend's first stage: the card read through xe's queries, and the private data Intel's Windows driver sends, answered and logged with nothing run on the card. |
 | `core` | `Session`: the tables for one guest, and the answer to each message. Vendor-neutral. |
 | `frame-socket` | The messages that bring frames and the cursor to a viewer, on their own so a producer can use them as they are. |
 | `daemon` | Slots, shared memory, sockets, the viewer's socket, and the main loop. |
@@ -104,11 +105,13 @@ A vendor backend implements `Backend` and depends on the `backend` crate. It nev
 
 If you find yourself wanting to name a vendor in `core`, something belongs in a backend instead.
 
-`backend-amd` is the second backend, through this same trait. With both built in, each guest's daemon opens the card the app named for that machine. An Intel backend should fit the same way, and there's no stub for one.
+`backend-amd` is the second backend, through this same trait, and `backend-intel` the third. With more than one built in, each guest's daemon opens the card the app named for that machine.
 
 `backend-nvidia` goes through `rm::Rm` for everything it asks of the host's driver. `rm/linux.rs` is the real one and `rm/fake.rs` plays its part in tests, so the whole crate can be tested with no card.
 
 `backend-amd` goes through amdgpu's render node. Each guest address space gets its own VM on the card, every submission names the buffers its space holds so amdgpu keeps them in place while it runs, and tiled frames reach the screen through a copy on the card's DMA engine. A frame for the viewer's ring is a copy to a surface of the slot's shape: one plain DMA copy when both have the same pitch, as the CPU reads video memory slowly, and otherwise the screen's way. The display driver's slots are linear buffers made with CPU access, so the CPU reads their stamps.
+
+`backend-intel` is a stage that listens. It reads the card through xe's read-only queries and sysfs and makes nothing on it. The guest gets the adapter record its driver opens with, its private data is checked the way Intel's kernel driver checks it, and its work comes back finished without running. Every exchange that is Intel's own gets a log line starting with `intel`, in `traffic.rs`, and the first few of each kind are at info so a busy guest doesn't flood the log. Its crate documentation says where the trait doesn't fit Intel yet. `docs/intel.md` says what it's for.
 
 ## Frames
 

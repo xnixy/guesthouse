@@ -455,7 +455,13 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 "address update waits on {fence:#x}, which is no sync object or queue here, so it runs now"
             );
         }
-        if self.fence_reached(fence, value) {
+        if request.no_wait || self.fence_reached(fence, value) {
+            if request.no_wait && !self.fence_reached(fence, value) {
+                log::debug!(
+                    "update in {space:?} runs now as asked, with fence {fence:#x} not yet at {value}: {}",
+                    describe_operations(request.raw_operations())
+                );
+            }
             let applied = self.apply_updates(request.raw_operations(), space);
             if applied.is_err() {
                 self.stop_space(space);

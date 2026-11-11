@@ -9,9 +9,10 @@
 use crate::protocol::allocation::{self, Resource};
 use crate::protocol::command_header::{self, Compact, Header};
 use crate::protocol::context::{self, Context};
-use crate::protocol::escape::{self, Escape};
+use crate::protocol::escape::{self, Escape, PartitionAsk};
 use crate::protocol::guest_driver::NameAnswer;
 use crate::protocol::hw_queue::{self, Queue};
+use crate::protocol::partition;
 use crate::protocol::record::Asked;
 use crate::watch::{Hex, PREFIX, Seen, Undecoded, dump, tell};
 use guesthouse_backend::{RegistryName, Status, VendorQuery, Work, WorkSource};
@@ -108,7 +109,7 @@ impl Traffic {
         tell!(telling, "{PREFIX} registry name=\"{shown}\" {answer}");
     }
 
-    pub fn escape(&mut self, process: u32, data: &[u8], escape: &Escape) {
+    pub fn escape(&mut self, process: u32, data: &[u8], escape: &Escape, partition: Option<PartitionAsk>) {
         let kind = (escape.code, escape.minor_code, escape.gmm_action, escape.length, escape.verdict);
         let telling = self.escapes.worth_telling(kind);
         let action = DisplayOption(escape.gmm_action.map(|action| HexNumber(action.into())));
@@ -116,7 +117,7 @@ impl Traffic {
         tell!(
             telling,
             "{PREFIX} escape process={process:#x} length={} payload_size={} checksum={:#x} code={:#x} minor={:#x} \
-             gmm_action={action} kernel_would={} why=\"{}\" answer=echoed payload={}",
+             gmm_action={action} kernel_would={} why=\"{}\" answer={} payload={}",
             escape.length,
             escape.payload_size,
             escape.checksum,
@@ -124,10 +125,27 @@ impl Traffic {
             escape.minor_code,
             escape.verdict.word(),
             escape.verdict.why(),
+            match partition {
+                Some(PartitionAsk::Get) => "partition",
+                _ => "echoed",
+            },
             Hex { bytes: payload, most: ESCAPE_BYTES_SHOWN }
         );
         if telling {
             dump(format_args!("escape code={:#x}", escape.code), data);
+        }
+        match partition {
+            Some(PartitionAsk::Get) => log::info!(
+                "{PREFIX} partition process={process:#x} ask=get answered=[{}]",
+                partition::Text(partition::read(&data[escape::HEADER_SIZE + 8..]))
+            ),
+            Some(PartitionAsk::Set(theirs)) => {
+                log::info!(
+                    "{PREFIX} partition process={process:#x} ask=set kept=[{}]",
+                    partition::Text(theirs)
+                )
+            }
+            None => {}
         }
     }
 

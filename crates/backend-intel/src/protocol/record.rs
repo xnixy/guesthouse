@@ -13,6 +13,7 @@
 
 use super::bytes::{dword, put_dword, put_qword, put_word};
 use super::features::{self, Feature};
+use super::partition;
 use guesthouse_backend::{Status, VendorQuery};
 
 /// KMTQAITYPE_UMDRIVERPRIVATE.
@@ -56,6 +57,8 @@ mod at {
     pub const MAX_SLICES: usize = 0xB98;
     pub const MAX_SUBSLICES: usize = 0xB9C;
     pub const MAX_DUAL_SUBSLICES: usize = 0xBA0;
+    /// GMM_GFX_PARTITIONING, [`super::partition`].
+    pub const PARTITION: usize = 0x23B8;
     /// A byte, set when the query came from a virtual machine.
     pub const FROM_VIRTUAL_MACHINE: usize = 0x2468;
     /// A byte, set when that machine is a secure one.
@@ -178,6 +181,8 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     }
 
     set_features(&mut record, facts.local_memory);
+    let block = &mut record[at::PARTITION..at::PARTITION + partition::SIZE];
+    partition::write(block, &partition::ours());
     record[at::FROM_VIRTUAL_MACHINE] = 1;
     record[at::SECURE_VIRTUAL_MACHINE] = 0;
     record
@@ -377,8 +382,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_gpu_address_partition_is_a_gap_left_at_zero() {
-        assert!(build(&facts())[0x23B8..0x2468].iter().all(|&byte| byte == 0));
+    fn the_record_carries_the_partition_the_escape_gives() {
+        let record = build(&facts());
+        assert_eq!(
+            partition::read(&record[at::PARTITION..at::PARTITION + partition::SIZE]),
+            partition::ours()
+        );
+        assert_eq!(
+            at::PARTITION + partition::SIZE,
+            at::FROM_VIRTUAL_MACHINE,
+            "it ends where the next field starts"
+        );
     }
 
     #[test]

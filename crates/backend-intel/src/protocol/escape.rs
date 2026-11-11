@@ -12,6 +12,7 @@
 //! the log.
 
 use super::bytes::dword;
+use super::partition::{self, Range};
 
 pub const HEADER_SIZE: usize = 16;
 const PAYLOAD_SIZE: usize = 0x0;
@@ -28,6 +29,36 @@ pub const GMM_CONTROL: u32 = 2;
 const DONE_AT_ONCE: [u8; 4] = *b"GOOG";
 /// An escape this long that fails the checks goes to an older handler instead.
 const OLDER_FORM_SIZE: usize = 0x30;
+
+/// A memory manager escape about the partition: an action, a dword of padding, the partition, and
+/// two dwords after it. Get and set have different action numbers in different releases of Intel's
+/// open sources, so which one came is told by the partition: a guest asking for it sends it empty.
+const PARTITION_PAYLOAD: usize = 8 + partition::SIZE + 8;
+const PARTITION_AT: usize = HEADER_SIZE + 8;
+
+/// What a partition escape was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionAsk {
+    /// It came empty and goes back with `ours`.
+    Get,
+    /// It came with the guest's own partition, which goes back as it came.
+    Set([Range; 11]),
+}
+
+/// Answers a partition escape with `ours`, if this is one.
+pub fn answer_partition(data: &mut [u8], ours: &[Range; 11]) -> Option<PartitionAsk> {
+    let is_partition =
+        data.len() == HEADER_SIZE + PARTITION_PAYLOAD && dword(data, CODE) == Some(GMM_CONTROL);
+    if !is_partition {
+        return None;
+    }
+    let block = &mut data[PARTITION_AT..PARTITION_AT + partition::SIZE];
+    if block.iter().any(|&byte| byte != 0) {
+        return Some(PartitionAsk::Set(partition::read(block)));
+    }
+    partition::write(block, ours);
+    Some(PartitionAsk::Get)
+}
 
 /// What the kernel driver would make of an escape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -133,6 +164,31 @@ pub(crate) mod tests {
             (GMM_CONTROL, Some(0x1D), Verdict::Taken)
         );
         assert_eq!(escape.length, HEADER_SIZE + 0xC0);
+    }
+
+    #[test]
+    fn an_empty_partition_is_answered_with_ours_and_a_set_one_is_left_as_it_came() {
+        let ours = partition::ours();
+        let mut asked = gmm(0x1D, PARTITION_PAYLOAD);
+        assert_eq!(answer_partition(&mut asked, &ours), Some(PartitionAsk::Get));
+        assert_eq!(partition::read(&asked[PARTITION_AT..]), ours);
+        assert_eq!(dword(&asked, HEADER_SIZE), Some(0x1D), "the action is kept");
+
+        let mut set = gmm(0x1E, PARTITION_PAYLOAD);
+        set[PARTITION_AT] = 0x40;
+        let before = set.clone();
+        let Some(PartitionAsk::Set(theirs)) = answer_partition(&mut set, &ours) else { panic!("a set") };
+        assert_eq!(theirs[0].base, 0x40);
+        assert_eq!(set, before);
+    }
+
+    #[test]
+    fn other_escapes_are_not_partitions() {
+        let ours = partition::ours();
+        assert_eq!(answer_partition(&mut gmm(0x1D, PARTITION_PAYLOAD - 4), &ours), None);
+        let mut other_code = gmm(0x1D, PARTITION_PAYLOAD);
+        put_dword(&mut other_code, CODE, 3);
+        assert_eq!(answer_partition(&mut other_code, &ours), None);
     }
 
     #[test]

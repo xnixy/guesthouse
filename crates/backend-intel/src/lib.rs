@@ -156,6 +156,7 @@ impl IntelBackend {
             log::warn!("{PREFIX} card query=\"{what}\" unanswered=\"{error}\"");
         }
         log::info!("{PREFIX} record {}", record::summary(&self.record));
+        log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
         for gap in gaps::RECORD {
             log::info!("{PREFIX} record-gap \"{gap}\"");
         }
@@ -329,10 +330,12 @@ impl Backend for IntelBackend {
         log::info!("{PREFIX} guest-restarted");
     }
 
-    /// Answered by leaving the guest's buffer as it came.
+    /// A partition escape asking for one gets the record's. Every other is answered by leaving the
+    /// guest's buffer as it came.
     fn escape(&mut self, process: u32, data: &mut [u8], _books: &GuestBooks<'_>) {
         let escape = Escape::parse(data);
-        self.traffic.escape(process, data, &escape);
+        let partition = protocol::escape::answer_partition(data, &protocol::partition::ours());
+        self.traffic.escape(process, data, &escape, partition);
     }
 
     fn adapter_answer(&mut self, query: &VendorQuery<'_>, out: &mut Vec<u8>) -> Option<Status> {

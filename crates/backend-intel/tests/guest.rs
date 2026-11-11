@@ -9,7 +9,7 @@ mod common;
 
 use common::*;
 use guesthouse_backend::GuestMemory;
-use guesthouse_backend_intel::protocol::{context, escape, record};
+use guesthouse_backend_intel::protocol::{context, escape, partition, record};
 use guesthouse_messages::wire::{set_u32, set_u64, u32_at, u64_at};
 use guesthouse_messages::{Command, HEADER_SIZE, Status};
 
@@ -120,7 +120,22 @@ fn a_submission_to_a_context_is_finished_unrun_too() {
 }
 
 #[test]
-fn an_escape_comes_back_as_it_was_sent() {
+fn an_escape_that_is_not_a_partition_comes_back_as_it_was_sent() {
+    let mut session = guest();
+    const PAYLOAD: usize = 0x18;
+    let mut data = vec![0u8; escape::HEADER_SIZE + PAYLOAD];
+    set_u32(&mut data, 0, PAYLOAD as u32);
+    set_u32(&mut data, 8, escape::GMM_CONTROL);
+    set_u32(&mut data, escape::HEADER_SIZE, 0x1B);
+    let mut request = message(Command::DriverEscape, HEADER_SIZE + 24);
+    set_u32(&mut request, HEADER_SIZE + 16, data.len() as u32);
+    request.extend_from_slice(&data);
+    let reply = send(&mut session, &request);
+    assert_eq!(reply[..data.len()], data);
+}
+
+#[test]
+fn an_empty_partition_escape_gets_the_partition_the_record_has() {
     let mut session = guest();
     const PAYLOAD: usize = 0xC0;
     let mut data = vec![0u8; escape::HEADER_SIZE + PAYLOAD];
@@ -131,5 +146,8 @@ fn an_escape_comes_back_as_it_was_sent() {
     set_u32(&mut request, HEADER_SIZE + 16, data.len() as u32);
     request.extend_from_slice(&data);
     let reply = send(&mut session, &request);
-    assert_eq!(reply[..data.len()], data);
+    let given = partition::read(&reply[escape::HEADER_SIZE + 8..]);
+    assert_eq!(given, partition::ours());
+    let record = query(&mut session, record::QUERY_TYPE, &vec![0; record::RECORD_SIZE]);
+    assert_eq!(partition::read(&record[4 + 0x23B8..]), given);
 }

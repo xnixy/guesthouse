@@ -21,7 +21,7 @@ pub const RECORD: [&str; 18] = [
     "the cache sizes and bank count",
     "the slice, subslice and EU arrays of the GPU's shape, which compute-runtime needs to open a device",
     "the second video engine, compute engine and multi-tile blocks of the GPU's shape",
-    "the GPU address partition",
+    "the GPU address partition's eleventh range, which has no name",
     "the adapter's bus, device and function",
     "the names, counts and flags at the record's end",
     "the deferred wait block",

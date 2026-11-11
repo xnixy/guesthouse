@@ -213,7 +213,7 @@ fn set_features(record: &mut [u8], local_memory: bool) {
 }
 
 /// What a record query asked for, for the log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Asked {
     Count,
     Record { build_stamp: u32 },

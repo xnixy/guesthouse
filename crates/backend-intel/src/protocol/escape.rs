@@ -30,7 +30,7 @@ const DONE_AT_ONCE: [u8; 4] = *b"GOOG";
 const OLDER_FORM_SIZE: usize = 0x30;
 
 /// What the kernel driver would make of an escape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Verdict {
     Taken,
     /// Answered as done without looking further.
@@ -41,13 +41,19 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// One word for the log.
     pub fn word(&self) -> &'static str {
         match self {
-            Self::Taken => "taken",
-            Self::DoneAtOnce => "done-at-once",
-            Self::OlderForm => "older-form",
-            Self::Refused(why) => why,
+            Self::Taken => "take",
+            Self::DoneAtOnce => "answer-at-once",
+            Self::OlderForm => "pass-to-older-handler",
+            Self::Refused(_) => "refuse",
         }
+    }
+
+    /// Why it would be refused, or `-`.
+    pub fn why(&self) -> &'static str {
+        if let Self::Refused(why) = self { why } else { "-" }
     }
 }
 

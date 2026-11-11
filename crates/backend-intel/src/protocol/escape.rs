@@ -1,15 +1,16 @@
-//! A driver escape: the guest's driver talking to its kernel driver directly.
+//! A driver escape: private data the guest's driver sends to the vendor's kernel driver directly.
 //!
-//! Every escape starts with a 16-byte header, GFX_ESCAPE_HEADER: the payload's size, a checksum,
-//! the escape code, and a minor code or a reserved word. The kernel driver checks the size against
-//! the header, except for a few codes, and the code against its table. It never checks the
-//! checksum. The memory manager's escapes all use [`GMM_CONTROL`], with what they ask for in the
-//! payload's first dword.
+//! Every escape here starts with a 16-byte header, GFX_ESCAPE_HEADER as compute-runtime defines it:
+//! the payload's size, a checksum, the escape code, and a minor code or a reserved word. This
+//! backend judges each escape by a few rules: it must be at least its header, its code must be
+//! below [`CODES`], and its length must be the header's size and the header, except for the codes
+//! in [`ANY_SIZE`]. The checksum is logged and not judged. A payload starting with
+//! [`DONE_AT_ONCE`] counts as answered at once, and an escape of [`OLDER_FORM_SIZE`] bytes that
+//! fails the rules counts as an older form whose rules aren't known. The memory manager's escapes
+//! use [`GMM_CONTROL`], with what they ask for in the payload's first dword.
 //!
-//! No escape is answered in this stage: the guest gets its buffer back as it sent it. The core
-//! gives an escape no status of its own, so even one the kernel driver would refuse comes back
-//! looking answered. What each one was, and whether the kernel driver would have taken it, goes to
-//! the log.
+//! The partition escape is answered, in [`answer_partition`]. Any other comes back as the guest
+//! sent it. The core gives an escape no status of its own, so the verdict only goes to the log.
 
 use super::bytes::dword;
 use super::partition::{self, Range};
@@ -19,20 +20,20 @@ const PAYLOAD_SIZE: usize = 0x0;
 const CHECKSUM: usize = 0x4;
 const CODE: usize = 0x8;
 const MINOR_CODE: usize = 0xC;
-/// Codes the kernel driver has a table entry for are below this.
+/// Codes below this are judged known.
 const CODES: u32 = 0x70;
-/// Codes the kernel driver lets through with any size.
+/// Codes whose length isn't judged.
 const ANY_SIZE: [u32; 4] = [0x01, 0x14, 0x15, 0x6A];
 /// GFX_ESCAPE_GMM_CONTROL, from compute-runtime.
 pub const GMM_CONTROL: u32 = 2;
-/// A payload starting with these four letters is answered as done at once.
+/// A payload starting with these four letters counts as answered at once.
 const DONE_AT_ONCE: [u8; 4] = *b"GOOG";
-/// An escape this long that fails the checks goes to an older handler instead.
+/// An escape this long that fails the rules counts as an older form.
 const OLDER_FORM_SIZE: usize = 0x30;
 
 /// A memory manager escape about the partition: an action, a dword of padding, the partition, and
-/// two dwords after it. Get and set have different action numbers in different releases of Intel's
-/// open sources, so which one came is told by the partition: a guest asking for it sends it empty.
+/// two dwords after it. Which action number asks and which sets isn't settled here, so which one
+/// came is told by the partition: an ask carries it empty.
 const PARTITION_PAYLOAD: usize = 8 + partition::SIZE + 8;
 const PARTITION_AT: usize = HEADER_SIZE + 8;
 
@@ -60,13 +61,13 @@ pub fn answer_partition(data: &mut [u8], ours: &[Range; 11]) -> Option<Partition
     Some(PartitionAsk::Get)
 }
 
-/// What the kernel driver would make of an escape.
+/// What this backend's rules make of an escape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Verdict {
     Taken,
     /// Answered as done without looking further.
     DoneAtOnce,
-    /// Not taken as an escape of this kind, but by the older handler, whose rules aren't known.
+    /// An older form, whose rules aren't known.
     OlderForm,
     Refused(&'static str),
 }
@@ -125,7 +126,7 @@ impl Escape {
         let refused = if self.length < HEADER_SIZE {
             Some("shorter than its header")
         } else if self.code >= CODES {
-            Some("a code past the kernel driver's table")
+            Some("a code past those judged known")
         } else if !ANY_SIZE.contains(&self.code)
             && self.length as u64 != u64::from(self.payload_size) + HEADER_SIZE as u64
         {

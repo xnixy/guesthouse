@@ -1,17 +1,16 @@
 //! A new context's private data, CREATECONTEXT_PVTDATA.
 //!
-//! The guest's driver sends it with every context. The kernel driver takes none at all, or at
-//! least [`SIZE`] bytes. Most of it is what the kernel driver would set up for the context itself:
-//! what the context is for, its power hint, its preemption. On this host the kernel's own driver
-//! sets those up its own way, so they are only read here, for the log.
+//! This backend takes none at all, or at least [`SIZE`] bytes, the least the vendor's kernel driver
+//! would take. Its fields say what the context is for, its power hint, its preemption and the like.
+//! On this host the kernel's own driver will set contexts up its own way, so they are only read
+//! here, for the log.
 //!
-//! The first field is a pointer into the guest process, where the kernel driver would write the
-//! IDs of the hardware contexts it made. The host can't write there, and doesn't need to: with the
-//! record's virtual machine flag set, the guest's driver sends no pointer.
+//! The first field is a pointer into the guest process. The host can't write there and writes
+//! nothing back; the log says whether the guest sent one.
 
 use super::bytes::{byte, dword, qword};
 
-/// The size the kernel driver needs, when there is any data.
+/// The least this backend takes, when there is any data.
 pub const SIZE: usize = 0x90;
 
 /// Where the fields are. The names are compute-runtime's, where it has one.
@@ -57,7 +56,7 @@ const ENGINE_INSTANCE_BITS: u8 = 0x0F;
 const POWER_HINT_VALUE: u8 = 0x7F;
 const POWER_HINT_SET: u8 = 0x80;
 
-/// Why the kernel driver would refuse this data.
+/// Why this backend refuses the data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Refused(pub &'static str);
 
@@ -90,7 +89,7 @@ impl Context {
             return Ok(Self::default());
         }
         if data.len() < SIZE {
-            return Err(Refused("its private data is shorter than the kernel driver takes"));
+            return Err(Refused("its private data is shorter than the vendor's kernel driver would take"));
         }
         let flag = |at| byte(data, at).unwrap_or(0) != 0;
         let power = byte(data, at::POWER_HINT).unwrap_or(0);
@@ -122,26 +121,26 @@ pub(crate) mod tests {
     use super::*;
     use crate::protocol::bytes::put_dword;
 
-    /// The data the guest's Direct3D 12 driver sends for a context, as far as it is known, on an
-    /// adapter flagged as a virtual machine: no pointer, one ID, the process and the context type.
-    pub fn direct3d_12() -> Vec<u8> {
+    /// Context data with a few arbitrary fields set: a count, a process, the GPU address flag and a
+    /// context type.
+    pub fn some_context() -> Vec<u8> {
         let mut data = vec![0u8; SIZE];
         put_dword(&mut data, at::HW_CONTEXT_ID_COUNT, 1);
         put_dword(&mut data, at::PROCESS_ID, 4242);
         data[at::GPU_VA_CONTEXT] = 1;
-        put_dword(&mut data, at::UMD_CONTEXT_TYPE, 7);
+        put_dword(&mut data, at::UMD_CONTEXT_TYPE, 3);
         data
     }
 
     #[test]
     fn the_fields_known_are_read() {
-        let mut data = direct3d_12();
+        let mut data = some_context();
         data[at::IS_DWM] = 1;
         data[at::ENGINE_INSTANCES] = 0xF3;
         data[at::POWER_HINT] = 0x80 | 5;
         data[at::USE_64_BIT_TOKEN] = 1;
         let context = Context::parse(&data).unwrap();
-        assert_eq!((context.process_id, context.umd_context_type, context.hw_context_id_count), (4242, 7, 1));
+        assert_eq!((context.process_id, context.umd_context_type, context.hw_context_id_count), (4242, 3, 1));
         assert!(context.dwm && context.gpu_va_context && context.use_64_bit_token);
         assert_eq!(context.engine_instances, 3, "only the low four bits choose instances");
         assert_eq!(context.power_hint, Some(5));
@@ -150,7 +149,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_power_hint_without_its_set_bit_is_none() {
-        let mut data = direct3d_12();
+        let mut data = some_context();
         data[at::POWER_HINT] = 5;
         assert_eq!(Context::parse(&data).unwrap().power_hint, None);
     }
@@ -158,7 +157,7 @@ pub(crate) mod tests {
     #[test]
     fn no_data_is_taken_and_short_data_is_refused() {
         assert_eq!(Context::parse(&[]), Ok(Context::default()));
-        assert!(Context::parse(&direct3d_12()[..SIZE - 1]).is_err());
+        assert!(Context::parse(&some_context()[..SIZE - 1]).is_err());
         assert!(Context::parse(&[0; SIZE + 0x10]).is_ok(), "longer is taken");
     }
 }

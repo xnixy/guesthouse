@@ -1,8 +1,7 @@
 //! The feature bits of the adapter record that this backend sets or clears.
 //!
-//! The record carries a feature table, a long run of one-bit flags the guest's driver and its
-//! memory manager read to decide what the hardware can do. Only the flags whose place is known are
-//! here, under gmmlib's names. The rest of the table stays zero.
+//! The record carries a feature table, a long run of one-bit flags saying what the hardware can do.
+//! Only the flags whose place is known are here, under gmmlib's names. The rest of the table stays zero.
 
 /// One flag: the byte it is in, counted from the start of the record, and its bit there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

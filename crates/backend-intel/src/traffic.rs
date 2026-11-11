@@ -305,7 +305,7 @@ impl Traffic {
         log::info!("{PREFIX} queue-closed id={queue:#x} submissions={count}");
     }
 
-    /// Something the kernel driver would refuse, or this backend does.
+    /// Something this backend refuses, as the vendor's kernel driver wouldn't take it.
     pub fn refused(&mut self, what: &str, why: &str, private: &[u8]) {
         let telling = self.refusals.worth_telling((what, why, private.len()));
         tell!(

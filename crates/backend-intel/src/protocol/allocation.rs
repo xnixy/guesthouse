@@ -1,9 +1,10 @@
 //! An allocation's private data: a copy of the guest's memory manager's description of the
-//! resource, gmmlib's GmmResourceInfo, which the kernel driver reads to place the memory.
+//! resource, gmmlib's GmmResourceInfo.
 //!
-//! It is [`OBJECT_SIZE`] bytes. When the resource has a companion, a second resource placed after
-//! it in the same memory, a trailer follows that says where. The kernel driver takes only those two
-//! sizes, and refuses a resource type past [`LAST_RESOURCE_TYPE`]. Nothing is written back.
+//! This backend takes it at [`OBJECT_SIZE`] bytes, or that and a trailer when the resource has a
+//! companion, a second resource placed after it in the same memory. Any other size, or a resource
+//! type past [`LAST_RESOURCE_TYPE`], is refused, as the vendor's kernel driver wouldn't take it.
+//! Nothing is written back.
 //!
 //! The object starts with a pointer from the guest's process, which means nothing here. Its texture
 //! description (`Surf`, gmmlib's GMM_TEXTURE_INFO) starts at [`SURFACE`] and holds what the host
@@ -17,7 +18,7 @@ use guesthouse_backend::{AllocationShape, MemoryKind, SurfaceShape};
 pub const OBJECT_SIZE: usize = 0x930;
 /// The trailer that follows it for a resource with a companion.
 pub const TRAILER_SIZE: usize = 0x28;
-/// The highest GMM_RESOURCE_TYPE the kernel driver takes.
+/// The highest GMM_RESOURCE_TYPE taken.
 pub const LAST_RESOURCE_TYPE: u32 = 0x22;
 /// GMM_RESOURCE_TYPE's RESOURCE_2D.
 const RESOURCE_2D: u32 = 2;
@@ -107,7 +108,7 @@ pub const DECODED: [(usize, usize); 11] = [
     (OBJECT_SIZE, OBJECT_SIZE + TRAILER_SIZE),
 ];
 
-/// Why the kernel driver would refuse this data.
+/// Why this backend refuses the data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Refused(pub &'static str);
 
@@ -148,7 +149,7 @@ pub struct Resource {
 }
 
 impl Resource {
-    /// Reads and checks the data as the kernel driver would. Data of no length is taken, with
+    /// Reads and checks the data. Data of no length is taken, with
     /// nothing in it, as the guest's kernel makes some allocations of its own with none.
     pub fn parse(data: &[u8]) -> Result<Self, Refused> {
         if data.is_empty() {
@@ -182,7 +183,7 @@ impl Resource {
             companion: None,
         };
         if resource.resource_type > LAST_RESOURCE_TYPE {
-            return Err(Refused("its resource type is past the last the kernel driver takes"));
+            return Err(Refused("its resource type is past the last taken"));
         }
         let tail = &data[OBJECT_SIZE..];
         if tail.is_empty() {

@@ -1,6 +1,6 @@
 //! What one graphics architecture changes, picked by the IP version xe reports for the card.
 //!
-//! The guest's driver chooses its own code by the platform and core family in the adapter record,
+//! The adapter record names the platform and core families, which have to be right for the card,
 //! so those come from here, along with what the card can't be asked for. The numbers are Intel's
 //! open ones: the family and core enums from gmmlib's `igfxfmid.h`, and the rest from
 //! compute-runtime's hardware tables for the platform. Both are MIT. A card whose IP has no profile

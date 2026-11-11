@@ -1,15 +1,13 @@
-//! The adapter record: what Intel's user-mode drivers read about the adapter when they open it.
+//! The adapter record: the answer to the private adapter query, KMTQAITYPE_UMDRIVERPRIVATE.
 //!
-//! They ask for it with the private adapter query, KMTQAITYPE_UMDRIVERPRIVATE. The first ask is
-//! four bytes, for the number of linked adapters, and the second is that many records of
-//! [`RECORD_SIZE`] bytes. The kernel driver refuses any other size, and so does this.
+//! A four-byte ask gets the number of linked adapters, which is one, and an ask of [`RECORD_SIZE`]
+//! bytes gets the record. Any other size is refused, as the vendor's kernel driver wouldn't take it.
 //!
-//! The record is built once, from the card and its generation. The guest's driver picks which of its
-//! modules to load from the render core family, so that has to be right; the rest is what is known
-//! of the hardware. Compression is off, as the host can't set up compressed memory yet, and the
-//! record says the guest is a virtual machine. With that flag the guest's driver leaves out the
-//! context IDs the kernel driver would otherwise write into the guest process's own memory, which
-//! the host can't reach. What is left at zero is listed in [`super::gaps::RECORD`].
+//! The record is built once, from the card and its generation: the platform and core families,
+//! the card's ids, clocks and shape, the feature flags this backend sets, and the GPU address
+//! partition. Compression is off, as the host can't set up compressed memory yet, and the byte that
+//! marks the adapter as a virtual machine's is set. What is left at zero is listed in
+//! [`super::gaps::RECORD`].
 
 use super::bytes::{dword, put_dword, put_qword, put_word};
 use super::features::{self, Feature};
@@ -28,7 +26,7 @@ const LINKED_ADAPTERS: u32 = 1;
 /// Where the record's fields are. The names are those of gmmlib's ADAPTER_INFO and the structures
 /// in it, though the record's order is not that header's.
 mod at {
-    /// The user-mode driver's build, which it writes in its ask and which goes back as it came.
+    /// A word the guest writes in its ask, which goes back as it came.
     pub const BUILD_STAMP: usize = 0x004;
     pub const PRODUCT_FAMILY: usize = 0x208;
     pub const PCH_FAMILY: usize = 0x20C;
@@ -59,9 +57,9 @@ mod at {
     pub const MAX_DUAL_SUBSLICES: usize = 0xBA0;
     /// GMM_GFX_PARTITIONING, [`super::partition`].
     pub const PARTITION: usize = 0x23B8;
-    /// A byte, set when the query came from a virtual machine.
+    /// A byte that marks the adapter as a virtual machine's.
     pub const FROM_VIRTUAL_MACHINE: usize = 0x2468;
-    /// A byte, set when that machine is a secure one.
+    /// A byte that marks that machine as a secure one.
     pub const SECURE_VIRTUAL_MACHINE: usize = 0x2469;
 }
 

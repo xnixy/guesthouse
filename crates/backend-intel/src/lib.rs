@@ -2,9 +2,9 @@
 //! to its kernel driver.
 //!
 //! This is a first stage, a stand-in that listens. It reads the card through sysfs and xe's
-//! read-only queries, builds the adapter record the guest's user-mode drivers open with, and
-//! answers the guest well enough for them to make devices, contexts, queues and allocations and to
-//! submit. Nothing reaches the card: a submission comes back finished, unrun, and video memory is
+//! read-only queries, builds the adapter record the guest's user-mode drivers ask for, and is meant
+//! to answer the guest so that they can make devices, contexts, queues and allocations and submit.
+//! None of it has met a guest yet. Nothing reaches the card: a submission comes back finished, unrun, and video memory is
 //! only a name, as nothing writes it. What it is for is the log: every exchange that is Intel's own
 //! gets a line, in [`traffic`], so one guest run says what the real backend has to do.
 //!
@@ -14,7 +14,7 @@
 //! Where the trait does not fit Intel:
 //! - A submission's batch address and length are in the submission message, not in Intel's private
 //!   data, and [`Work`] doesn't carry them. A backend that runs work will need them.
-//! - Escapes have no status of their own, so one the kernel driver would refuse can only be logged.
+//! - Escapes have no status of their own, so one this backend's rules refuse can only be logged.
 //! - [`Backend::finish_queue_data`] sees the queue's data with the message's padding after it, so
 //!   its true size can't be checked.
 //! - The core describes every node but the first as a copy engine, whatever gmmlib's numbering
@@ -302,7 +302,7 @@ impl Backend for IntelBackend {
         self.books.unmap(unmap)
     }
 
-    /// Data the kernel driver would refuse gets a page, as the call fails anyway once
+    /// Data this backend refuses gets a page, as the call fails anyway once
     /// [`Backend::allocation_data_valid`] says so.
     fn describe_allocation(&mut self, private: &[u8]) -> AllocationShape {
         match Resource::parse(private) {
@@ -329,7 +329,7 @@ impl Backend for IntelBackend {
         refused.is_none()
     }
 
-    /// The kernel driver writes nothing back into an allocation's data.
+    /// Nothing is written back into an allocation's data.
     fn finish_allocation_data(&mut self, _private: &mut [u8], _size: u64) {}
 
     fn finish_queue_data(&mut self, queue: u32, private: &mut [u8], serial: u32) -> Result<(), BackendError> {

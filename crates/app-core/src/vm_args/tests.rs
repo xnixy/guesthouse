@@ -44,7 +44,10 @@ fn a_gpu_vms_arguments_stay_word_for_word_the_same() {
         run_folder,
         ..plan
     };
-    let expected: Vec<&str> = include_str!("gpu-arguments.txt").lines().collect();
+    // The file has the window where a wide host puts it. A narrow host puts it lower.
+    let base = format!("{:#x}", guesthouse_daemon::guest_memory::window_base());
+    let expected: Vec<String> =
+        include_str!("gpu-arguments.txt").lines().map(|line| line.replace("0x10000000000", &base)).collect();
     assert_eq!(plan.qemu_arguments(), expected);
 }
 

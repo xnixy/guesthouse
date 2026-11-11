@@ -6,8 +6,37 @@ use std::io;
 use std::ops::Range;
 use std::os::fd::OwnedFd;
 
-/// Where QEMU places the shared window in guest physical memory.
+/// Where QEMU places the shared window in guest physical memory, on a host that can address it.
 pub const WINDOW_BASE: u64 = 1 << 40;
+
+/// Where the window goes on this host. KVM refuses guest memory above what the host's CPU can
+/// address, and many Intel CPUs address 39 bits, 512 GiB, which is below [`WINDOW_BASE`]. The app and
+/// the daemon each ask the CPU, so they agree without telling each other, even inside a jail.
+pub fn window_base() -> u64 {
+    window_base_for(host_physical_bits())
+}
+
+/// Halfway up a smaller address space: far above the guest's RAM, with room for the window above it.
+pub fn window_base_for(physical_bits: u32) -> u64 {
+    if physical_bits > 40 { WINDOW_BASE } else { 1 << (physical_bits.max(37) - 1) }
+}
+
+/// The CPU's physical address width, from CPUID leaf 0x80000008.
+fn host_physical_bits() -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::__cpuid;
+        const ADDRESS_SIZES: u32 = 0x8000_0008;
+        // SAFETY: CPUID only reads, and every x86_64 CPU has it.
+        #[allow(unused_unsafe)]
+        let highest = unsafe { __cpuid(0x8000_0000) }.eax;
+        if highest >= ADDRESS_SIZES {
+            #[allow(unused_unsafe)]
+            return unsafe { __cpuid(ADDRESS_SIZES) }.eax & 0xFF;
+        }
+    }
+    48
+}
 
 /// Why shared memory couldn't be reached. Nothing panics over these, as the address may have come
 /// from a message.
@@ -100,4 +129,32 @@ pub trait GuestMemory {
 pub struct HostBuffer {
     pub file: OwnedFd,
     pub host_address: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WINDOW_SIZE: u64 = 64 << 30;
+
+    #[test]
+    fn a_wide_host_keeps_the_window_where_it_always_was() {
+        assert_eq!(window_base_for(48), WINDOW_BASE);
+        assert_eq!(window_base_for(41), WINDOW_BASE);
+    }
+
+    #[test]
+    fn a_narrow_host_gets_a_window_it_can_address() {
+        for bits in 37..=40 {
+            let base = window_base_for(bits);
+            assert!(base + WINDOW_SIZE <= 1 << bits, "{bits}");
+            assert!(base >= 64 << 30, "{bits}: the window must stay above the guest's RAM");
+        }
+        assert_eq!(window_base_for(39), 256 << 30);
+    }
+
+    #[test]
+    fn this_hosts_window_fits_this_host() {
+        assert!(window_base() + WINDOW_SIZE <= 1 << host_physical_bits().max(37));
+    }
 }

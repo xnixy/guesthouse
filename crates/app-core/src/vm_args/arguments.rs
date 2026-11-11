@@ -4,6 +4,7 @@ use super::{Boot, DISPLAY_SOCKET, Sound, VmPlan};
 use crate::firmware::format_of;
 use crate::guest_memory::WINDOW_GIB;
 use crate::text::qemu_value;
+use guesthouse_daemon::guest_memory::window_base;
 use guesthouse_daemon::handover::Part;
 
 const HYPERV_FEATURES: &str = "hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vpindex,hv-runtime,hv-time,hv-synic,\
@@ -15,7 +16,6 @@ const NO_NESTED_VIRTUALIZATION: &str = ",-svm,-vmx";
 const VGPU_INSTANCE: &str = "7a1e2f30-4c55-4d6e-9f10-0123456789ab";
 /// The guest's graphics kernel looks for this fixed instance on the global channel.
 const GLOBAL_INSTANCE: &str = "711dad3a-73ce-468b-90a9-ede6906841b2";
-const VMBUS_WINDOW_BASE: &str = "0x10000000000";
 const VMBUS_WINDOW_SIZE: &str = "0x1000000000";
 /// Bit 0 makes the guest list the pages the GPU maps instead of using a GPADL.
 const HOST_CAPABILITIES: u32 = 1;
@@ -155,7 +155,7 @@ impl VmPlan {
             "-device",
             "ide-cd,bus=ahci.2,drive=cd1",
             "-device",
-            &format!("vmbus-bridge,mmio-base={VMBUS_WINDOW_BASE},mmio-size={VMBUS_WINDOW_SIZE}"),
+            &format!("vmbus-bridge,mmio-base={:#x},mmio-size={VMBUS_WINDOW_SIZE}", window_base()),
             // Windows keeps its clock on the host's through this. OpenGL needs the two close.
             "-device",
             "hv-timesync",
@@ -169,7 +169,8 @@ impl VmPlan {
             ),
             "-device",
             &format!(
-                "gpupv-global,chardev=gpg,instanceid={GLOBAL_INSTANCE},iomem=gpio,iomem-base={VMBUS_WINDOW_BASE}"
+                "gpupv-global,chardev=gpg,instanceid={GLOBAL_INSTANCE},iomem=gpio,iomem-base={:#x}",
+                window_base()
             ),
             "-chardev",
             &self.client_socket("gpv", "vgpu.sock"),

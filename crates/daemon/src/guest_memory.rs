@@ -2,8 +2,8 @@
 
 use crate::handover::Part;
 use crate::slot::Slot;
-pub use guesthouse_backend::WINDOW_BASE;
 use guesthouse_backend::{GuestMemory, HostBuffer, MemoryError, PagesView, in_window};
+pub use guesthouse_backend::{WINDOW_BASE, window_base};
 use guesthouse_frame_socket::sized_buffer;
 use std::fs::File;
 use std::io;
@@ -56,6 +56,8 @@ fn unmap_host_buffer(address: u64, size: u64) {
 /// The window mapped here, and the RAM ready to map from.
 pub struct SharedMemory {
     window: *mut u8,
+    /// Where QEMU put it in guest physical memory: see [`window_base`].
+    base: u64,
     window_size: u64,
     ram: File,
 }
@@ -75,17 +77,17 @@ impl SharedMemory {
         let window = unsafe {
             libc::mmap(ptr::null_mut(), window_size as usize, flags, libc::MAP_SHARED, file.as_raw_fd(), 0)
         };
-        Ok(Self { window: check(window)?.cast(), window_size, ram })
+        Ok(Self { window: check(window)?.cast(), base: window_base(), window_size, ram })
     }
 
     fn window_range(&self) -> Range<u64> {
-        WINDOW_BASE..WINDOW_BASE + self.window_size
+        self.base..self.base + self.window_size
     }
 
     /// How far `length` bytes at an address are into the mapping, if all of them are in it.
     fn offset_of(&self, address: u64, length: u64) -> Result<usize, MemoryError> {
         if in_window(&self.window_range(), address, length) {
-            Ok((address - WINDOW_BASE) as usize)
+            Ok((address - self.base) as usize)
         } else {
             Err(MemoryError::Outside(address))
         }
@@ -257,9 +259,9 @@ mod tests {
     fn the_window_reads_and_writes_the_file() {
         let window = temporary_file("window", &[0; 0x2000]);
         let mut memory = window_only(&window);
-        assert_eq!(memory.window(), Ok(WINDOW_BASE..WINDOW_BASE + 0x2000));
-        memory.write_u64(WINDOW_BASE + 0x1000, 0x1122).unwrap();
-        assert_eq!(memory.read_u64(WINDOW_BASE + 0x1000), Ok(0x1122));
+        assert_eq!(memory.window(), Ok(window_base()..window_base() + 0x2000));
+        memory.write_u64(window_base() + 0x1000, 0x1122).unwrap();
+        assert_eq!(memory.read_u64(window_base() + 0x1000), Ok(0x1122));
         drop(memory);
         assert_eq!(fs::read(&window).unwrap()[0x1000..0x1002], [0x22, 0x11]);
         fs::remove_file(window).unwrap();
@@ -270,10 +272,10 @@ mod tests {
         let window = temporary_file("host-address", &[0; 0x2000]);
         let memory = window_only(&window);
         let base = memory.window as u64;
-        assert_eq!(memory.host_address(WINDOW_BASE, 0x2000), Ok(base));
-        assert_eq!(memory.host_address(WINDOW_BASE + 0x1000, 0x1000), Ok(base + 0x1000));
-        assert!(memory.host_address(WINDOW_BASE + 0x1000, 0x1001).is_err());
-        assert!(memory.host_address(WINDOW_BASE - 0x1000, 0x1000).is_err());
+        assert_eq!(memory.host_address(window_base(), 0x2000), Ok(base));
+        assert_eq!(memory.host_address(window_base() + 0x1000, 0x1000), Ok(base + 0x1000));
+        assert!(memory.host_address(window_base() + 0x1000, 0x1001).is_err());
+        assert!(memory.host_address(window_base() - 0x1000, 0x1000).is_err());
         assert!(memory.host_address(u64::MAX, 2).is_err());
         fs::remove_file(window).unwrap();
     }
@@ -282,9 +284,9 @@ mod tests {
     fn zero_clears_only_what_it_says() {
         let window = temporary_file("zero", &[0xFF; 0x3000]);
         let mut memory = window_only(&window);
-        memory.zero(WINDOW_BASE + 0x1000, 0x1000).unwrap();
-        assert_eq!(memory.read_u64(WINDOW_BASE + 0x1000), Ok(0));
-        assert_eq!(memory.read_u64(WINDOW_BASE + 0x2000), Ok(u64::MAX));
+        memory.zero(window_base() + 0x1000, 0x1000).unwrap();
+        assert_eq!(memory.read_u64(window_base() + 0x1000), Ok(0));
+        assert_eq!(memory.read_u64(window_base() + 0x2000), Ok(u64::MAX));
         fs::remove_file(window).unwrap();
     }
 
@@ -292,15 +294,15 @@ mod tests {
     fn accesses_past_the_window_are_errors_and_nothing_else() {
         let window = temporary_file("outside", &[0xFF; 0x1000]);
         let mut memory = window_only(&window);
-        for address in [0, WINDOW_BASE - 8, WINDOW_BASE + 0x1000, WINDOW_BASE + 4, u64::MAX - 7] {
+        for address in [0, window_base() - 8, window_base() + 0x1000, window_base() + 4, u64::MAX - 7] {
             assert_eq!(memory.read_u64(address), Err(MemoryError::Outside(address)));
             assert_eq!(memory.write_u64(address, 0), Err(MemoryError::Outside(address)));
         }
-        assert!(memory.write_u32(WINDOW_BASE + 0x1000, 0).is_err());
-        assert!(memory.write_u32(WINDOW_BASE + 2, 0).is_err());
-        assert!(memory.zero(WINDOW_BASE + 0x800, 0x801).is_err());
+        assert!(memory.write_u32(window_base() + 0x1000, 0).is_err());
+        assert!(memory.write_u32(window_base() + 2, 0).is_err());
+        assert!(memory.zero(window_base() + 0x800, 0x801).is_err());
         assert!(memory.zero(u64::MAX, 2).is_err());
-        assert_eq!(memory.read_u64(WINDOW_BASE), Ok(u64::MAX), "a refused write changes nothing");
+        assert_eq!(memory.read_u64(window_base()), Ok(u64::MAX), "a refused write changes nothing");
         fs::remove_file(window).unwrap();
     }
 
@@ -308,9 +310,9 @@ mod tests {
     fn reads_outside_the_window_find_nothing() {
         let window = temporary_file("short-read", &[7; 0x1000]);
         let memory = window_only(&window);
-        assert_eq!(memory.read_bytes(WINDOW_BASE - 8, &mut [0; 8]), 0);
-        assert_eq!(memory.read_bytes(WINDOW_BASE + 0x1000, &mut [0; 8]), 0);
-        assert_eq!(memory.read_bytes(WINDOW_BASE + 0xFFC, &mut [0; 8]), 4);
+        assert_eq!(memory.read_bytes(window_base() - 8, &mut [0; 8]), 0);
+        assert_eq!(memory.read_bytes(window_base() + 0x1000, &mut [0; 8]), 0);
+        assert_eq!(memory.read_bytes(window_base() + 0xFFC, &mut [0; 8]), 4);
         fs::remove_file(window).unwrap();
     }
 

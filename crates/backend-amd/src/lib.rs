@@ -20,6 +20,7 @@ mod channel_order;
 mod copy_ib;
 mod device;
 mod fault;
+mod guest_dma;
 mod info;
 mod ioctl;
 mod memory;
@@ -52,6 +53,7 @@ pub use memory::{
 
 use channel_order::WrittenRows;
 use copy_ib::CopyIb;
+use guest_dma::Reach;
 use guesthouse_backend::{
     AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, DriverFound, DriverSurvey, GpuRange,
     GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
@@ -347,6 +349,39 @@ impl AmdBackend {
 /// Whether every range lies inside the card's usable addresses, `start..end`.
 fn ranges_fit(ranges: &[GpuRange], start: u64, end: u64) -> bool {
     ranges.iter().all(|range| range.start >= start && range.end <= end && range.start <= range.end)
+}
+
+/// A command buffer's dwords, if it lies in guest pages, which the CPU reads where they are. A
+/// guest writes its commands with its CPU, so that is where they are.
+fn guest_commands(memory: &HashMap<MemoryId, Bo>, space: &SpaceVm, ib: &Ib) -> Option<Vec<u32>> {
+    let (buffer, offset) = space.locate(ib.address)?;
+    let bo = memory.values().find(|bo| bo.handle == buffer)?;
+    let Origin::HostPages { address, size } = bo.origin else {
+        return None;
+    };
+    if offset.checked_add(u64::from(ib.bytes))? > size {
+        return None;
+    }
+    let mut commands = vec![0u32; ib.bytes as usize / size_of::<u32>()];
+    // SAFETY: the pages are mapped in this process for `size` bytes while the buffer lives, and the
+    // read ends inside them. The guest can write them meanwhile, which a copy of bytes takes as it
+    // finds them.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (address + offset) as *const u8,
+            commands.as_mut_ptr().cast::<u8>(),
+            size_of_val(commands.as_slice()),
+        )
+    };
+    Some(commands)
+}
+
+/// The first run of bytes a guest's DMA commands name that isn't mapped in its space. The card
+/// would fault there.
+fn unmapped_dma_reach(memory: &HashMap<MemoryId, Bo>, space: &SpaceVm, ibs: &[Ib]) -> Option<Reach> {
+    let commands = ibs.iter().filter_map(|ib| guest_commands(memory, space, ib));
+    let mut named = commands.flat_map(|commands| guest_dma::reaches(&commands));
+    named.find(|reach| !space.covers(reach.address, reach.bytes))
 }
 
 /// Builds the facts the guest is told from the card's own readings.
@@ -721,6 +756,18 @@ impl Backend for AmdBackend {
                 work.space,
                 ib.address,
                 ib.bytes
+            );
+            return WorkStart::QueueFailed;
+        }
+        if node.ip_type == HW_IP_DMA
+            && let Some(reach) = unmapped_dma_reach(&self.memory, &space.vm, &ibs)
+        {
+            log::warn!(
+                "work on the DMA engine in space {:?} names {:#x} for {:#x} bytes, which isn't all mapped \
+                 there, so it isn't run",
+                work.space,
+                reach.address,
+                reach.bytes
             );
             return WorkStart::QueueFailed;
         }

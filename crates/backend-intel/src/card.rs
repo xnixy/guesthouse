@@ -121,7 +121,7 @@ impl CardFacts {
     }
 
     pub fn eu_count(&self) -> u32 {
-        self.dual_subslices() * self.eus_per_dual_subslice()
+        self.dual_subslices().saturating_mul(self.eus_per_dual_subslice())
     }
 
     /// The slices that hold the dual subslices there are, when hwconfig says how many fit in one.

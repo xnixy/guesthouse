@@ -180,7 +180,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         },
         gt: GtSystem {
             eu_count: eus,
-            thread_count: eus * threads_per_eu,
+            thread_count: eus.saturating_mul(threads_per_eu),
             slice_count: card.slices().unwrap_or(0),
             subslice_count: dual_subslices,
             dual_subslice_count: dual_subslices,
@@ -285,6 +285,13 @@ impl Backend for IntelBackend {
         match Resource::parse(private) {
             Ok(resource) => {
                 self.traffic.allocation(private, &resource);
+                if !resource.size_is_sane() {
+                    self.traffic.refused(
+                        "allocation-size",
+                        "past every GPU address, given one page",
+                        private,
+                    );
+                }
                 resource.shape()
             }
             Err(_) => Resource::default().shape(),

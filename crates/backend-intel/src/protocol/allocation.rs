@@ -24,6 +24,8 @@ const RESOURCE_2D: u32 = 2;
 /// The size given for an allocation whose data says nothing usable, a page.
 const SMALLEST: u64 = 0x1000;
 const PAGE: u64 = 0x1000;
+/// The largest size taken as meant: every GPU address the core hands out, which ends at 1 TiB.
+pub const LARGEST: u64 = guesthouse_backend::GPU_RANGES[1].end;
 
 /// Where the object's fields are.
 mod at {
@@ -220,12 +222,18 @@ impl Resource {
         own.max(companion)
     }
 
+    /// Whether the size is one an allocation can have: no larger than every GPU address there is.
+    pub fn size_is_sane(&self) -> bool {
+        self.bytes() <= LARGEST
+    }
+
     /// The shape the core gives the allocation. Video memory is whole pages; memory the guest
-    /// lends is locked to the byte.
+    /// lends is locked to the byte. A size past [`LARGEST`] can only be a wrong number, so it gets
+    /// the one page that data saying nothing usable gets.
     pub fn shape(&self) -> AllocationShape {
-        let exact = self.bytes().max(SMALLEST);
+        let exact = if self.size_is_sane() { self.bytes().max(SMALLEST) } else { SMALLEST };
         AllocationShape {
-            size: exact.div_ceil(PAGE) * PAGE,
+            size: exact.next_multiple_of(PAGE),
             exact_size: exact,
             surface: self.surface(),
             gpu_cached: false,
@@ -329,6 +337,34 @@ pub(crate) mod tests {
         put_qword(&mut data, at::SIZE, 0x1234);
         let shape = Resource::parse(&data).unwrap().shape();
         assert_eq!((shape.size, shape.exact_size, shape.surface), (0x2000, 0x1234, None));
+    }
+
+    #[test]
+    fn a_size_no_allocation_can_have_gets_one_page_and_no_overflow() {
+        for size in [u64::MAX, u64::MAX - 0xFFF, LARGEST + 1] {
+            let mut data = render_target();
+            put_qword(&mut data, at::SIZE, size);
+            let resource = Resource::parse(&data).unwrap();
+            assert!(!resource.size_is_sane(), "{size:#x}");
+            let shape = resource.shape();
+            assert_eq!((shape.size, shape.exact_size), (SMALLEST, SMALLEST), "{size:#x}");
+        }
+    }
+
+    #[test]
+    fn a_companion_whose_end_runs_past_every_number_gets_one_page() {
+        let mut data = with_trailer(MARKER, TRAILER_VERSION);
+        put_qword(&mut data[OBJECT_SIZE..], trailer::COMPANION_OFFSET, u64::MAX);
+        let resource = Resource::parse(&data).unwrap();
+        assert_eq!(resource.bytes(), u64::MAX, "the end saturates rather than wraps");
+        assert_eq!(resource.shape().size, SMALLEST);
+    }
+
+    #[test]
+    fn the_largest_sane_size_is_kept_whole() {
+        let mut data = render_target();
+        put_qword(&mut data, at::SIZE, LARGEST);
+        assert_eq!(Resource::parse(&data).unwrap().shape().size, LARGEST);
     }
 
     #[test]

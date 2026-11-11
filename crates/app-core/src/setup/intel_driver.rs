@@ -8,9 +8,9 @@
 //! them and not the kernel driver, the firmware or the media software.
 
 use super::driver::Extraction;
+use super::guest_files::{GuestFile, file_list};
 use super::inf::inf_driver_version;
 use super::intel::{SYSTEM_LIST, folder_problem, write_intel_setup};
-use super::guest_files::{GuestFile, file_list};
 use super::intel_inf::{decode, guest_files, lists_device, system_files};
 use crate::context::Context;
 use crate::failure::{Failure, Result};
@@ -148,7 +148,8 @@ mod tests {
         let mut text = vec![0xFF, 0xFE];
         text.extend(inf.encode_utf16().flat_map(u16::to_le_bytes));
         scratch.write(&format!("source/{DRIVER_ENTRY}/{INF_FILE}"), text);
-        let extras = ["igdkmdn64.sys", "not-ours.dll", "mfxplugin64_hw.dll", "ControlLib.dll", "vulkaninfo-64.exe"];
+        let extras =
+            ["igdkmdn64.sys", "not-ours.dll", "mfxplugin64_hw.dll", "ControlLib.dll", "vulkaninfo-64.exe"];
         let sources = SYSTEM_FILES.iter().map(|file| &file.1);
         for name in GUEST_FILES.iter().chain(sources).chain(&extras) {
             scratch.write(&format!("source/{DRIVER_ENTRY}/{name}"), format!("content of {name}"));
@@ -212,10 +213,20 @@ mod tests {
         );
         let list = fs::read_to_string(folder.join(SYSTEM_LIST)).unwrap();
         assert_eq!(list.lines().count(), SYSTEM_FILES.len());
-        assert!(list.contains("System32	vulkan-1-64.dll	vulkan-1.dll
-"), "{list}");
-        assert!(list.contains("SysWOW64	msvcp140_32.dll	msvcp140.dll
-"), "{list}");
+        assert!(
+            list.contains(
+                "System32	vulkan-1-64.dll	vulkan-1.dll
+"
+            ),
+            "{list}"
+        );
+        assert!(
+            list.contains(
+                "SysWOW64	msvcp140_32.dll	msvcp140.dll
+"
+            ),
+            "{list}"
+        );
         assert!(!folder.join("ifwi").exists(), "no firmware");
     }
 

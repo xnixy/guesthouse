@@ -4,9 +4,13 @@
 //! screen, which matters while the card draws nothing and the desktop may not show anything.
 //!
 //! What a tester of an Intel card sends is gathered in the same step, in a folder of the machine's
-//! own: the report, the daemon's log as it is then, and what the host's driver says about the card.
+//! own: the report, the daemon's log as it is then, what the host's driver says about the card, and
+//! the API check. That is a script of the app's (`guest/api-check.ps1`), run in the guest first, which
+//! tries OpenCL, Level Zero, Vulkan, Direct3D 12 and 11 and OpenGL one by one, each in a process of its
+//! own with a time limit, and writes how far each got.
 
 use super::Task;
+use super::desktop::{GUEST_FOLDER, put_file};
 use super::guest_upload::quoted;
 use crate::daemon::OUTPUT_FILE;
 use crate::failure::{Failure, Result};
@@ -25,6 +29,14 @@ pub const REPORT_FILE: &str = "dxdiag.txt";
 const GATHERED_FOLDER: &str = "test-report";
 const PROBE_FILE: &str = "intel-probe.txt";
 const PROBE_PROGRAM: &str = "intel-probe";
+/// The API check's script as the app holds it, where the guest keeps it, and where it writes its
+/// report, which is what the check is called beside the others.
+const API_SCRIPT: &str = "api-check.ps1";
+pub const API_FILE: &str = "api-check.txt";
+const API_STARTED_MARK: &str = "api-check started";
+const API_DONE_MARK: &str = "api-check done";
+/// Seven probes of up to a minute each, and the time to compile them.
+const API_WAIT_MINUTES: u64 = 10;
 const START_SECONDS: u64 = 20;
 const POLL_SECONDS: u64 = 10;
 const POLL_EVERY: Duration = Duration::from_secs(5);
@@ -33,6 +45,27 @@ const FETCH_SECONDS: u64 = 60;
 const STARTED_MARK: &str = "dxdiag started";
 const DONE_MARK: &str = "dxdiag done";
 const REPORT_MARK: &str = "report:";
+
+fn guest_api_path(name: &str) -> String {
+    format!("{GUEST_FOLDER}\\{name}")
+}
+
+fn api_start_script() -> String {
+    let (script, report) = (quoted(&guest_api_path(API_SCRIPT)), quoted(&guest_api_path(API_FILE)));
+    format!(
+        "Remove-Item -LiteralPath {report} -Force -ErrorAction SilentlyContinue; \
+         Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',{script},'-Report',{report} \
+         -WindowStyle Hidden; '{API_STARTED_MARK}'"
+    )
+}
+
+fn api_poll_script() -> String {
+    let report = quoted(&guest_api_path(API_FILE));
+    format!(
+        "if ((Test-Path -LiteralPath {report}) -and (Select-String -LiteralPath {report} -Pattern '{API_DONE_MARK}' -Quiet)) \
+         {{ '{API_DONE_MARK}' }} else {{ 'waiting' }}"
+    )
+}
 
 fn start_script() -> String {
     format!(
@@ -54,8 +87,8 @@ fn poll_script() -> String {
 
 /// The report as one run of base64, which the agent's line wrapping can't harm, as the reader drops
 /// whitespace.
-fn fetch_script() -> String {
-    format!("'{REPORT_MARK}' + [Convert]::ToBase64String([IO.File]::ReadAllBytes({}))", quoted(GUEST_REPORT))
+fn fetch_script(path: &str) -> String {
+    format!("'{REPORT_MARK}' + [Convert]::ToBase64String([IO.File]::ReadAllBytes({}))", quoted(path))
 }
 
 fn report_from(answer: &str) -> Option<Vec<u8>> {
@@ -79,18 +112,87 @@ fn probe_text(task: &Task) -> String {
 fn gather(task: &Task) -> Result<PathBuf> {
     let folder = task.machine.folder(task.context).join(GATHERED_FOLDER);
     fs::create_dir_all(&folder)?;
-    fs::copy(task.run_file(REPORT_FILE), folder.join(REPORT_FILE))?;
+    // Each file is what there is of it: a check or dxdiag that failed leaves what it said, or nothing.
+    let _ = fs::copy(task.run_file(REPORT_FILE), folder.join(REPORT_FILE));
+    let _ = fs::copy(task.run_file(API_FILE), folder.join(API_FILE));
     // A daemon that never started has no log, and the folder says so by lacking it.
     let _ = fs::copy(task.run_file(OUTPUT_FILE), folder.join(OUTPUT_FILE));
     fs::write(folder.join(PROBE_FILE), probe_text(task))?;
     Ok(folder)
 }
 
-/// Runs dxdiag in the guest, waits for it, and saves its report in the run folder.
+/// Puts the API check's script in the guest, runs it, and saves its report, or the reason there is
+/// none, in the run folder. It never fails the step: dxdiag still runs, and the tester sends what is there.
+fn api_check(task: &mut Task) {
+    task.step("Trying each graphics and compute API in Windows");
+    let saved = task.run_file(API_FILE);
+    let local = task.context.paths.guest_files().join(API_SCRIPT);
+    let note = |why: &str| {
+        let _ = fs::write(&saved, format!("The API check did not run: {why}\n"));
+    };
+    if !put_file(task, &local, &guest_api_path(API_SCRIPT)).unwrap_or(false) {
+        return note(
+            "the script could not be put in Windows. If the machine only just started, wait a minute and run this again.",
+        );
+    }
+    if !task.ask_guest(&api_start_script(), START_SECONDS).contains(API_STARTED_MARK) {
+        return note("Windows' agent didn't start it.");
+    }
+    let end = task.now() + Duration::from_secs(API_WAIT_MINUTES * 60);
+    let mut finished = true;
+    loop {
+        task.sleep(POLL_EVERY);
+        if task.ask_guest(&api_poll_script(), POLL_SECONDS).contains(API_DONE_MARK) {
+            break;
+        }
+        if task.now() >= end {
+            finished = false;
+            break;
+        }
+    }
+    task.step("Fetching the API report");
+    let answer = task.ask_guest(&fetch_script(&guest_api_path(API_FILE)), FETCH_SECONDS);
+    match report_from(&answer) {
+        Some(report) if finished => {
+            let _ = fs::write(&saved, report);
+        }
+        Some(report) => {
+            let mut text = format!(
+                "The check had not finished after {API_WAIT_MINUTES} minutes. This is what it wrote.\n"
+            )
+            .into_bytes();
+            text.extend(report);
+            let _ = fs::write(&saved, text);
+        }
+        None => note("its report could not be read back."),
+    }
+}
+
+/// Runs the API check for an Intel machine, then dxdiag, and gathers what they and the daemon said.
+/// Another maker's machine gets dxdiag alone.
 pub(super) fn dxdiag(task: &mut Task) -> Result<()> {
     if task.pid().is_none() {
         return Err(Failure::new("The machine isn't running, so there is no Windows to run dxdiag in."));
     }
+    let intel = task.machine.windows_maker() == Some(GpuMaker::Intel);
+    if intel {
+        api_check(task);
+    }
+    let ran = run_dxdiag(task);
+    if intel {
+        let folder = gather(task)?;
+        task.step(&format!(
+            "The reports, the daemon's log and the card's details are in {}",
+            folder.display()
+        ));
+    } else if ran.is_ok() {
+        task.step(&format!("The report is in {}", task.run_file(REPORT_FILE).display()));
+    }
+    ran
+}
+
+/// Runs dxdiag in the guest, waits for it, and saves its report in the run folder.
+fn run_dxdiag(task: &mut Task) -> Result<()> {
     task.step("Running dxdiag in Windows");
     if !task.ask_guest(&start_script(), START_SECONDS).contains(STARTED_MARK) {
         return Err(Failure::new(
@@ -112,20 +214,10 @@ pub(super) fn dxdiag(task: &mut Task) -> Result<()> {
         }
     }
     task.step("Fetching the report");
-    let answer = task.ask_guest(&fetch_script(), FETCH_SECONDS);
+    let answer = task.ask_guest(&fetch_script(GUEST_REPORT), FETCH_SECONDS);
     let report =
         report_from(&answer).ok_or_else(|| Failure::new("dxdiag's report could not be read back."))?;
-    let saved = task.run_file(REPORT_FILE);
-    fs::write(&saved, report)?;
-    if task.machine.windows_maker() == Some(GpuMaker::Intel) {
-        let folder = gather(task)?;
-        task.step(&format!(
-            "The report, the daemon's log and the card's details are in {}",
-            folder.display()
-        ));
-    } else {
-        task.step(&format!("The report is in {}", saved.display()));
-    }
+    fs::write(task.run_file(REPORT_FILE), report)?;
     Ok(())
 }
 
@@ -152,6 +244,7 @@ mod tests {
     ) -> (Result<()>, Arc<ScriptedAgent>, Scratch, Vec<u8>, PathBuf) {
         let scratch = Scratch::new();
         let mut context = plain_task_context(&scratch);
+        scratch.write("program/guest/api-check.ps1", "the check");
         scratch.program(
             "program/intel-probe",
             "#!/bin/sh
@@ -197,17 +290,54 @@ echo \"probe of $1\"
     }
 
     #[test]
-    fn for_an_intel_machine_the_report_the_log_and_the_probes_answer_are_gathered_in_its_folder() {
-        let answers = [STARTED_MARK, DONE_MARK, &format!("{REPORT_MARK}{}", base64_encode(b"the report"))];
-        let (result, _, _scratch, _, folder) = run_on(&answers, true, Some(GpuMaker::Intel));
+    fn for_an_intel_machine_the_api_check_runs_first_and_all_the_reports_are_gathered_in_its_folder() {
+        let api = format!("{REPORT_MARK}{}", base64_encode(b"the api report\napi-check done"));
+        let dxdiag = format!("{REPORT_MARK}{}", base64_encode(b"the report"));
+        let answers = [
+            "file placed",
+            API_STARTED_MARK,
+            "waiting",
+            API_DONE_MARK,
+            &api,
+            STARTED_MARK,
+            DONE_MARK,
+            &dxdiag,
+        ];
+        let (result, agent, _scratch, _, folder) = run_on(&answers, true, Some(GpuMaker::Intel));
         result.unwrap();
+        {
+            let asked = agent.requests.lock().unwrap();
+            assert!(
+                asked[1].2.contains("api-check.ps1") && asked[1].2.contains("'-Report'"),
+                "{}",
+                asked[1].2
+            );
+            assert!(asked[5].2.contains("dxdiag.exe"), "dxdiag follows the check");
+        }
         let gathered = folder.join(GATHERED_FOLDER);
+        assert_eq!(fs::read_to_string(gathered.join(API_FILE)).unwrap(), "the api report\napi-check done");
         assert_eq!(fs::read_to_string(gathered.join(REPORT_FILE)).unwrap(), "the report");
         assert_eq!(fs::read_to_string(gathered.join(PROBE_FILE)).unwrap().trim(), "probe of 0000:00:02.0");
         assert_eq!(fs::read_to_string(gathered.join(OUTPUT_FILE)).unwrap(), "the daemon's log");
-        let (result, _, _scratch, _, folder) = run_on(&answers, true, None);
+        let plain = [STARTED_MARK, DONE_MARK, &dxdiag];
+        let (result, agent, _scratch, _, folder) = run_on(&plain, true, None);
         result.unwrap();
+        assert_eq!(agent.requests.lock().unwrap().len(), 3, "no API check for another maker");
         assert!(!folder.join(GATHERED_FOLDER).exists(), "only an Intel machine gathers");
+    }
+
+    #[test]
+    fn an_api_check_that_cannot_run_is_said_in_its_file_and_dxdiag_goes_on() {
+        let dxdiag = format!("{REPORT_MARK}{}", base64_encode(b"the report"));
+        let answers = ["", "", "", "", "", ""];
+        let (result, _, _scratch, _, folder) = run_on(&answers, true, Some(GpuMaker::Intel));
+        assert!(result.is_err(), "dxdiag found the agent quiet");
+        let said = fs::read_to_string(folder.join(GATHERED_FOLDER).join(API_FILE)).unwrap();
+        assert!(said.starts_with("The API check did not run"), "{said}");
+        let answers = ["", STARTED_MARK, DONE_MARK, &dxdiag];
+        let (result, _, _scratch, _, folder) = run_on(&answers, true, Some(GpuMaker::Intel));
+        result.unwrap();
+        assert!(folder.join(GATHERED_FOLDER).join(REPORT_FILE).is_file());
     }
 
     #[test]

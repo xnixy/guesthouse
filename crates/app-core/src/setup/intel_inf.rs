@@ -124,7 +124,9 @@ fn copy_lists<'a>(sections: &HashMap<String, Vec<&'a str>>, device: u32) -> Vec<
             .filter_map(|line| line.split_once('='))
             .filter(|(key, _)| key.trim().eq_ignore_ascii_case("CopyFiles"))
             .flat_map(|(_, value)| fields(value));
-        found.extend(lists.filter(|list| !NOT_FOR_THE_GUEST.iter().any(|known| known.eq_ignore_ascii_case(list))));
+        found.extend(
+            lists.filter(|list| !NOT_FOR_THE_GUEST.iter().any(|known| known.eq_ignore_ascii_case(list))),
+        );
     }
     found
 }
@@ -165,9 +167,9 @@ pub fn system_files(inf: &str, device: u32) -> Vec<GuestFile> {
     let sections = sections(inf);
     let mut found: Vec<GuestFile> = Vec::new();
     for list in copy_lists(&sections, device) {
-        let skipped = NOT_LOADERS.iter().any(|prefix| {
-            list.get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix))
-        });
+        let skipped = NOT_LOADERS
+            .iter()
+            .any(|prefix| list.get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix)));
         let Some(folder) = windows_folder(&sections, list).filter(|_| !skipped) else { continue };
         for line in sections.get(&list.to_lowercase()).into_iter().flatten() {
             // The INF's order is the name, then the file to copy if that differs, so empty fields count.
@@ -176,9 +178,14 @@ pub fn system_files(inf: &str, device: u32) -> Vec<GuestFile> {
                 continue;
             };
             let source = parts.next().filter(|source| !source.is_empty()).unwrap_or(name);
-            let known = found.iter().any(|file| file.folder == folder && file.name.eq_ignore_ascii_case(name));
+            let known =
+                found.iter().any(|file| file.folder == folder && file.name.eq_ignore_ascii_case(name));
             if !known {
-                found.push(GuestFile { folder: folder.to_owned(), source: source.to_owned(), name: name.to_owned() });
+                found.push(GuestFile {
+                    folder: folder.to_owned(),
+                    source: source.to_owned(),
+                    name: name.to_owned(),
+                });
             }
         }
     }
@@ -363,9 +370,15 @@ mod tests {
         let device = u32::from_str_radix(&std::env::var("GUESTHOUSE_INTEL_DEVICE").unwrap(), 16).unwrap();
         let inf = decode(&std::fs::read(path).unwrap());
         let files = guest_files(&inf, device);
-        println!("{}
-{} files", files.join("
-"), files.len());
+        println!(
+            "{}
+{} files",
+            files.join(
+                "
+"
+            ),
+            files.len()
+        );
         for named in crate::setup::intel::NAMED_FILES {
             assert!(files.iter().any(|file| file == named), "{named} is not among them");
         }

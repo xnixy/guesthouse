@@ -10,8 +10,8 @@ use crate::log::write_log;
 use crate::setup::guest_driver::INTEL_STORE_FOLDER;
 use crate::setup::guest_files::guest_file_list;
 use crate::setup::intel::{SYSTEM_LIST, intel_driver_folder};
-use std::fs;
 use crate::text::base64_encode;
+use std::fs;
 
 const SCRIPT_NAME: &str = "nv-files.ps1";
 const PROFILES_SCRIPT: &str = "nv-profiles.ps1";
@@ -94,7 +94,8 @@ pub(super) fn place_driver_files(task: &mut Task) -> Result<()> {
 /// the guest's programs find Intel's OpenCL, Vulkan and Level Zero drivers through. A guest that
 /// has them all is left alone.
 pub(super) fn place_system_files(task: &mut Task) -> Result<()> {
-    let list = intel_driver_folder(task.context).and_then(|folder| fs::read_to_string(folder.join(SYSTEM_LIST)).ok());
+    let list = intel_driver_folder(task.context)
+        .and_then(|folder| fs::read_to_string(folder.join(SYSTEM_LIST)).ok());
     match list.filter(|list| !list.trim().is_empty()) {
         Some(list) => place_listed_files(task, &list, Some(INTEL_STORE_FOLDER)),
         None => {

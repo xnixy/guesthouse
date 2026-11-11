@@ -1,6 +1,5 @@
 //! Installing Windows: the answer disc, the wait for setup, and the check of what it made.
 
-use crate::gpu_maker::GpuMaker;
 use super::complete_host_driver;
 use super::desktop::{BOOT_LINE, SERIAL_FILE, count, wait_for_desktop};
 use super::identity::set_up_identity;
@@ -10,6 +9,7 @@ use crate::agent::{QUICK_SECONDS, guest_script, make_password, make_token};
 use crate::context::Context;
 use crate::disk_image::disk_size_gib;
 use crate::failure::{Failure, Result};
+use crate::gpu_maker::GpuMaker;
 use crate::iso::iso_maker;
 use crate::library::make_disk;
 use crate::machine::Machine;

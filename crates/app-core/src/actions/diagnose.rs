@@ -2,17 +2,29 @@
 //! brought back beside the daemon's log. The tool makes Direct3D devices on every adapter, so on an
 //! Intel card it is what makes the guest's driver talk to the daemon. It runs without anyone at the
 //! screen, which matters while the card draws nothing and the desktop may not show anything.
+//!
+//! What a tester of an Intel card sends is gathered in the same step, in a folder of the machine's
+//! own: the report, the daemon's log as it is then, and what the host's driver says about the card.
 
 use super::Task;
 use super::guest_upload::quoted;
+use crate::daemon::OUTPUT_FILE;
 use crate::failure::{Failure, Result};
+use crate::gpu_maker::GpuMaker;
 use crate::text::base64_decode;
 use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 /// Where the guest writes the report, and what it's called beside the daemon's log.
 const GUEST_REPORT: &str = r"C:\gpupv\dxdiag.txt";
 pub const REPORT_FILE: &str = "dxdiag.txt";
+/// The folder in the machine's own folder that a run's files are gathered in, and the file the
+/// host's view of the card goes in. The probe is a program of the Intel backend.
+const GATHERED_FOLDER: &str = "test-report";
+const PROBE_FILE: &str = "intel-probe.txt";
+const PROBE_PROGRAM: &str = "intel-probe";
 const START_SECONDS: u64 = 20;
 const POLL_SECONDS: u64 = 10;
 const POLL_EVERY: Duration = Duration::from_secs(5);
@@ -51,6 +63,29 @@ fn report_from(answer: &str) -> Option<Vec<u8>> {
     base64_decode(&encoded).filter(|data| !data.is_empty())
 }
 
+/// What the host's driver says about the machine's Intel card, or why that isn't known.
+fn probe_text(task: &Task) -> String {
+    let program = task.context.paths.binary(PROBE_PROGRAM);
+    match Command::new(&program).arg(&task.machine.amd_gpu).output() {
+        Ok(done) => {
+            let said = [&done.stdout[..], &done.stderr[..]].concat();
+            String::from_utf8_lossy(&said).into_owned()
+        }
+        Err(error) => format!("{PROBE_PROGRAM} could not be run from {}: {error}\n", program.display()),
+    }
+}
+
+/// Puts the report, the daemon's log and the probe's answer in one folder, and says where it is.
+fn gather(task: &Task) -> Result<PathBuf> {
+    let folder = task.machine.folder(task.context).join(GATHERED_FOLDER);
+    fs::create_dir_all(&folder)?;
+    fs::copy(task.run_file(REPORT_FILE), folder.join(REPORT_FILE))?;
+    // A daemon that never started has no log, and the folder says so by lacking it.
+    let _ = fs::copy(task.run_file(OUTPUT_FILE), folder.join(OUTPUT_FILE));
+    fs::write(folder.join(PROBE_FILE), probe_text(task))?;
+    Ok(folder)
+}
+
 /// Runs dxdiag in the guest, waits for it, and saves its report in the run folder.
 pub(super) fn dxdiag(task: &mut Task) -> Result<()> {
     if task.pid().is_none() {
@@ -82,7 +117,15 @@ pub(super) fn dxdiag(task: &mut Task) -> Result<()> {
         report_from(&answer).ok_or_else(|| Failure::new("dxdiag's report could not be read back."))?;
     let saved = task.run_file(REPORT_FILE);
     fs::write(&saved, report)?;
-    task.step(&format!("The report is in {}", saved.display()));
+    if task.machine.windows_maker() == Some(GpuMaker::Intel) {
+        let folder = gather(task)?;
+        task.step(&format!(
+            "The report, the daemon's log and the card's details are in {}",
+            folder.display()
+        ));
+    } else {
+        task.step(&format!("The report is in {}", saved.display()));
+    }
     Ok(())
 }
 
@@ -97,20 +140,42 @@ mod tests {
     use std::sync::Arc;
 
     fn run(answers: &[&str], running: bool) -> (Result<()>, Arc<ScriptedAgent>, Scratch, Vec<u8>) {
+        let (result, agent, scratch, saved, _) = run_on(answers, running, None);
+        (result, agent, scratch, saved)
+    }
+
+    /// The same for a machine on a card of `maker`, with the machine's folder as well.
+    fn run_on(
+        answers: &[&str],
+        running: bool,
+        maker: Option<GpuMaker>,
+    ) -> (Result<()>, Arc<ScriptedAgent>, Scratch, Vec<u8>, PathBuf) {
         let scratch = Scratch::new();
         let mut context = plain_task_context(&scratch);
+        scratch.program(
+            "program/intel-probe",
+            "#!/bin/sh
+echo \"probe of $1\"
+",
+        );
         if running {
             with_vm_running(&context);
         }
         let agent = Arc::new(ScriptedAgent::answering(answers));
         context.agent = agent.clone();
-        let vm = machine(&context);
+        let mut vm = machine(&context);
+        if let Some(maker) = maker {
+            vm.use_windows_card(maker, "0000:00:02.0");
+        }
         crate::agent::make_token(&context, &vm).unwrap();
+        let folder = vm.folder(&context);
         let host = RecordingHost::default();
         let mut task = Task::new(&context, &host, "dxdiag", vm);
+        context.make_run_folder(None).unwrap();
+        fs::write(task.run_file(OUTPUT_FILE), "the daemon's log").unwrap();
         let result = dxdiag(&mut task);
         let saved = fs::read(task.run_file(REPORT_FILE)).unwrap_or_default();
-        (result, agent, scratch, saved)
+        (result, agent, scratch, saved, folder)
     }
 
     #[test]
@@ -129,6 +194,20 @@ mod tests {
             asked[0].2
         );
         assert_eq!(asked.len(), 5, "a start, three looks, and the fetch");
+    }
+
+    #[test]
+    fn for_an_intel_machine_the_report_the_log_and_the_probes_answer_are_gathered_in_its_folder() {
+        let answers = [STARTED_MARK, DONE_MARK, &format!("{REPORT_MARK}{}", base64_encode(b"the report"))];
+        let (result, _, _scratch, _, folder) = run_on(&answers, true, Some(GpuMaker::Intel));
+        result.unwrap();
+        let gathered = folder.join(GATHERED_FOLDER);
+        assert_eq!(fs::read_to_string(gathered.join(REPORT_FILE)).unwrap(), "the report");
+        assert_eq!(fs::read_to_string(gathered.join(PROBE_FILE)).unwrap().trim(), "probe of 0000:00:02.0");
+        assert_eq!(fs::read_to_string(gathered.join(OUTPUT_FILE)).unwrap(), "the daemon's log");
+        let (result, _, _scratch, _, folder) = run_on(&answers, true, None);
+        result.unwrap();
+        assert!(!folder.join(GATHERED_FOLDER).exists(), "only an Intel machine gathers");
     }
 
     #[test]

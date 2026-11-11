@@ -256,4 +256,21 @@ mod tests {
     fn a_semicolon_in_quotes_is_not_a_comment() {
         assert_eq!(without_comment("a = \"b;c\" ; d"), "a = \"b;c\" ");
     }
+
+    /// Intel's own INF, named in `GUESTHOUSE_INTEL_INF`, with the card in `GUESTHOUSE_INTEL_DEVICE` as
+    /// hex. Run by hand, as the INF is Intel's and not ours. Prints the files, and holds them to the
+    /// ones the Intel daemon names.
+    #[test]
+    #[ignore = "needs Intel's INF"]
+    fn a_real_inf_gives_every_file_the_daemon_names() {
+        let path = std::env::var("GUESTHOUSE_INTEL_INF").unwrap();
+        let device = u32::from_str_radix(&std::env::var("GUESTHOUSE_INTEL_DEVICE").unwrap(), 16).unwrap();
+        let inf = decode(&std::fs::read(path).unwrap());
+        let files = guest_files(&inf, device);
+        println!("{}\n{} files", files.join("\n"), files.len());
+        for named in crate::setup::intel::NAMED_FILES {
+            assert!(files.iter().any(|file| file == named), "{named} is not among them");
+        }
+        assert!(!files.iter().any(|file| file.ends_with(".sys")), "no kernel driver");
+    }
 }

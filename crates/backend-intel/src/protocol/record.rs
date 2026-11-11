@@ -5,13 +5,15 @@
 //!
 //! The record is built once, from the card and its generation: the platform and core families,
 //! the card's ids, clocks and shape, the feature flags this backend sets, and the GPU address
-//! partition. Compression is off, as the host can't set up compressed memory yet, and the byte that
-//! marks the adapter as a virtual machine's is set. What is left at zero is listed in
+//! partition. The shape of the GPU includes its slice arrays, [`super::shape`]. Compression is off,
+//! as the host can't set up compressed memory yet, and the byte that marks the adapter as a virtual
+//! machine's is set, with the one workaround entry that goes with it. What is left at zero is listed in
 //! [`super::gaps::RECORD`].
 
 use super::bytes::{dword, put_dword, put_qword, put_word};
 use super::features::{self, Feature};
 use super::partition;
+use super::shape::{self, Core};
 use guesthouse_backend::{Status, VendorQuery};
 
 /// KMTQAITYPE_UMDRIVERPRIVATE.
@@ -55,6 +57,10 @@ mod at {
     pub const MAX_SLICES: usize = 0xB98;
     pub const MAX_SUBSLICES: usize = 0xB9C;
     pub const MAX_DUAL_SUBSLICES: usize = 0xBA0;
+    /// The compute engines' enable mask and count, and the flag that says they are filled in.
+    pub const COMPUTE_ENGINE_MASK: usize = 0x2078;
+    pub const COMPUTE_ENGINE_COUNT: usize = 0x207C;
+    pub const COMPUTE_ENGINES_VALID: usize = 0x2090;
     /// GMM_GFX_PARTITIONING, [`super::partition`].
     pub const PARTITION: usize = 0x23B8;
     /// A byte that marks the adapter as a virtual machine's.
@@ -62,6 +68,13 @@ mod at {
     /// A byte that marks that machine as a secure one.
     pub const SECURE_VIRTUAL_MACHINE: usize = 0x2469;
 }
+
+/// The workaround entry that is set for an adapter that is a virtual machine's, and its value.
+const VIRTUAL_MACHINE_WORKAROUND: (usize, u8) = (968, 1);
+/// The compute engines the record's mask has room for.
+const MAX_COMPUTE_ENGINES: u32 = 4;
+/// The GPU address bits from which the card has five levels of page tables.
+const FIVE_LEVEL_ADDRESS_BITS: u64 = 57;
 
 /// The bytes a CPU cache line takes on the hosts this runs on.
 const CACHE_LINE_BYTES: u32 = 64;
@@ -124,7 +137,7 @@ pub struct Memory {
 }
 
 /// Everything the record is built from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecordFacts {
     pub platform: Platform,
     pub gt: GtSystem,
@@ -134,6 +147,13 @@ pub struct RecordFacts {
     pub render_mhz: (u32, u32),
     pub memory: Memory,
     pub local_memory: bool,
+    /// The Xe cores, as [`shape::representable`] leaves them. The counts in [`GtSystem`] are of these.
+    pub cores: Vec<Core>,
+    /// The card's compute engines, and whether it has a copy engine.
+    pub compute_engines: u32,
+    pub copy_engine: bool,
+    /// The bits of GPU address the card has.
+    pub address_bits: u64,
 }
 
 /// Builds the record.
@@ -178,7 +198,17 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
         put_dword(&mut record, field, value);
     }
 
-    set_features(&mut record, facts.local_memory);
+    shape::write(&mut record, &facts.cores);
+    if facts.compute_engines > 0 {
+        let engines = facts.compute_engines.min(MAX_COMPUTE_ENGINES);
+        put_dword(&mut record, at::COMPUTE_ENGINE_MASK, (1 << engines) - 1);
+        put_dword(&mut record, at::COMPUTE_ENGINE_COUNT, engines);
+        record[at::COMPUTE_ENGINES_VALID] = 1;
+    }
+
+    set_features(&mut record, facts);
+    let (entry, value) = VIRTUAL_MACHINE_WORKAROUND;
+    features::set_workaround(&mut record, entry, value);
     let block = &mut record[at::PARTITION..at::PARTITION + partition::SIZE];
     partition::write(block, &partition::ours());
     record[at::FROM_VIRTUAL_MACHINE] = 1;
@@ -186,9 +216,15 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     record
 }
 
-/// The model of memory the core offers, and no compression.
-fn set_features(record: &mut [u8], local_memory: bool) {
-    let flags: [(Feature, bool); 8] = [
+/// The flags this backend sets: the memory model the core offers, hardware scheduling, Xe2's
+/// tiling, the engines the card has and the preemption Xe2 has. Compression is always off.
+///
+/// Five-level page tables are on only when the card has the address bits for them. The core's
+/// addresses stop at 1 TiB, so a guest told it has five levels still never gets an address that
+/// needs more than the first four; the card's own bits decide whether to say so.
+fn set_features(record: &mut [u8], facts: &RecordFacts) {
+    let compute = facts.compute_engines > 0;
+    let flags: [(Feature, bool); 19] = [
         (features::PPGTT, true),
         (features::WDDM2_GPU_MMU, true),
         (features::WDDM2_64KB_PAGES, true),
@@ -196,9 +232,21 @@ fn set_features(record: &mut [u8], local_memory: bool) {
         // GPU can't share them.
         (features::SVM, false),
         (features::WDDM2_SVM, false),
-        (features::LOCAL_MEMORY, local_memory),
+        (features::LOCAL_MEMORY, facts.local_memory),
         (features::TILE_Y, false),
         (features::HW_SEMAPHORE_64, false),
+        (features::HW_SCHEDULING, true),
+        (features::XE2_TILING, true),
+        (features::PML5, facts.address_bits >= FIVE_LEVEL_ADDRESS_BITS),
+        (features::WALKER_MTP, compute),
+        (features::CCS_RING, compute),
+        (features::CCS_NODE, compute),
+        (features::CCS_MULTI_INSTANCE, facts.compute_engines > 1),
+        (features::BLITTER_RING, facts.copy_engine),
+        (features::GPGPU_MID_BATCH_PREEMPT, compute),
+        (features::GPGPU_THREAD_GROUP_PREEMPT, compute),
+        // Compute-runtime takes mid-thread preemption to be the walker's.
+        (features::GPGPU_MID_THREAD_PREEMPT, compute),
     ];
     for (feature, on) in flags {
         features::set(record, feature, on);
@@ -299,6 +347,10 @@ pub(crate) mod tests {
             render_mhz: (400, 2050),
             memory: Memory { system_shared: 16 << 30, ..Memory::default() },
             local_memory: false,
+            cores: (0..8).map(|index| Core { slice: 0, index, eu_count: 8, eu_mask: 0xFF }).collect(),
+            compute_engines: 1,
+            copy_engine: true,
+            address_bits: 48,
         }
     }
 
@@ -352,6 +404,57 @@ pub(crate) mod tests {
         }
         let discrete = build(&RecordFacts { local_memory: true, ..facts() });
         assert!(features::is_set(&discrete, features::LOCAL_MEMORY));
+    }
+
+    #[test]
+    fn hardware_scheduling_engines_and_preemption_are_set_for_a_card_with_them() {
+        let record = build(&facts());
+        for feature in [
+            features::HW_SCHEDULING,
+            features::XE2_TILING,
+            features::WALKER_MTP,
+            features::CCS_RING,
+            features::CCS_NODE,
+            features::BLITTER_RING,
+            features::GPGPU_MID_BATCH_PREEMPT,
+            features::GPGPU_THREAD_GROUP_PREEMPT,
+            features::GPGPU_MID_THREAD_PREEMPT,
+        ] {
+            assert!(features::is_set(&record, feature), "{}", feature.name);
+        }
+        for feature in [features::CCS_MULTI_INSTANCE, features::PML5] {
+            assert!(!features::is_set(&record, feature), "{}", feature.name);
+        }
+        assert_eq!(dword(&record, at::COMPUTE_ENGINE_MASK), Some(1));
+        assert_eq!(dword(&record, at::COMPUTE_ENGINE_COUNT), Some(1));
+        assert_eq!(record[at::COMPUTE_ENGINES_VALID], 1);
+    }
+
+    #[test]
+    fn the_engine_flags_follow_the_engines_the_card_has() {
+        let bare = build(&RecordFacts { compute_engines: 0, copy_engine: false, ..facts() });
+        for feature in [features::CCS_RING, features::BLITTER_RING, features::WALKER_MTP] {
+            assert!(!features::is_set(&bare, feature), "{}", feature.name);
+        }
+        assert_eq!(bare[at::COMPUTE_ENGINES_VALID], 0);
+        let two = build(&RecordFacts { compute_engines: 2, ..facts() });
+        assert!(features::is_set(&two, features::CCS_MULTI_INSTANCE));
+        assert_eq!(dword(&two, at::COMPUTE_ENGINE_MASK), Some(0b11));
+    }
+
+    #[test]
+    fn five_level_page_tables_need_the_address_bits() {
+        let wide = build(&RecordFacts { address_bits: 57, ..facts() });
+        assert!(features::is_set(&wide, features::PML5));
+    }
+
+    #[test]
+    fn the_virtual_machine_workaround_entry_is_set_and_its_neighbours_are_not() {
+        let record = build(&facts());
+        assert_eq!(features::workaround(&record, 968), Some(1));
+        assert_eq!(record[0x584], 1);
+        assert_eq!(features::workaround(&record, 969), Some(0));
+        assert_eq!(features::workaround(&record, 967), Some(0));
     }
 
     #[test]

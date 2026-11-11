@@ -47,11 +47,11 @@ use protocol::command_header::Header;
 use protocol::context::Context;
 use protocol::escape::Escape;
 use protocol::record::{GtSystem, IpWord, Memory, Platform, RecordFacts};
-use protocol::{gaps, guest_driver, record};
+use protocol::{gaps, guest_driver, record, shape};
 use std::time::Instant;
 use traffic::{QueryOutcome, Traffic};
 use watch::PREFIX;
-use xe_query::Gt;
+use xe_query::{Engine, Gt};
 
 /// How this backend names the host driver's branch: the Linux kernel's xe.
 const HOST_BRANCH: &str = "xe";
@@ -168,7 +168,7 @@ impl IntelBackend {
         }
         log::info!("{PREFIX} record {}", record::summary(&self.record));
         log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
-        for gap in gaps::RECORD {
+        for gap in gaps::unset(shape::filled(&self.record)) {
             log::info!("{PREFIX} record-gap \"{gap}\"");
         }
         log::warn!("{PREFIX} this stage runs nothing on the card: the guest's work is finished unrun");
@@ -183,8 +183,15 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
     let config = |key| card.hwconfig.value(key).unwrap_or(0);
     let threads_per_eu =
         card.hwconfig.value(hwconfig::NUM_THREADS_PER_EU).unwrap_or(generation.threads_per_eu);
-    let (eus, dual_subslices) = (card.eu_count(), card.dual_subslices());
     let most_dual_subslices = config(hwconfig::MAX_DUAL_SUBSLICES_SUPPORTED);
+    // The counts are of the cores the slice arrays can hold, so the arrays and the counts agree.
+    let cores = shape::representable(&card.cores(), config(hwconfig::MAX_SLICES_SUPPORTED));
+    let (eus, dual_subslices, slices) = if cores.is_empty() {
+        (card.eu_count(), card.dual_subslices(), card.slices().unwrap_or(0))
+    } else {
+        let eus = cores.iter().fold(0u32, |sum, core| sum.saturating_add(core.eu_count));
+        (eus, cores.len() as u32, shape::slices_in(&cores))
+    };
     RecordFacts {
         platform: Platform {
             product_family: generation.product_family,
@@ -200,7 +207,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         gt: GtSystem {
             eu_count: eus,
             thread_count: eus.saturating_mul(threads_per_eu),
-            slice_count: card.slices().unwrap_or(0),
+            slice_count: slices,
             subslice_count: dual_subslices,
             dual_subslice_count: dual_subslices,
             max_eu_per_subslice: config(hwconfig::MAX_NUM_EU_PER_DSS),
@@ -212,6 +219,10 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         render_mhz: (card.frequencies.lowest.unwrap_or(0), card.frequencies.highest.unwrap_or(0)),
         memory: Memory { dedicated: 0, system_shared: shared, system_video: 0 },
         local_memory: card.config.has_vram(),
+        cores,
+        compute_engines: card.engines_of(Engine::COMPUTE),
+        copy_engine: card.engines_of(Engine::COPY) > 0,
+        address_bits: card.config.va_bits,
     }
 }
 
@@ -359,6 +370,10 @@ impl Backend for IntelBackend {
                 let (status, asked) = record::answer(&self.record, query, out);
                 QueryOutcome::Record(status, asked)
             }
+            guest_driver::QUERY_OPENGL => {
+                let driver = guest_driver::write_opengl_info(query, out);
+                QueryOutcome::OpenGl(Status::SUCCESS, driver)
+            }
             QUERY_USER_DRIVER_NAME => {
                 let (status, name) = guest_driver::write_name(query, self.software_desktop, out);
                 QueryOutcome::DriverName(status, name)
@@ -367,7 +382,9 @@ impl Backend for IntelBackend {
         };
         self.traffic.query(query, outcome);
         match outcome {
-            QueryOutcome::Record(status, _) | QueryOutcome::DriverName(status, _) => Some(status),
+            QueryOutcome::Record(status, _)
+            | QueryOutcome::DriverName(status, _)
+            | QueryOutcome::OpenGl(status, _) => Some(status),
             QueryOutcome::LeftToTheCore => None,
         }
     }
@@ -505,6 +522,6 @@ mod tests {
         card.hwconfig = hwconfig::Hwconfig::default();
         let facts = record_facts(&card, &generation::XE2_LPG, 0);
         assert_eq!(facts.gt.thread_count, 64 * generation::XE2_LPG.threads_per_eu);
-        assert_eq!((facts.gt.max_slices, facts.gt.slice_count), (0, 0), "not guessed");
+        assert_eq!(facts.gt.max_slices, 0, "not guessed");
     }
 }

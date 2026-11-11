@@ -5,6 +5,7 @@
 
 use crate::hwconfig::{self, Hwconfig};
 use crate::ioctl::RenderNode;
+use crate::protocol::shape::Core;
 use crate::sysfs::{self, Frequencies, PciIdentity};
 use crate::xe_query::{self, Config, Engine, FirmwareVersion, Gt, MemoryRegion, TopologyMask, kind};
 use guesthouse_backend::AdapterEngines;
@@ -98,16 +99,21 @@ impl CardFacts {
         system.map(|region| region.total).sum()
     }
 
-    /// The bits set in the main GT's masks of these kinds, together.
-    fn main_mask_bits(&self, kinds: &[u16]) -> u32 {
-        let Some(main) = self.main_gt() else { return 0 };
+    /// The main GT's masks of these kinds, together.
+    fn main_mask_union(&self, kinds: &[u16]) -> Vec<u8> {
+        let Some(main) = self.main_gt() else { return Vec::new() };
         let masks = self.topology.iter().filter(|mask| mask.gt == main.id && kinds.contains(&mask.kind));
         let mut union = Vec::<u8>::new();
         for mask in masks {
             union.resize(union.len().max(mask.mask.len()), 0);
             union.iter_mut().zip(&mask.mask).for_each(|(into, byte)| *into |= byte);
         }
-        union.iter().map(|byte| byte.count_ones()).sum()
+        union
+    }
+
+    /// The bits set in the main GT's masks of these kinds, together.
+    fn main_mask_bits(&self, kinds: &[u16]) -> u32 {
+        self.main_mask_union(kinds).iter().map(|byte| byte.count_ones()).sum()
     }
 
     /// Dual subslices the main GT has, for geometry or compute.
@@ -124,12 +130,37 @@ impl CardFacts {
         self.dual_subslices().saturating_mul(self.eus_per_dual_subslice())
     }
 
-    /// The slices that hold the dual subslices there are, when hwconfig says how many fit in one.
-    pub fn slices(&self) -> Option<u32> {
+    /// How many dual subslices a slice holds, when hwconfig says how many slices and dual subslices
+    /// the platform has.
+    pub fn dual_subslices_per_slice(&self) -> Option<u32> {
         let slices = self.hwconfig.value(hwconfig::MAX_SLICES_SUPPORTED).filter(|&count| count > 0)?;
         let most = self.hwconfig.value(hwconfig::MAX_DUAL_SUBSLICES_SUPPORTED)?;
-        let per_slice = (most / slices).max(1);
-        Some(self.dual_subslices().div_ceil(per_slice))
+        Some((most / slices).max(1))
+    }
+
+    /// The slices that hold the dual subslices there are, when hwconfig says how many fit in one.
+    pub fn slices(&self) -> Option<u32> {
+        Some(self.dual_subslices().div_ceil(self.dual_subslices_per_slice()?))
+    }
+
+    /// The main GT's Xe cores, each in the slice its bit falls in and at its place along that slice,
+    /// with the EUs the card gives every core. Empty when hwconfig doesn't say how many fit in a slice.
+    pub fn cores(&self) -> Vec<Core> {
+        let Some(per_slice) = self.dual_subslices_per_slice() else { return Vec::new() };
+        let cores = self.main_mask_union(&[TopologyMask::DSS_GEOMETRY, TopologyMask::DSS_COMPUTE]);
+        let eus = self.main_mask_union(&[TopologyMask::EU_PER_DSS, TopologyMask::SIMD16_EU_PER_DSS]);
+        let eu_count = eus.iter().map(|byte| byte.count_ones()).sum();
+        let eu_mask = eus.iter().take(4).rev().fold(0u32, |mask, &byte| mask << 8 | u32::from(byte));
+        let bits = cores.iter().enumerate().flat_map(|(at, &byte)| {
+            (0..8u32).filter(move |bit| byte & (1 << bit) != 0).map(move |bit| at as u32 * 8 + bit)
+        });
+        bits.map(|bit| Core { slice: bit / per_slice, index: bit % per_slice, eu_count, eu_mask }).collect()
+    }
+
+    /// How many engines of a class the main GT has.
+    pub fn engines_of(&self, class: u16) -> u32 {
+        let main = self.main_gt().map_or(0, |gt| gt.id);
+        self.engines.iter().filter(|engine| engine.class == class && engine.gt == main).count() as u32
     }
 
     /// Which families of engine the card has.
@@ -210,6 +241,26 @@ pub(crate) mod tests {
         assert_eq!(card.slices(), Some(1));
         assert_eq!(card.system_memory(), 32 << 30);
         assert_eq!(card.media_gt().map(|gt| gt.ip.major), Some(20));
+    }
+
+    #[test]
+    fn the_cores_are_the_bits_of_the_mask_in_their_slices() {
+        let card = CardFacts {
+            hwconfig: Hwconfig::parse(&table(&[
+                (hwconfig::MAX_SLICES_SUPPORTED, 2),
+                (hwconfig::MAX_DUAL_SUBSLICES_SUPPORTED, 16),
+            ])),
+            topology: vec![
+                TopologyMask { gt: 0, kind: TopologyMask::DSS_COMPUTE, mask: vec![0b0000_0101, 0b1000_0000] },
+                TopologyMask { gt: 0, kind: TopologyMask::EU_PER_DSS, mask: vec![0b0111_1111] },
+            ],
+            ..lunar_lake()
+        };
+        let at: Vec<(u32, u32)> = card.cores().iter().map(|core| (core.slice, core.index)).collect();
+        assert_eq!(at, [(0, 0), (0, 2), (1, 7)]);
+        assert!(card.cores().iter().all(|core| (core.eu_count, core.eu_mask) == (7, 0x7F)));
+        assert_eq!(card.engines_of(Engine::COMPUTE), 1);
+        assert_eq!(CardFacts { hwconfig: Hwconfig::default(), ..card }.cores(), []);
     }
 
     #[test]

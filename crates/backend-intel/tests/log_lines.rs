@@ -68,7 +68,7 @@ fn every_kind_of_exchange_has_its_line() {
     for (start, count) in [
         ("intel card pci=8086:64a0", 1),
         ("intel record product_family=1275 render_core=0xc09", 1),
-        ("intel record-gap ", gaps::RECORD.len()),
+        ("intel record-gap ", gaps::unset(true).len()),
         ("intel adapter-opened guest_id=0x6949", 1),
         ("intel query kind=0 size=4 wow64=0 answered=adapter-count", 1),
         ("intel query kind=0 size=9588 wow64=0 answered=record", 1),

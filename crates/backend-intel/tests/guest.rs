@@ -151,3 +151,59 @@ fn an_empty_partition_escape_gets_the_partition_the_record_has() {
     let record = query(&mut session, record::QUERY_TYPE, &vec![0; record::RECORD_SIZE]);
     assert_eq!(partition::read(&record[4 + 0x23B8..]), given);
 }
+
+#[test]
+fn a_compute_style_open_reads_the_record_and_the_reader_finds_the_cards_shape() {
+    let mut session = guest();
+    let mut open = message(Command::OpenAdapter, HEADER_SIZE + 16);
+    set_u64(&mut open, HEADER_SIZE + 8, 0x6949);
+    assert_eq!(u32_at(&send(&mut session, &open), 4), Ok(SUCCESS));
+    let count = query(&mut session, record::QUERY_TYPE, &[0; record::COUNT_SIZE]);
+    assert_eq!(u32_at(&count, 4), Ok(1));
+    let reply = query(&mut session, record::QUERY_TYPE, &vec![0; record::RECORD_SIZE]);
+    assert_eq!(u32_at(&reply, 0), Ok(SUCCESS));
+    let record = &reply[4..];
+    let mapping = translate_topology(record).expect("compute-runtime's reader accepts the record");
+    assert_eq!((mapping.slice_count, mapping.subslice_count, mapping.eu_count), (1, 8, 64));
+    assert_eq!(u32_at(record, 0xB34), Ok(64), "the scalar EU count is the same");
+    use guesthouse_backend_intel::protocol::features;
+    for feature in [features::HW_SCHEDULING, features::CCS_RING, features::XE2_TILING] {
+        assert!(features::is_set(record, feature), "{}", feature.name);
+    }
+    assert_eq!(features::workaround(record, 968), Some(1));
+}
+
+#[test]
+fn a_32_bit_process_is_given_the_32_bit_direct3d_and_opengl_drivers() {
+    let mut session = guest();
+    let mut create = message(Command::CreateProcess, 0x233);
+    create[0x232] = 4;
+    let process = u32_at(&send(&mut session, &create), 0).unwrap();
+    let asking = |kind: u32, data: &[u8]| {
+        let mut request = message(Command::QueryAdapter, HEADER_SIZE + 8);
+        set_u32(&mut request, 8, process);
+        set_u32(&mut request, HEADER_SIZE, kind);
+        set_u32(&mut request, HEADER_SIZE + 4, data.len() as u32);
+        request.extend_from_slice(data);
+        request
+    };
+    let text = |bytes: &[u8]| {
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|unit| u16::from_le_bytes(*unit))
+            .take_while(|&unit| unit != 0)
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    let mut ask = DIRECT3D_12.to_le_bytes().to_vec();
+    ask.resize(520, 0);
+    let reply = send(&mut session, &asking(1, &ask));
+    assert_eq!(u32_at(&reply, 0), Ok(SUCCESS));
+    assert!(text(&reply[8..]).ends_with(r"\igd12umd32.dll"));
+    let reply = send(&mut session, &asking(2, &[0; 528]));
+    assert_eq!(u32_at(&reply, 0), Ok(SUCCESS));
+    assert!(text(&reply[4..]).ends_with(r"\igxe2lpgicd32.dll"));
+    assert_eq!(&reply[4 + 520..4 + 528], [1, 0, 0, 0, 3, 0, 0, 0]);
+}

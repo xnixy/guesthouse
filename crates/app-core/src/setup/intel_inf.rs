@@ -33,7 +33,7 @@ pub fn decode(data: &[u8]) -> String {
     match data.strip_prefix(&UTF16_MARK) {
         Some(text) => {
             let units: Vec<u16> =
-                text.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+                text.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
             String::from_utf16_lossy(&units)
         }
         None => super::inf::latin1(data),

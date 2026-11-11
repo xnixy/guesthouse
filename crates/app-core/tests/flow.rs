@@ -306,6 +306,12 @@ fn outer() {
         .env(INNER_VARIABLE, "1")
         .env("FLOW_BINARIES", &bin)
         .env("HOME", folder.join("home"))
+        // These win over HOME, and would send the test to the real folders.
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("GUESTHOUSE_STORE")
+        .env_remove("GUESTHOUSE_MACHINES")
         .env("XDG_RUNTIME_DIR", folder.join("run"))
         .env("GUESTHOUSE_SHARED_MEMORY", folder.join("shm"))
         .env(MEMINFO_VARIABLE, folder.join("meminfo"))

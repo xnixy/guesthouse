@@ -3,6 +3,7 @@
 //! its hardware id names, then the file lists that section copies, and from those the ones that go
 //! into the driver's own folder, which is the folder the guest's driver store copy is made from.
 
+use crate::setup::guest_files::GuestFile;
 use std::collections::{BTreeSet, HashMap};
 
 /// A UTF-16 file starts with this. Older INFs are plain 8-bit text.
@@ -27,6 +28,10 @@ const NOT_FOR_THE_GUEST: [&str; 8] = [
     "IGSDS.Copy",
     "CMC.Copy",
 ];
+
+/// Lists whose files belong to Intel's own tools, its control panel and its media software, and
+/// go to Windows' folders besides: their names start with these.
+const NOT_LOADERS: [&str; 3] = ["ControlApi_", "MSDK_", "IntelAPI."];
 
 /// The text of an INF, which Intel's are in UTF-16.
 pub fn decode(data: &[u8]) -> String {
@@ -106,11 +111,10 @@ fn goes_to_driver_folder(sections: &HashMap<String, Vec<&str>>, list: &str) -> b
     })
 }
 
-/// The names of the files a guest on this device gets in its driver folder, sorted.
-pub fn guest_files(inf: &str, device: u32) -> Vec<String> {
-    let sections = sections(inf);
-    let mut names = BTreeSet::new();
-    for install in install_sections(&sections, device) {
+/// The file lists the card's install sections copy, minus the ones a guest has no use for.
+fn copy_lists<'a>(sections: &HashMap<String, Vec<&'a str>>, device: u32) -> Vec<&'a str> {
+    let mut found = Vec::new();
+    for install in install_sections(sections, device) {
         let decorated = format!("{}{PLATFORM_SUFFIX}", install.to_lowercase());
         let Some(lines) = sections.get(&decorated).or_else(|| sections.get(&install.to_lowercase())) else {
             continue;
@@ -120,17 +124,65 @@ pub fn guest_files(inf: &str, device: u32) -> Vec<String> {
             .filter_map(|line| line.split_once('='))
             .filter(|(key, _)| key.trim().eq_ignore_ascii_case("CopyFiles"))
             .flat_map(|(_, value)| fields(value));
-        for list in lists {
-            let skipped = NOT_FOR_THE_GUEST.iter().any(|known| known.eq_ignore_ascii_case(list));
-            if skipped || !goes_to_driver_folder(&sections, list) {
-                continue;
-            }
+        found.extend(lists.filter(|list| !NOT_FOR_THE_GUEST.iter().any(|known| known.eq_ignore_ascii_case(list))));
+    }
+    found
+}
+
+/// The names of the files a guest on this device gets in its driver folder, sorted.
+pub fn guest_files(inf: &str, device: u32) -> Vec<String> {
+    let sections = sections(inf);
+    let mut names = BTreeSet::new();
+    for list in copy_lists(&sections, device) {
+        if goes_to_driver_folder(&sections, list) {
             let files = sections.get(&list.to_lowercase()).into_iter().flatten();
             names.extend(files.filter_map(|line| fields(line).next()).map(str::to_owned));
         }
     }
     let mut seen = BTreeSet::new();
     names.into_iter().filter(|name| seen.insert(name.to_lowercase())).collect()
+}
+
+/// Where a file list puts its files in Windows' own folders: System32 for directory 11, and SysWOW64
+/// for `10,SysWow64`. Anything else is the driver's folder or a place a guest has no use for.
+fn windows_folder(sections: &HashMap<String, Vec<&str>>, list: &str) -> Option<&'static str> {
+    let directories = sections.get("destinationdirs")?;
+    let mut lines = directories.iter().filter_map(|line| line.split_once('='));
+    let (_, place) = lines.find(|(name, _)| name.trim().eq_ignore_ascii_case(list))?;
+    match fields(place).collect::<Vec<_>>().as_slice() {
+        ["11"] => Some("System32"),
+        ["10", folder] if folder.eq_ignore_ascii_case("syswow64") => Some("SysWOW64"),
+        _ => None,
+    }
+}
+
+/// The loaders and runtime libraries the INF puts in Windows' system folders for this device: the
+/// Vulkan, OpenCL and Level Zero loaders, and the 32-bit C++ runtime the 32-bit drivers load. Each is
+/// the folder, the file in the driver package (`source`) and the name it gets there (`name`), which
+/// differ where the INF renames. Intel's control library, its media libraries and its tools are left
+/// out, as nothing a graphics program does loads them.
+pub fn system_files(inf: &str, device: u32) -> Vec<GuestFile> {
+    let sections = sections(inf);
+    let mut found: Vec<GuestFile> = Vec::new();
+    for list in copy_lists(&sections, device) {
+        let skipped = NOT_LOADERS.iter().any(|prefix| {
+            list.get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+        });
+        let Some(folder) = windows_folder(&sections, list).filter(|_| !skipped) else { continue };
+        for line in sections.get(&list.to_lowercase()).into_iter().flatten() {
+            // The INF's order is the name, then the file to copy if that differs, so empty fields count.
+            let mut parts = line.split(',').map(|field| field.trim().trim_matches('"'));
+            let Some(name) = parts.next().filter(|name| name.to_lowercase().ends_with(".dll")) else {
+                continue;
+            };
+            let source = parts.next().filter(|source| !source.is_empty()).unwrap_or(name);
+            let known = found.iter().any(|file| file.folder == folder && file.name.eq_ignore_ascii_case(name));
+            if !known {
+                found.push(GuestFile { folder: folder.to_owned(), source: source.to_owned(), name: name.to_owned() });
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -153,6 +205,16 @@ pub mod stand_in {
         "ze_intel_gpu64.dll",
     ];
 
+    /// What the INF below puts in Windows' folders, as folder, file in the package and name there.
+    pub const SYSTEM_FILES: [(&str, &str, &str); 6] = [
+        ("System32", "vulkan-1-64.dll", "vulkan-1.dll"),
+        ("System32", "Intel_OpenCL_ICD64.dll", "OpenCL.dll"),
+        ("SysWOW64", "msvcp140_32.dll", "msvcp140.dll"),
+        ("SysWOW64", "own.dll", "own.dll"),
+        ("SysWOW64", "vulkan-1-32.dll", "vulkan-1.dll"),
+        ("SysWOW64", "Intel_OpenCL_ICD32.dll", "OpenCL.dll"),
+    ];
+
     /// An INF in the shape of Intel's, as far as this reads it, with a few files where it has
     /// hundreds: one install section for the device, the kernel driver and Linux libraries it
     /// leaves out, and files that go to Windows' own folders.
@@ -170,9 +232,9 @@ pub mod stand_in {
              %OTHER% = FAMILY_B, PCI\\VEN_8086&DEV_6420\n\
              %AMD% = FAMILY_C, PCI\\VEN_1002&DEV_64A0\n\
              [FAMILY_A]\n\
-             CopyFiles=igfx.Miniport_DS_N, Direct3D, Direct3D32, Loaders, igfx.UserMode_WSL, Vulkan, Compute, Compute32, MFX_Common.Copy_DS\n\
+             CopyFiles=igfx.Miniport_DS_N, Direct3D, Direct3D32, Loaders, igfx.UserMode_WSL, Vulkan, Compute, Compute32, MFX_Common.Copy_DS, OpenCL.Copy64_Ext, Runtime_Wow, Loaders32, ControlApi_Gpu.Copy64_Ext, MSDK_w10rs1.copy32\n\
              [FAMILY_A.NTamd64]\n\
-             CopyFiles=igfx.Miniport_DS_N, Direct3D, Direct3D32, Loaders, igfx.UserMode_WSL, Vulkan, Compute, Compute32, MFX_Common.Copy_DS\n\
+             CopyFiles=igfx.Miniport_DS_N, Direct3D, Direct3D32, Loaders, igfx.UserMode_WSL, Vulkan, Compute, Compute32, MFX_Common.Copy_DS, OpenCL.Copy64_Ext, Runtime_Wow, Loaders32, ControlApi_Gpu.Copy64_Ext, MSDK_w10rs1.copy32\n\
              [FAMILY_B]\n\
              CopyFiles=Other\n\
              [DestinationDirs]\n\
@@ -180,6 +242,11 @@ pub mod stand_in {
              Direct3D=13\n\
              Direct3D32=13\n\
              Loaders=11\n\
+             Loaders32=10, SysWow64\n\
+             OpenCL.Copy64_Ext=11\n\
+             Runtime_Wow=10,SysWOW64\n\
+             ControlApi_Gpu.Copy64_Ext=11\n\
+             MSDK_w10rs1.copy32=10, SysWow64\n\
              igfx.UserMode_WSL=13\n\
              Vulkan=13\n\
              Compute=13\n\
@@ -196,6 +263,20 @@ pub mod stand_in {
              igd12umd32.dll\n\
              [Loaders]\n\
              vulkan-1.dll, vulkan-1-64.dll,,0x4020\n\
+             vulkaninfo.exe, vulkaninfo-64.exe,,0x4020\n\
+             [OpenCL.Copy64_Ext]\n\
+             OpenCL.dll,Intel_OpenCL_ICD64.dll,,0x4020\n\
+             [Runtime_Wow]\n\
+             msvcp140.dll,msvcp140_32.dll,,0x00004020 ; renamed on the way\n\
+             own.dll,,,%COPYFLAG4000%\n\
+             [Loaders32]\n\
+             vulkan-1.dll,    vulkan-1-32.dll,,    0x00004020\n\
+             vulkaninfo.exe, vulkaninfo-32.exe,,0x4020\n\
+             OpenCL.dll,Intel_OpenCL_ICD32.dll,,0x4020\n\
+             [ControlApi_Gpu.Copy64_Ext]\n\
+             ControlLib.dll,,,0x4020\n\
+             [MSDK_w10rs1.copy32]\n\
+             libmfxhw32.dll,mfx_loader_dll_hw32.dll,,0x4020\n\
              [igfx.UserMode_WSL]\n\
              libigd12umd64.so\n\
              [Vulkan]\n\
@@ -237,6 +318,21 @@ mod tests {
     }
 
     #[test]
+    fn the_loaders_and_runtime_go_to_the_system_folders_under_the_names_the_inf_gives() {
+        let found: Vec<(String, String, String)> = system_files(&fake_inf(), DEVICE)
+            .into_iter()
+            .map(|file| (file.folder, file.source, file.name))
+            .collect();
+        let wanted: Vec<(String, String, String)> = SYSTEM_FILES
+            .iter()
+            .map(|(folder, source, name)| ((*folder).to_owned(), (*source).to_owned(), (*name).to_owned()))
+            .collect();
+        assert_eq!(found, wanted, "no tools, control library or media libraries");
+        assert!(system_files(&fake_inf(), 0x6420).is_empty());
+        assert!(system_files(&fake_inf(), 0x1234).is_empty());
+    }
+
+    #[test]
     fn another_family_gets_its_own_files_and_a_card_the_inf_lacks_gets_none() {
         assert_eq!(guest_files(&fake_inf(), 0x6420), ["not-ours.dll"]);
         assert!(guest_files(&fake_inf(), 0x1234).is_empty());
@@ -267,10 +363,25 @@ mod tests {
         let device = u32::from_str_radix(&std::env::var("GUESTHOUSE_INTEL_DEVICE").unwrap(), 16).unwrap();
         let inf = decode(&std::fs::read(path).unwrap());
         let files = guest_files(&inf, device);
-        println!("{}\n{} files", files.join("\n"), files.len());
+        println!("{}
+{} files", files.join("
+"), files.len());
         for named in crate::setup::intel::NAMED_FILES {
             assert!(files.iter().any(|file| file == named), "{named} is not among them");
         }
         assert!(!files.iter().any(|file| file.ends_with(".sys")), "no kernel driver");
+        let system = system_files(&inf, device);
+        for file in &system {
+            println!("{} {} from {}", file.folder, file.name, file.source);
+        }
+        let has = |folder: &str, name: &str| {
+            system.iter().any(|file| file.folder == folder && file.name.eq_ignore_ascii_case(name))
+        };
+        for name in ["vulkan-1.dll", "OpenCL.dll", "msvcp140.dll"] {
+            assert!(has("SysWOW64", name), "{name} is not in SysWOW64");
+        }
+        for name in ["vulkan-1.dll", "OpenCL.dll", "ze_loader.dll"] {
+            assert!(has("System32", name), "{name} is not in System32");
+        }
     }
 }

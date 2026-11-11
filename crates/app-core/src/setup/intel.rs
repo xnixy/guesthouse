@@ -14,6 +14,9 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// The list, beside the driver's files, of what goes to the guest's system folders: folder, file and
+/// name, split by tabs, as for NVIDIA.
+pub const SYSTEM_LIST: &str = "system-files.txt";
 const INTEL_SETUP_FILE: &str = "intel.json";
 const DRIVER_FOLDER_FIELD: &str = "driver_folder";
 const DRIVER_VERSION_FIELD: &str = "driver_version";

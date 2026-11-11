@@ -9,11 +9,13 @@
 
 use super::driver::Extraction;
 use super::inf::inf_driver_version;
-use super::intel::{folder_problem, write_intel_setup};
-use super::intel_inf::{decode, guest_files, lists_device};
+use super::intel::{SYSTEM_LIST, folder_problem, write_intel_setup};
+use super::guest_files::{GuestFile, file_list};
+use super::intel_inf::{decode, guest_files, lists_device, system_files};
 use crate::context::Context;
 use crate::failure::{Failure, Result};
 use crate::vm_args::on_path;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -37,8 +39,11 @@ const NO_RAR: &str = "This copy of 7z can't unpack Intel's installer, which keep
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntelPackage {
     pub version: String,
-    /// The driver's files this card needs, by their paths in the archive.
+    /// The driver's files this card needs, by their paths in the archive. That is its own folder's
+    /// files, and the files the INF renames into Windows' system folders.
     pub entries: Vec<String>,
+    /// What goes to System32 and SysWOW64, from which of the entries and under what name.
+    pub system_files: Vec<GuestFile>,
 }
 
 fn inf_entry() -> String {
@@ -95,12 +100,16 @@ pub fn read_intel_installer(path: &str, device: u32) -> Result<IntelPackage> {
     if let Some(problem) = package_problem(&inf, device) {
         return Err(Failure(problem));
     }
-    let entries: Vec<String> =
-        guest_files(&inf, device).iter().map(|name| format!("{DRIVER_ENTRY}/{name}")).collect();
+    let system = system_files(&inf, device);
+    let mut names = guest_files(&inf, device);
+    names.extend(system.iter().map(|file| file.source.clone()));
+    let mut seen = std::collections::BTreeSet::new();
+    names.retain(|name| seen.insert(name.to_lowercase()));
+    let entries: Vec<String> = names.iter().map(|name| format!("{DRIVER_ENTRY}/{name}")).collect();
     if let Some(absent) = entries.iter().find(|entry| !paths.contains(&entry.as_str())) {
         return Err(Failure(format!("Intel's package lacks {absent}, which its INF lists for this card.")));
     }
-    Ok(IntelPackage { version: inf_driver_version(&inf)?, entries })
+    Ok(IntelPackage { version: inf_driver_version(&inf)?, entries, system_files: system })
 }
 
 /// Takes the card's user-mode drivers out of Intel's installer and writes down where they are.
@@ -118,6 +127,8 @@ pub fn unpack_intel(
         .unpack_entries(context, &entries, &target, &check, progress)
         .map_err(|failure| if failure.0.contains(NO_METHOD) { Failure::new(NO_RAR) } else { failure })?;
     let folder = target.join(DRIVER_ENTRY);
+    // The guest's scripts place these from the driver's copy in its store, so the list travels with it.
+    fs::write(folder.join(SYSTEM_LIST), file_list(&package.system_files))?;
     write_intel_setup(context, &folder, &package.version)?;
     Ok(folder)
 }
@@ -126,7 +137,7 @@ pub fn unpack_intel(
 mod tests {
     use super::*;
     use crate::setup::intel::{intel_driver_folder, missing_files};
-    use crate::setup::intel_inf::stand_in::{DEVICE, GUEST_FILES, fake_inf};
+    use crate::setup::intel_inf::stand_in::{DEVICE, GUEST_FILES, SYSTEM_FILES, fake_inf};
     use crate::testing::{Scratch, scratch_context};
     use std::fs;
     use std::process::Stdio;
@@ -137,7 +148,9 @@ mod tests {
         let mut text = vec![0xFF, 0xFE];
         text.extend(inf.encode_utf16().flat_map(u16::to_le_bytes));
         scratch.write(&format!("source/{DRIVER_ENTRY}/{INF_FILE}"), text);
-        for name in GUEST_FILES.iter().chain(&["igdkmdn64.sys", "not-ours.dll", "mfxplugin64_hw.dll"]) {
+        let extras = ["igdkmdn64.sys", "not-ours.dll", "mfxplugin64_hw.dll", "ControlLib.dll", "vulkaninfo-64.exe"];
+        let sources = SYSTEM_FILES.iter().map(|file| &file.1);
+        for name in GUEST_FILES.iter().chain(sources).chain(&extras) {
             scratch.write(&format!("source/{DRIVER_ENTRY}/{name}"), format!("content of {name}"));
         }
         let manifest = |library| crate::setup::intel::stand_in::manifest(library);
@@ -178,7 +191,8 @@ mod tests {
         let installer = make_installer(&scratch, &fake_inf());
         let package = read_intel_installer(&installer, DEVICE).unwrap();
         assert_eq!(package.version, INTEL_WINDOWS_DRIVER);
-        assert_eq!(package.entries.len(), GUEST_FILES.len());
+        assert_eq!(package.entries.len(), GUEST_FILES.len() + SYSTEM_FILES.len());
+        assert_eq!(package.system_files.len(), SYSTEM_FILES.len());
         let folder = unpack_intel(&Extraction::new(&installer), &context, &package, &|_| {}).unwrap();
         assert_eq!(intel_driver_folder(&context), Some(folder.clone()));
         assert_eq!(missing_files(&folder), Vec::<String>::new());
@@ -188,10 +202,20 @@ mod tests {
             .map(|file| file.file_name().display().to_string())
             .collect();
         names.sort();
+        let mut wanted: Vec<String> = GUEST_FILES.iter().map(|name| (*name).to_owned()).collect();
+        wanted.extend(SYSTEM_FILES.iter().map(|file| file.1.to_owned()));
+        wanted.push(SYSTEM_LIST.to_owned());
+        wanted.sort();
         assert_eq!(
-            names, GUEST_FILES,
-            "nothing but the files the INF copies for the card, and no kernel driver"
+            names, wanted,
+            "nothing but the files the INF copies for the card, no kernel driver, and the list of the system ones"
         );
+        let list = fs::read_to_string(folder.join(SYSTEM_LIST)).unwrap();
+        assert_eq!(list.lines().count(), SYSTEM_FILES.len());
+        assert!(list.contains("System32	vulkan-1-64.dll	vulkan-1.dll
+"), "{list}");
+        assert!(list.contains("SysWOW64	msvcp140_32.dll	msvcp140.dll
+"), "{list}");
         assert!(!folder.join("ifwi").exists(), "no firmware");
     }
 

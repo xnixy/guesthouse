@@ -413,7 +413,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         if let Some((fence, value, operations)) = waiting.next() {
             let more = waiting.count();
             log::debug!(
-                "work starts in {space:?} with {} address updates still waiting; the first needs fence                  {fence:#x} to reach {value}: {}",
+                "work starts on queue {queue:#x} in {space:?} (gated: {}) with {} address updates still waiting;                  the first needs fence {fence:#x} to reach {value}: {}",
+                self.gates.contains_key(&queue),
                 more + 1,
                 describe_operations(operations)
             );
@@ -449,6 +450,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let request = UpdateRequest::parse(message)?;
         let space = self.space_for(MessageHeader::process_of(message)?)?;
         let (fence, value) = (request.fence, request.fence_value);
+        if !self.fence_known(fence) {
+            log::warn!(
+                "address update waits on {fence:#x}, which is no sync object or queue here, so it runs now"
+            );
+        }
         if self.fence_reached(fence, value) {
             let applied = self.apply_updates(request.raw_operations(), space);
             if applied.is_err() {

@@ -145,6 +145,12 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
     }
 
+    /// Whether a fence handle is one this session tracks. One it doesn't know counts as reached.
+    pub(crate) fn fence_known(&self, handle: u32) -> bool {
+        self.sync_objects.get(self.resolve_shared(handle)).is_some()
+            || self.queue_progress.contains_key(&handle)
+    }
+
     pub(crate) fn fence_reached(&self, handle: u32, value: u64) -> bool {
         let fence = match self.sync_objects.get(self.resolve_shared(handle)) {
             Some(SyncObject { tokens: Some(tokens), .. }) => {

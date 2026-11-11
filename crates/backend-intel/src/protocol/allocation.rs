@@ -187,9 +187,8 @@ impl Resource {
             return Ok(resource);
         }
         let marker: [u8; 4] = tail[trailer::MARKER..trailer::MARKER + 4].try_into().expect("four bytes");
-        let reversed = [MARKER[3], MARKER[2], MARKER[1], MARKER[0]];
-        if (marker != MARKER && marker != reversed) || dword(tail, trailer::VERSION) != Some(TRAILER_VERSION)
-        {
+        let swapped = [MARKER[3], MARKER[2], MARKER[1], MARKER[0]];
+        if (marker != MARKER && marker != swapped) || dword(tail, trailer::VERSION) != Some(TRAILER_VERSION) {
             return Err(Refused("its trailer has no marker or isn't the version known"));
         }
         let companion = Companion {

@@ -9,6 +9,21 @@ pub const QUERY_USER_DRIVER_NAME: u32 = 1;
 /// The version dword the guest puts in front of the path, which the answer keeps.
 const VERSION_FIELD: usize = 4;
 
+/// The registry value DXCore reads for what an adapter can do, by the lower-case name the core asks
+/// with. Without it, DXCore has nothing to say the adapter can draw.
+pub const DXCORE_ATTRIBUTES_VALUE: &str = "dxcoreattributes";
+
+/// What a graphics adapter offers DXCore, as Microsoft's public attribute GUIDs: a GPU, then
+/// Direct3D 11, Direct3D 12, compute, machine learning and media.
+pub const DXCORE_GRAPHICS_ATTRIBUTES: &[&str] = &[
+    "{B69EB219-3DED-4464-979F-A00BD4687006}",
+    "{8C47866B-7583-450D-F0F0-6BADA895AF4B}",
+    "{0C9ECE4D-2F6E-4F01-8C96-E89E331B47B1}",
+    "{248E2800-A793-4724-ABAA-23A6DE1BE090}",
+    "{B71B0D41-1088-422F-A27C-0250B7D3A988}",
+    "{8EB2C848-82F6-4B49-AA87-AECFCF0174C6}",
+];
+
 /// UTF-16, little-endian, with a closing zero.
 pub fn utf16_zero(text: &str) -> Vec<u8> {
     text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()

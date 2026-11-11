@@ -20,7 +20,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.1-intel.1"
 edition = "2024"
 rust-version = "1.88"
 publish = false

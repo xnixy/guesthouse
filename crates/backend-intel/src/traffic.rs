@@ -1,10 +1,14 @@
 //! One log line for each exchange with the guest's driver, in a fixed form a tester's log can be
 //! searched by: `intel <kind> name=value ...`.
 //!
-//! The kinds are `query`, `registry`, `escape`, `context`, `queue`, `allocation`, `submit`,
-//! `queue-closed` and `refused`. Each line names the fields decoded, then `undecoded=` with the
-//! non-zero words nothing names yet. With `GUESTHOUSE_VERBOSE` the first few of each kind are dumped
-//! whole as well, and the repeats get their line at debug.
+//! The kinds are `query`, `registry`, `escape`, `partition`, `context`, `queue`, `allocation`,
+//! `submit`, `queue-closed`, `copy` and `refused`. Each line names the fields decoded, then
+//! `undecoded=` with the non-zero words nothing names yet. The first few of each kind are at info,
+//! told apart by the guest's process where the trait passes one (escapes and contexts) and by its
+//! address space for submissions, so a second program's traffic isn't hidden behind the first's.
+//! Queries, registry values, queues and allocations come with no process, so those are told apart
+//! by what they say alone. The repeats are at debug, and with `GUESTHOUSE_VERBOSE` every buffer is
+//! dumped whole as well, up to 4 KiB.
 
 use crate::protocol::allocation::{self, Resource};
 use crate::protocol::command_header::{self, Compact, Header};
@@ -97,9 +101,7 @@ impl Traffic {
             query.size,
             bit(query.process_is_32_bit)
         );
-        if telling {
-            dump(format_args!("query kind={}", query.kind), query.data);
-        }
+        dump(format_args!("query kind={}", query.kind), query.data);
     }
 
     pub fn registry(&mut self, name: &RegistryName, found: bool) {
@@ -114,7 +116,8 @@ impl Traffic {
     }
 
     pub fn escape(&mut self, process: u32, data: &[u8], escape: &Escape, partition: Option<PartitionAsk>) {
-        let kind = (escape.code, escape.minor_code, escape.gmm_action, escape.length, escape.verdict);
+        let kind =
+            (process, escape.code, escape.minor_code, escape.gmm_action, escape.length, escape.verdict);
         let telling = self.escapes.worth_telling(kind);
         let action = DisplayOption(escape.gmm_action.map(|action| HexNumber(action.into())));
         let payload = data.get(escape::HEADER_SIZE..).unwrap_or_default();
@@ -135,9 +138,7 @@ impl Traffic {
             },
             Hex { bytes: payload, most: ESCAPE_BYTES_SHOWN }
         );
-        if telling {
-            dump(format_args!("escape code={:#x}", escape.code), data);
-        }
+        dump(format_args!("escape code={:#x}", escape.code), data);
         match partition {
             Some(PartitionAsk::Get) => log::info!(
                 "{PREFIX} partition process={process:#x} ask=get answered=[{}]",
@@ -154,7 +155,8 @@ impl Traffic {
     }
 
     pub fn context(&mut self, process: u32, node: u32, private: &[u8], context: &Context) {
-        let kind = (node, private.len(), context.umd_context_type, context.dwm, context.engine_instances);
+        let kind =
+            (process, node, private.len(), context.umd_context_type, context.dwm, context.engine_instances);
         let telling = self.contexts.worth_telling(kind);
         tell!(
             telling,
@@ -182,9 +184,7 @@ impl Traffic {
             bit(context.debug_sip_installed),
             Undecoded { bytes: private, decoded: &context::DECODED }
         );
-        if telling {
-            dump(format_args!("context node={node}"), private);
-        }
+        dump(format_args!("context node={node}"), private);
     }
 
     /// `private` is the guest's data and the padding after it, as the core passes it on.
@@ -203,9 +203,7 @@ impl Traffic {
             bit(fields.flag),
             Undecoded { bytes: data, decoded: &hw_queue::DECODED }
         );
-        if telling {
-            dump(format_args!("queue id={queue:#x}"), private);
-        }
+        dump(format_args!("queue id={queue:#x}"), private);
     }
 
     pub fn allocation(&mut self, private: &[u8], resource: &Resource) {
@@ -253,9 +251,7 @@ impl Traffic {
             })),
             Undecoded { bytes: private, decoded: &allocation::DECODED }
         );
-        if telling {
-            dump(format_args!("allocation type={}", resource.resource_type), private);
-        }
+        dump(format_args!("allocation type={}", resource.resource_type), private);
     }
 
     pub fn submission(&mut self, work: &Work<'_>, header: &Header) {
@@ -290,9 +286,7 @@ impl Traffic {
             DisplayOption(header.compact.as_ref().map(CompactText)),
             DisplayOption(undecoded)
         );
-        if telling {
-            dump(format_args!("submit queue={:#x}", work.queue), work.private);
-        }
+        dump(format_args!("submit queue={:#x}", work.queue), work.private);
     }
 
     /// A context on a node past those offered.
@@ -320,9 +314,7 @@ impl Traffic {
             private.len(),
             Hex { bytes: private, most: ESCAPE_BYTES_SHOWN }
         );
-        if telling {
-            dump(format_args!("refused {what}"), private);
-        }
+        dump(format_args!("refused {what}"), private);
     }
 
     /// A copy to the screen, which this stage answers as done without copying.

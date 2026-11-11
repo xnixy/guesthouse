@@ -4,6 +4,7 @@
 mod amd_files;
 mod amd_start;
 mod desktop;
+mod diagnose;
 mod display;
 mod gpu_check;
 mod guest_files;
@@ -363,6 +364,7 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
         "force" => force(task, first),
         "grow" => grow(task, text.parse().map_err(|_| Failure::new("That is not a size."))?),
         "resume" => resume(task),
+        "dxdiag" => diagnose::dxdiag(task),
         "clean_up" => clean_up(task),
         "after_reboot" => after_reboot(task),
         "apply_display" => {

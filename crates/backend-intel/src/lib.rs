@@ -112,6 +112,10 @@ impl IntelBackend {
         &self.card
     }
 
+    pub fn generation(&self) -> &'static Generation {
+        self.generation
+    }
+
     /// Blocks of memory still held, for a test to see that frees reach the backend.
     pub fn live_memory_blocks(&self) -> usize {
         self.books.live_memory()

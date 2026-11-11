@@ -5,14 +5,16 @@
 //! buffer or queue is made, so nothing runs on the card and the desktop is not touched. With no
 //! address it takes the first Intel card on xe.
 
+use guesthouse_backend_intel::IntelBackend;
 use guesthouse_backend_intel::card::CardFacts;
-use guesthouse_backend_intel::generation;
 use guesthouse_backend_intel::ioctl::{self, INTEL_VENDOR, XE_DRIVER};
+use guesthouse_backend_intel::protocol::record;
 use guesthouse_backend_intel::xe_query::{FirmwareVersion, Gt, MemoryRegion};
 use std::path::Path;
 use std::process::ExitCode;
 
 const MIB: u64 = 1 << 20;
+const RECORD_WORDS_PER_LINE: usize = 6;
 
 fn main() -> ExitCode {
     let address = std::env::args().nth(1);
@@ -124,9 +126,27 @@ fn print_card(device_file: &Path, card: &CardFacts) {
     for (what, error) in &card.unanswered {
         println!("not answered    {what}: {error}");
     }
-    match card.main_gt().and_then(|gt| generation::for_render_ip(gt.ip)) {
-        Some(generation) => println!("profile         {}", generation.name),
-        None => println!("profile         none: this render IP has no profile yet"),
+    match IntelBackend::from_card(card.clone()) {
+        Ok(backend) => print_record(&backend),
+        Err(refusal) => println!("profile         none: {refusal}"),
+    }
+}
+
+/// The record a guest on this card would be given, as its non-zero dwords.
+fn print_record(backend: &IntelBackend) {
+    println!("profile         {}", backend.generation().name);
+    println!("record          {}", record::summary(backend.record()));
+    let words: Vec<String> = backend
+        .record()
+        .chunks(4)
+        .enumerate()
+        .filter_map(|(index, word)| {
+            let value = u32::from_le_bytes(word.try_into().ok()?);
+            (value != 0).then(|| format!("{:#06x}:{value:#x}", index * 4))
+        })
+        .collect();
+    for line in words.chunks(RECORD_WORDS_PER_LINE) {
+        println!("record words    {}", line.join(" "));
     }
 }
 

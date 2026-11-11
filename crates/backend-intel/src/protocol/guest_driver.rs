@@ -37,7 +37,7 @@ const VALUES: [(&str, &str); 5] = [
 ];
 
 /// What became of a driver name query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NameAnswer {
     Given(&'static str),
     /// The 32-bit names for Direct3D aren't known yet, so a 32-bit process is refused.

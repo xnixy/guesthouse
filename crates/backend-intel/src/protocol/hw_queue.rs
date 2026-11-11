@@ -19,7 +19,7 @@ pub const DECODED: [(usize, usize); 3] =
     [(PRIORITY, PRIORITY + 4), (WRITTEN_BACK, WRITTEN_BACK + 8), (FLAGS, FLAGS + 4)];
 
 /// What a queue's data says. Fields past the data's end read as zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Queue {
     pub priority: u32,
     pub written_back: u64,

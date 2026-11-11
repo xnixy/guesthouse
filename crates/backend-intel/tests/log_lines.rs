@@ -49,12 +49,12 @@ fn every_kind_of_exchange_has_its_line() {
     query(&mut session, record::QUERY_TYPE, &vec![0; record::RECORD_SIZE]);
     query(&mut session, 1, &DIRECT3D_12.to_le_bytes());
     query(&mut session, 77, &[0; 16]);
-    let context = context(&mut session, 0, &direct3d_12_context());
+    let context = context(&mut session, 0, &context_data());
     let (queue, _) = queue(&mut session, context);
     allocate(&mut session, &render_target());
     allocate(&mut session, &[0; 0x20]);
     for value in 1..=SUBMISSIONS {
-        send(&mut session, &submission(queue, value, &direct3d_12_header()));
+        send(&mut session, &submission(queue, value, &compact_header()));
     }
     let mut data = vec![0u8; escape::HEADER_SIZE + 8];
     set_u32(&mut data, 0, 8);
@@ -74,17 +74,18 @@ fn every_kind_of_exchange_has_its_line() {
         ("intel query kind=0 size=9588 wow64=0 answered=record", 1),
         ("intel query kind=1 size=4 wow64=0 answered=driver-name driver=igd12umd64.dll", 1),
         ("intel query kind=77 size=16 wow64=0 answered=left-to-the-core", 1),
-        ("intel context process=0x40002000 node=0 size=144 type=7 guest_pid=4242", 1),
+        ("intel context process=0x40002000 node=0 size=144 type=3 guest_pid=4242", 1),
         ("intel queue id=", 1),
         ("intel allocation size=2352 type=2", 1),
         ("intel refused what=allocation", 1),
         ("intel escape process=0x40002000 length=24 payload_size=8 checksum=0x0 code=0x2", 1),
         // The same submission ten times is one kind, so only its first few lines are at info.
-        ("intel submit queue=", 3),
+        ("intel submit source=hardware-queue queue=", 3),
     ] {
         assert_eq!(lines_starting(&lines, start), count, "{start}\n{}", lines.join("\n"));
     }
     let submit_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("intel submit")).collect();
-    assert!(submit_lines[0].contains("form=compact stamp=0x23d7 type=7"), "{}", submit_lines[0]);
+    assert!(submit_lines[0].contains("length=184 kernel_would=take-compact"), "{}", submit_lines[0]);
+    assert!(submit_lines[0].contains("fields=[stamp=0x1234 type=3"), "{}", submit_lines[0]);
     assert!(submit_lines[0].contains("answer=finished-unrun"), "{}", submit_lines[0]);
 }

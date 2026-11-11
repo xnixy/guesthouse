@@ -397,19 +397,11 @@ impl Backend for IntelBackend {
         log::debug!("{PREFIX} process-gone process={process:#x}");
     }
 
-    /// A header the kernel driver would refuse fails the queue, as the guest's driver then takes the
-    /// device as lost, the way it would on its own hardware. Any other is finished unrun.
+    /// Nothing runs in this stage, so no submission fails: each is logged with what its header
+    /// says, as far as it can be read, and finished unrun.
     fn start_work(&mut self, _host: &mut dyn HostServices, work: &Work<'_>) -> WorkStart {
-        match Header::parse(work.private) {
-            Ok(header) => {
-                self.traffic.submission(work, &header);
-                WorkStart::Finished
-            }
-            Err(refused) => {
-                self.traffic.refused("submission", refused.0, work.private);
-                WorkStart::QueueFailed
-            }
-        }
+        self.traffic.submission(work, &Header::read(work.private));
+        WorkStart::Finished
     }
 
     fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<(), BackendError> {

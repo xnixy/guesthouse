@@ -61,7 +61,7 @@ fn the_direct3d_12_driver_is_named_in_the_driver_store() {
 #[test]
 fn a_context_a_queue_an_allocation_and_a_submission_go_through_and_the_fence_moves() {
     let mut session = guest();
-    let context = context(&mut session, 0, &direct3d_12_context());
+    let context = context(&mut session, 0, &context_data());
     assert_ne!(context, 0);
     let (queue, fence) = queue(&mut session, context);
 
@@ -73,7 +73,7 @@ fn a_context_a_queue_an_allocation_and_a_submission_go_through_and_the_fence_mov
     assert_ne!(u64_at(&send(&mut session, &map), 0), Ok(0));
 
     for value in 1..=3 {
-        let reply = send(&mut session, &submission(queue, value, &direct3d_12_header()));
+        let reply = send(&mut session, &submission(queue, value, &compact_header()));
         assert_eq!(reply, SUCCESS.to_le_bytes());
         assert_eq!(session.memory().read_u64(fence), Ok(value), "finished unrun, so the fence moves at once");
     }
@@ -95,13 +95,28 @@ fn an_allocation_whose_data_the_kernel_driver_would_refuse_fails_the_call() {
 }
 
 #[test]
-fn a_header_of_the_wrong_size_stops_the_queue_and_leaves_nothing_waiting() {
+fn a_header_of_any_size_is_finished_unrun_and_the_queue_goes_on() {
     let mut session = guest();
-    let context = context(&mut session, 0, &direct3d_12_context());
+    let context = context(&mut session, 0, &context_data());
     let (queue, fence) = queue(&mut session, context);
-    let reply = send(&mut session, &submission(queue, 1, &[0; 0x18]));
-    assert_eq!(reply, Status::UNSUCCESSFUL.0.to_le_bytes(), "the program has to hear of it");
-    assert_eq!(session.memory().read_u64(fence), Ok(1));
+    for (value, header) in [(1, vec![0; 0x18]), (2, vec![]), (3, compact_header())] {
+        assert_eq!(send(&mut session, &submission(queue, value, &header)), SUCCESS.to_le_bytes());
+        assert_eq!(session.memory().read_u64(fence), Ok(value));
+    }
+}
+
+#[test]
+fn a_submission_to_a_context_is_finished_unrun_too() {
+    const CONTEXT: usize = 0x34;
+    const PRIVATE_SIZE: usize = 0x140;
+    const PRIVATE: usize = 0x198;
+    let mut session = guest();
+    let context = context(&mut session, 0, &context_data());
+    let mut request = message(Command::SubmitToContext, PRIVATE);
+    set_u32(&mut request, CONTEXT, context);
+    set_u32(&mut request, PRIVATE_SIZE, 0x40);
+    request.extend_from_slice(&[0x11; 0x40]);
+    assert_eq!(send(&mut session, &request), SUCCESS.to_le_bytes());
 }
 
 #[test]

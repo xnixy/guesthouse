@@ -150,24 +150,24 @@ pub fn submission(queue: u32, value: u64, private: &[u8]) -> Vec<u8> {
     request
 }
 
-/// What the Direct3D 12 driver sends for a context: one ID and no pointer, as the record says
-/// virtual machine, its process, the GPU address model and its context type.
-pub fn direct3d_12_context() -> Vec<u8> {
+/// Context data with a few arbitrary fields set: a count, a process, the GPU address flag and a
+/// context type.
+pub fn context_data() -> Vec<u8> {
     let mut data = vec![0u8; context::SIZE];
     set_u32(&mut data, 0x08, 1);
     set_u32(&mut data, 0x0C, 4242);
     data[0x24] = 1;
-    set_u32(&mut data, 0x50, 7);
+    set_u32(&mut data, 0x50, 3);
     data
 }
 
-/// What the Direct3D 12 driver puts in a compact header: its stamp and context type, mid-batch
-/// preemption, and its performance tag.
-pub fn direct3d_12_header() -> Vec<u8> {
+/// A compact header with a few arbitrary fields set: a stamp, a context type, one named flag and a
+/// performance tag.
+pub fn compact_header() -> Vec<u8> {
     let mut data = vec![0u8; command_header::COMPACT_SIZE];
-    set_u32(&mut data, 0x00, 7 << 16 | 0x23D7);
+    set_u32(&mut data, 0x00, 3 << 16 | 0x1234);
     set_u32(&mut data, 0x08, command_header::flag::MID_BATCH_PREEMPTION);
-    set_u32(&mut data, 0x1C, 0x2000);
+    set_u32(&mut data, 0x1C, 0x55);
     data
 }
 

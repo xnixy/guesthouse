@@ -14,7 +14,7 @@ use crate::protocol::guest_driver::NameAnswer;
 use crate::protocol::hw_queue::{self, Queue};
 use crate::protocol::record::Asked;
 use crate::watch::{Hex, PREFIX, Seen, Undecoded, dump, tell};
-use guesthouse_backend::{RegistryName, Status, VendorQuery, Work};
+use guesthouse_backend::{RegistryName, Status, VendorQuery, Work, WorkSource};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -239,57 +239,36 @@ impl Traffic {
         if let Some(count) = self.submitted.get_mut(&work.queue) {
             *count += 1;
         }
-        let telling = self.submissions.worth_telling((
-            work.node,
-            work.client_hint,
-            command_header::kind_of(work.private),
-        ));
-        match header {
-            Header::Compact(compact) => self.compact_submission(telling, work, compact),
-            Header::Full => tell!(
-                telling,
-                "{PREFIX} submit queue={:#x} node={} fence_value={} size={} form=full layout=unknown first={}",
-                work.queue,
-                work.node,
-                work.fence_value,
-                work.private.len(),
-                Hex { bytes: work.private, most: ESCAPE_BYTES_SHOWN }
-            ),
-        }
-        if telling {
-            dump(format_args!("submit queue={:#x}", work.queue), work.private);
-        }
-    }
-
-    fn compact_submission(&self, telling: bool, work: &Work<'_>, header: &Compact) {
+        let kind = (work.space, work.node, work.client_hint, work.source == WorkSource::Context);
+        let telling = self.submissions.worth_telling((kind, command_header::kind_of(work.private)));
+        // Only a hardware queue's submissions are known to carry this header.
+        let kernel_would = match work.source {
+            WorkSource::HardwareQueue => header.verdict.word(),
+            WorkSource::Context => "unknown",
+        };
+        let source = match work.source {
+            WorkSource::HardwareQueue => "hardware-queue",
+            WorkSource::Context => "context",
+        };
+        let undecoded = header.compact.map(|_| Undecoded {
+            bytes: &work.private[..work.private.len().min(command_header::FULL_SIZE)],
+            decoded: &command_header::DECODED,
+        });
         tell!(
             telling,
-            "{PREFIX} submit queue={:#x} node={} hint={:#x} fence_value={} size={} form=compact stamp={:#x} type={} \
-             patch_list={} first_flags={:#x} requests={:#x}/{:#x} slice_state={} subslices={} eus={} \
-             bit23={} flags={:#x} unnamed_flags={:#x} perf_tag={:#x} tag={} monitor_fence={} answer=finished-unrun \
-             undecoded=[{}]",
+            "{PREFIX} submit source={source} queue={:#x} node={} hint={:#x} fence_value={} length={} \
+             kernel_would={kernel_would} answer=finished-unrun fields=[{}] undecoded=[{}]",
             work.queue,
             work.node,
             work.client_hint,
             work.fence_value,
-            work.private.len(),
-            header.stamp,
-            header.context_type,
-            bit(header.patch_list),
-            header.first_flags,
-            header.request_low,
-            header.request_high,
-            header.slice_state,
-            header.subslice_count,
-            header.eu_count,
-            bit(header.request_bit_23),
-            header.flags,
-            header.unnamed_flags(),
-            header.perf_tag,
-            DisplayOption(header.tag.map(|(address, value)| Pair(address, value.into()))),
-            DisplayOption(header.monitor_fence.map(|(address, value)| Pair(address, value))),
-            Undecoded { bytes: work.private, decoded: &command_header::DECODED }
+            header.length,
+            DisplayOption(header.compact.as_ref().map(CompactText)),
+            DisplayOption(undecoded)
         );
+        if telling {
+            dump(format_args!("submit queue={:#x}", work.queue), work.private);
+        }
     }
 
     /// How many submissions a queue had, once it has gone.
@@ -346,6 +325,35 @@ struct HexNumber(u64);
 impl fmt::Display for HexNumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:#x}", self.0)
+    }
+}
+
+/// A compact header's fields, by name.
+struct CompactText<'a>(&'a Compact);
+
+impl fmt::Display for CompactText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header = self.0;
+        write!(
+            f,
+            "stamp={:#x} type={} patch_list={} first_flags={:#x} requests={:#x}/{:#x} slice_state={} \
+             subslices={} eus={} bit23={} flags={:#x} unnamed_flags={:#x} perf_tag={:#x} tag={} monitor_fence={}",
+            header.stamp,
+            header.context_type,
+            bit(header.patch_list),
+            header.first_flags,
+            header.request_low,
+            header.request_high,
+            header.slice_state,
+            header.subslice_count,
+            header.eu_count,
+            bit(header.request_bit_23),
+            header.flags,
+            header.unnamed_flags(),
+            header.perf_tag,
+            DisplayOption(header.tag.map(|(address, value)| Pair(address, value.into()))),
+            DisplayOption(header.monitor_fence.map(|(address, value)| Pair(address, value)))
+        )
     }
 }
 
@@ -409,8 +417,8 @@ mod tests {
             may_run: true,
             queue_failed: false,
         };
-        traffic.submission(&work, &Header::Full);
-        traffic.submission(&work, &Header::Full);
+        traffic.submission(&work, &Header::read(&[]));
+        traffic.submission(&work, &Header::read(&[]));
         assert_eq!(traffic.submitted.get(&7), Some(&2));
         traffic.queue_closed(7);
         assert!(traffic.submitted.is_empty());

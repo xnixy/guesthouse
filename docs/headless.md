@@ -38,12 +38,4 @@ A Windows machine's account is on the Account page in its settings, and the pass
 
 ## Logging in over ssh
 
-A VM's sockets are in `$XDG_RUNTIME_DIR/guesthouse`. With no `XDG_RUNTIME_DIR` Guesthouse uses `~/.local/state/guesthouse/runtime` instead, which works, but it's another place. Then `guesthouse-vm` over ssh doesn't see a machine that was started from the desktop, and the other way round: it shows Off while the VM runs. I've seen it do that.
-
-So that both use the same place, keep your user's runtime folder there when nobody is logged in:
-
-```
-sudo loginctl enable-linger $USER
-```
-
-If your ssh login still doesn't set `XDG_RUNTIME_DIR`, set it yourself to `/run/user/$(id -u)`.
+A VM's sockets are in `$XDG_RUNTIME_DIR/guesthouse`. If that variable isn't set, Guesthouse uses `/run/user/<your user id>` when the system has made that folder for you, and only then your state folder. So a login over ssh finds the same machines as the desktop does, as long as the folder is there. With `sudo loginctl enable-linger $USER` systemd keeps your user's folder when nobody is logged in.

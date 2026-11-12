@@ -7,9 +7,11 @@
 use crate::firmware::Firmware;
 use crate::linux::layout::{SOURCES_FOLDER, SOURCES_MARK};
 use guesthouse_daemon::slot::Slot;
+use rustix::process::getuid;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 const STORE_VARIABLE: &str = "GUESTHOUSE_STORE";
@@ -32,24 +34,36 @@ const DISPLAY_DRIVER_FOLDER: &str = "display-driver";
 /// A file that tells the repo's guest folder from any other folder of that name.
 const REPO_GUEST_MARK: &str = "setup.ps1";
 const SHARED_MEMORY: &str = "/dev/shm";
+/// Where the system makes each user's runtime folder, named by user id.
+const USER_RUN_FOLDERS: &str = "/run/user";
 const QEMU_PROGRAM: &str = "qemu/build/qemu-system-x86_64";
 const SYSTEM_QEMU: &str = "qemu-system-x86_64";
 
 /// The environment, as a value, so that a test can say what it holds.
 #[derive(Debug, Clone, Default)]
-pub struct Variables(HashMap<String, String>);
+pub struct Variables {
+    set: HashMap<String, String>,
+    /// Where the folders named by user id are. A test points it at a scratch folder.
+    user_runs: PathBuf,
+}
 
 impl Variables {
     pub fn from_process() -> Self {
-        Self(env::vars().collect())
+        Self { set: env::vars().collect(), user_runs: USER_RUN_FOLDERS.into() }
     }
 
+    /// With no user folders, so that what a test says is all there is.
     pub fn of(pairs: &[(&str, &str)]) -> Self {
-        Self(pairs.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect())
+        let set = pairs.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect();
+        Self { set, user_runs: PathBuf::new() }
+    }
+
+    pub fn with_user_runs(self, folder: &Path) -> Self {
+        Self { user_runs: folder.to_owned(), ..self }
     }
 
     fn get(&self, name: &str) -> Option<&str> {
-        self.0.get(name).map(String::as_str).filter(|value| !value.is_empty())
+        self.set.get(name).map(String::as_str).filter(|value| !value.is_empty())
     }
 
     fn folder(&self, name: &str) -> Option<PathBuf> {
@@ -63,6 +77,14 @@ impl Variables {
 
     fn home(&self) -> PathBuf {
         self.folder("HOME").unwrap_or_default()
+    }
+
+    /// `$XDG_RUNTIME_DIR`, or else this user's folder under `/run/user` if the system made one, which a
+    /// login over ssh may not say. Without either, the state folder is the next private place.
+    fn runtime(&self) -> Option<PathBuf> {
+        let own = self.user_runs.join(getuid().as_raw().to_string());
+        let ours = fs::metadata(&own).is_ok_and(|found| found.is_dir() && found.uid() == getuid().as_raw());
+        self.folder("XDG_RUNTIME_DIR").or_else(|| ours.then_some(own))
     }
 }
 
@@ -111,10 +133,9 @@ impl Paths {
             .or_else(|| store_pointer(&config.join(STORE_POINTER), &variables.home()))
             .unwrap_or(data);
         let machines = variables.folder(MACHINES_VARIABLE).unwrap_or_else(|| store.join("machines"));
-        // With no runtime folder the state folder is the next private place. Sockets need a short path.
-        let runtime = variables
-            .folder("XDG_RUNTIME_DIR")
-            .map_or_else(|| state.join("runtime"), |folder| folder.join(APP_FOLDER));
+        // Sockets need a short path.
+        let runtime =
+            variables.runtime().map_or_else(|| state.join("runtime"), |folder| folder.join(APP_FOLDER));
         let program = program_folder(variables, running_from);
         Self {
             guest: shipped_folder(&program, running_from, PROGRAM_MARK, REPO_GUEST_MARK),
@@ -295,6 +316,28 @@ mod tests {
         assert_eq!(paths.state, Path::new("/h/.local/state/guesthouse"));
         assert_eq!(paths.config, Path::new("/h/.config/guesthouse"));
         assert_eq!(paths.runtime, Path::new("/h/.local/state/guesthouse/runtime"));
+    }
+
+    #[test]
+    fn with_no_runtime_variable_the_users_own_folder_is_used() {
+        let scratch = Scratch::new();
+        let users = scratch.path("users");
+        let own = users.join(getuid().as_raw().to_string());
+        let paths = |variables: Variables| Paths::new(&variables.with_user_runs(&users), None).runtime;
+        let plain = || Variables::of(&[("HOME", "/h")]);
+        assert_eq!(paths(plain()), Path::new("/h/.local/state/guesthouse/runtime"), "no folder yet");
+        fs::create_dir_all(&own).unwrap();
+        assert_eq!(paths(plain()), own.join("guesthouse"));
+        let named = Variables::of(&[("HOME", "/h"), ("XDG_RUNTIME_DIR", "/run/named")]);
+        assert_eq!(paths(named), Path::new("/run/named/guesthouse"), "the variable still comes first");
+    }
+
+    #[test]
+    fn a_users_folder_that_is_a_file_is_not_used() {
+        let scratch = Scratch::new();
+        scratch.write(&format!("users/{}", getuid().as_raw()), "");
+        let variables = Variables::of(&[("HOME", "/h")]).with_user_runs(&scratch.path("users"));
+        assert_eq!(Paths::new(&variables, None).runtime, Path::new("/h/.local/state/guesthouse/runtime"));
     }
 
     #[test]

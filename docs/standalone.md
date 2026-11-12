@@ -2,7 +2,7 @@
 
 Guesthouse starts the daemon and QEMU for you. If you'd rather start them yourself, from a script or from libvirt, you can. The daemon can take the guest's memory as two files you name, and `guesthouse-vm command` prints the words to start a machine this way.
 
-I've run the daemon on its memory files beside an ordinary QEMU, with a pretend GPU behind it, and checked that both open the same file. I haven't run a Windows machine with the GPU this way yet, and I don't test it with each release. Treat this page as a map, and expect to find things I missed.
+I've started the daemon on its memory files, with a pretend GPU behind it, and started the patched QEMU with the GPU's devices beside it. QEMU connected to both sockets, and both had the same two files open. I haven't run a Windows guest with the real GPU this way yet, and I don't test it with each release. Treat this page as a map, and expect to find things I missed.
 
 ## The pieces
 

@@ -31,4 +31,6 @@ cp hw/misc/nvfwd/nvfwd-sensord ../../virgl/libexec/virgl_render_server .
 
 You'll need QEMU's usual build dependencies. A release comes with QEMU built, so this is only for building it yourself.
 
+To run this QEMU yourself, with the daemon beside it, see [standalone](../docs/standalone.md).
+
 The patch is GPL-2.0-or-later, apart from the tables in `hw/misc/nvfwd`, which come from NVIDIA's open modules and keep NVIDIA's MIT notice.

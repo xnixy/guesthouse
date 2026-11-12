@@ -63,6 +63,8 @@ The numbers, and how I check the picture is right, are in [performance](docs/per
 
 **Without a window.** `guesthouse-vm` makes, installs, starts and stops machines from a terminal, so a PC with no desktop can run them. [How it works](docs/headless.md).
 
+**Beside your own QEMU or libvirt.** The daemon can take the guest's memory as two files, so QEMU can be started by something else. [How, and what's untested](docs/standalone.md).
+
 ![The app's library, with a Windows machine and an Ubuntu machine](docs/images/app-library.jpg)
 
 ## The app

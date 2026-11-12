@@ -20,6 +20,10 @@ name = "guesthouse-check"
 path = "src/bin/check.rs"
 
 [[bin]]
+name = "guesthouse-vm"
+path = "src/bin/vm.rs"
+
+[[bin]]
 name = "guesthouse-jail"
 path = "src/bin/jail.rs"
 

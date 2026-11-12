@@ -14,10 +14,11 @@ use guesthouse_app::application::application;
 use guesthouse_app::window::{MachineHandle, Window};
 use guesthouse_app_core::context::Context;
 use guesthouse_app_core::library::{NewMachine, create};
-use guesthouse_app_core::machine::{Kind, Machine};
+use guesthouse_app_core::machine::{Drive, Kind, Machine};
 use std::cell::Cell;
 use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -195,6 +196,81 @@ async fn new_machine(window: Window, folder: PathBuf, failures: Rc<Cell<u32>>) {
     close_dialogs(&window).await;
 }
 
+const FREE_DRIVE: &str = "ata-WDC_WD5000_WD-1234";
+const FREE_PARTITION: &str = "usb-Seagate_Expansion_NA9-0:0-part1";
+const MOUNTED_PARTITION: &str = "usb-SanDisk_Ultra_4C53-0:0-part1";
+
+/// A disk of the pretend PC: the kernel's folder for it, a file for its node, and its name.
+fn pretend_disk(pc: &Path, name: &str, id: &str, (dev, sectors): (&str, u64), model: &str, removable: bool) {
+    let write = |path: String, text: String| {
+        let path = pc.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    };
+    write(format!("block/{name}/dev"), format!("{dev}\n"));
+    write(format!("block/{name}/size"), format!("{sectors}\n"));
+    write(format!("block/{name}/removable"), format!("{}\n", u8::from(removable)));
+    write(format!("block/{name}/device/model"), format!("{model}\n"));
+    link_name(pc, name, id);
+}
+
+fn pretend_partition(pc: &Path, disk: &str, name: &str, id: &str, (dev, sectors): (&str, u64)) {
+    let folder = pc.join(format!("block/{disk}/{name}"));
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("partition"), "1\n").unwrap();
+    fs::write(folder.join("dev"), format!("{dev}\n")).unwrap();
+    fs::write(folder.join("size"), format!("{sectors}\n")).unwrap();
+    link_name(pc, name, id);
+}
+
+fn link_name(pc: &Path, kernel_name: &str, id: &str) {
+    let node = pc.join("dev").join(kernel_name);
+    fs::create_dir_all(node.parent().unwrap()).unwrap();
+    fs::write(&node, "").unwrap();
+    fs::create_dir_all(pc.join("by-id")).unwrap();
+    std::os::unix::fs::symlink(node, pc.join("by-id").join(id)).unwrap();
+}
+
+/// Four disks: the one this PC runs from, a free one, a USB disk with a partition, and a stick whose
+/// partition is mounted.
+fn pretend_pc(context: &mut Context, pc: &Path) {
+    pretend_disk(pc, "sda", "ata-Samsung_SSD_870_S5", ("8:0", 1_953_525_168), "Samsung SSD 870", false);
+    pretend_partition(pc, "sda", "sda1", "ata-Samsung_SSD_870_S5-part1", ("8:1", 2_097_152));
+    pretend_partition(pc, "sda", "sda2", "ata-Samsung_SSD_870_S5-part2", ("8:2", 1_951_000_000));
+    pretend_disk(pc, "sdb", FREE_DRIVE, ("8:16", 976_773_168), "WDC WD5000", false);
+    pretend_disk(
+        pc,
+        "sdc",
+        "usb-Seagate_Expansion_NA9-0:0",
+        ("8:32", 3_907_029_168),
+        "Seagate Expansion",
+        false,
+    );
+    pretend_partition(pc, "sdc", "sdc1", FREE_PARTITION, ("8:33", 3_907_000_000));
+    pretend_disk(pc, "sdd", "usb-SanDisk_Ultra_4C53-0:0", ("8:48", 62_533_296), "SanDisk Ultra", true);
+    pretend_partition(pc, "sdd", "sdd1", MOUNTED_PARTITION, ("8:49", 62_531_000));
+    fs::write(
+        pc.join("mountinfo"),
+        "22 1 8:1 / /boot/efi rw - vfat /dev/sda1 rw\n23 1 8:2 / / rw - ext4 /dev/sda2 rw\n\
+         40 1 8:49 / /run/media/me/STICK rw - exfat /dev/sdd1 rw\n",
+    )
+    .unwrap();
+    // A user that isn't root can't open it, and gets the way to.
+    fs::set_permissions(pc.join("dev/sdb"), fs::Permissions::from_mode(0o000)).unwrap();
+    fs::create_dir_all(pc.join("udev")).unwrap();
+    fs::write(
+        pc.join("udev/b8:16"),
+        "E:ID_SERIAL=WDC_WD5000_WD-1234
+",
+    )
+    .unwrap();
+    context.block_devices = pc.join("block");
+    context.drive_ids = pc.join("by-id");
+    context.mount_table = pc.join("mountinfo");
+    context.swaps = pc.join("swaps");
+    context.udev_data = pc.join("udev");
+}
+
 fn library_machines(context: &Arc<Context>, window: &Window, folder: &Path) -> Vec<MachineHandle> {
     let iso = make_iso(folder);
     let new = NewMachine {
@@ -211,7 +287,10 @@ fn library_machines(context: &Arc<Context>, window: &Window, folder: &Path) -> V
     let plain = create(context, &new).unwrap();
     let disk = folder.join("win.qcow2").display().to_string();
     fs::copy(&plain.disk, &disk).unwrap();
-    let windows = Machine { refresh_hz: 165, ..Machine::new("win", "Windows 11", &disk, &plain.vars) };
+    let drive = |id: &str| Drive { id: id.to_owned() };
+    let drives = vec![drive(FREE_DRIVE), drive(FREE_PARTITION), drive(MOUNTED_PARTITION)];
+    let windows =
+        Machine { refresh_hz: 165, drives, ..Machine::new("win", "Windows 11", &disk, &plain.vars) };
     windows.save(context).unwrap();
     vec![window.add_machine(plain), window.add_machine(windows)]
 }
@@ -228,7 +307,45 @@ async fn settings_pages(window: Window, folder: PathBuf, failures: Rc<Cell<u32>>
     show_page(&window, "storage");
     glib::timeout_future(SETTLE).await;
     check(&failures, !text_of(&window).contains("Cores"), "one page at a time");
+    check(&failures, shows(&window, "WDC WD5000, 500 GB").await, "a drive is shown by make and size");
+    let text = text_of(&window);
+    check(
+        &failures,
+        text.contains("Mounted at /run/media/me/STICK"),
+        "a drive the PC has mounted says where",
+    );
+    check(
+        &failures,
+        text.contains("Partition sdc1 of Seagate Expansion, 2.0 TB"),
+        "a partition says its disk",
+    );
     shot_after_paint(&window, &folder, "08-settings-disk-snapshots").await;
+    let add = all_of::<gtk::Button>(&window).into_iter().find(|b| b.label().as_deref() == Some("Add Drive"));
+    check(&failures, add.is_some_and(|button| !button.is_sensitive()), "three drives are the most");
+    // Only for a user who isn't root, as root opens anything.
+    if click(&window, "Give Access") {
+        glib::timeout_future(LONG).await;
+        check(&failures, window.widget().visible_dialog().is_some(), "the root step opens");
+        glib::timeout_future(SETTLE).await;
+        shot_after_paint(&window, &folder, "08d-give-access").await;
+        click(&window, "Close");
+        glib::timeout_future(SETTLE).await;
+    }
+    // Takes the mounted one away, to have room for another.
+    let removes: Vec<gtk::Button> = all_of::<gtk::Button>(&window)
+        .into_iter()
+        .filter(|button| button.tooltip_text().as_deref() == Some("Remove Drive"))
+        .collect();
+    removes.last().unwrap().emit_clicked();
+    glib::timeout_future(LONG).await;
+    check(&failures, click(&window, "Add Drive"), "Add Drive can be pressed");
+    check(&failures, shows(&window, "Add a Drive").await, "the list opens");
+    glib::timeout_future(SETTLE).await;
+    shot_after_paint(&window, &folder, "08c-add-drive").await;
+    if let Some(dialog) = window.widget().visible_dialog() {
+        dialog.force_close();
+    }
+    glib::timeout_future(SETTLE).await;
     show_page(&window, "devices");
     glib::timeout_future(SETTLE).await;
     shot_after_paint(&window, &folder, "08b-settings-devices").await;
@@ -446,6 +563,7 @@ fn main() -> glib::ExitCode {
     let folder = PathBuf::from(env::args().nth(1).expect("a folder for the pictures"));
     fs::create_dir_all(&folder).unwrap();
     let mut context = Context::from_process().unwrap();
+    pretend_pc(&mut context, &folder.join("pc"));
     // This program lives in `examples`, one folder below the app's own.
     let examples = env::current_exe().unwrap().parent().unwrap().to_owned();
     context.paths.binaries = examples.parent().unwrap().to_owned();

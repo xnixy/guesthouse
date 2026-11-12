@@ -1,8 +1,10 @@
 use super::*;
+use crate::log::write_log;
 use crate::processes::stand_in::fake_process;
 use crate::tasks::{TaskRecord, write_task};
 use crate::testing::{Scratch, scratch_context};
 use std::fs;
+use std::io::Write;
 
 fn words(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_owned).collect()
@@ -146,29 +148,51 @@ fn status_shows_the_state_and_what_is_wrong() {
 }
 
 #[test]
-fn a_task_is_followed_step_by_step_until_it_ends() {
+fn every_step_is_said_even_one_that_comes_and_goes_between_two_looks() {
     let scratch = Scratch::new();
     let context = scratch_context(&scratch);
     let machine = make(&context, "work", "Office PC", Kind::Plain);
-    fake_process(&context, 79, &["guesthouse-task", "start", "work"], &[], "");
-    let step = |text: &str| TaskRecord {
-        action: "start".into(),
-        machine: "work".into(),
-        pid: 79,
-        step: text.into(),
-        error: String::new(),
-    };
-    let mut steps = ["Getting ready", "Getting ready", "Starting the VM", "Starting the VM"].into_iter();
+    write_log(&context, "start from an earlier task").unwrap();
+    let mut steps = Steps::from_end(&context, "start");
     let mut looks = 0;
     let mut out = Vec::new();
-    let found = follow(&context, &machine, &mut out, || {
-        write_task(&context, None, &step(steps.next().unwrap_or("Starting the VM"))).unwrap();
+    follow(&context, &machine, &mut steps, &mut out, || {
+        let lines: &[&str] = match looks {
+            0 => &["start Checking the machine"],
+            // Two steps and the end of a task, all in the time between two looks.
+            1 => &[
+                "start Starting the VM",
+                "stop Shutting down",
+                "app: a problem",
+                "start Waiting for the desktop",
+            ],
+            _ => &["start finished"],
+        };
+        for line in lines {
+            write_log(&context, line).unwrap();
+        }
         looks += 1;
-        looks == 4
+        looks == 3
     })
     .unwrap();
-    assert_eq!(String::from_utf8(out).unwrap(), "Getting ready\nStarting the VM\n");
-    assert!(found.busy, "the pretend task never ends by itself");
+    let said = "Checking the machine
+Starting the VM
+Waiting for the desktop
+";
+    assert_eq!(String::from_utf8(out).unwrap(), said);
+}
+
+#[test]
+fn a_step_still_being_written_waits_for_the_next_look() {
+    let scratch = Scratch::new();
+    let context = scratch_context(&scratch);
+    let mut steps = Steps::from_end(&context, "start");
+    let mut log = crate::log::open_for_appending(&context).unwrap();
+    write!(log, "10:00:00 start Starting the V").unwrap();
+    assert!(steps.new_steps().is_empty());
+    writeln!(log, "M").unwrap();
+    assert_eq!(steps.new_steps(), ["Starting the VM"]);
+    assert!(steps.new_steps().is_empty());
 }
 
 #[test]
@@ -227,14 +251,14 @@ fn a_task_that_fails_ends_the_command_with_its_error() {
     };
     scratch.write("record.json", serde_json::to_string(&record).unwrap());
     let script = format!(
-        "#!/bin/sh\nsleep 1\ncat '{}' > '{}'\n",
+        "#!/bin/sh\nsleep 1\necho '10:00:00 start Starting the VM'\ncat '{}' > '{}'\n",
         scratch.path("record.json").display(),
         file.display()
     );
     scratch.program("program/guesthouse-task", &script);
     let (out, result) = said(&context, "start work");
     assert_eq!(result, Err(Problem::Failed(Failure::new("It broke."))));
-    assert_eq!(out, "Getting ready\n");
+    assert_eq!(out, "Starting the VM\n");
 }
 
 #[test]

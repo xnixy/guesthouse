@@ -2,6 +2,7 @@
 //! the same calls, so a machine started here is the app's to stop and the other way round.
 
 mod pick;
+mod steps;
 #[cfg(test)]
 mod tests;
 
@@ -16,9 +17,10 @@ use pick::find;
 use std::fmt;
 use std::io::{self, Write};
 use std::time::Duration;
+use steps::Steps;
 
 const NO_WAIT: &str = "--no-wait";
-/// How often a running task is looked at. Steps last seconds, so this misses none that matter.
+/// How often a running task is looked at.
 const POLL: Duration = Duration::from_millis(300);
 const LOG_LINES: usize = 40;
 
@@ -182,22 +184,21 @@ fn show_status(context: &Context, machine: &Machine, out: &mut dyn Write) -> Res
     Ok(())
 }
 
-/// Says each step of the task once, until `ended` says it has. A step that comes and goes between two
-/// looks is not said, and the log has it.
+/// Says each step of the task as the log gets it, until `ended` says it has. A step that comes and goes
+/// between two looks is in the log, so it is said all the same.
 fn follow(
     context: &Context,
     machine: &Machine,
+    steps: &mut Steps,
     out: &mut dyn Write,
     mut ended: impl FnMut() -> bool,
 ) -> Result<Status> {
-    let mut said = String::new();
     loop {
-        let found = status(context, machine);
-        if found.busy && found.step != said {
-            writeln!(out, "{}", found.step)?;
-            said = found.step;
+        let done = ended();
+        for step in steps.new_steps() {
+            writeln!(out, "{step}")?;
         }
-        if ended() {
+        if done {
             return Ok(status(context, machine));
         }
         context.clock.sleep(POLL);
@@ -212,12 +213,13 @@ fn run_task(
     wait: bool,
     out: &mut dyn Write,
 ) -> Result<Option<Status>> {
+    let mut steps = Steps::from_end(context, action);
     let mut task = launch(context, action, machine, &[], None)?;
     if !wait {
         return Ok(None);
     }
     let ended = || !matches!(task.try_wait(), Ok(None));
-    follow(context, machine, out, ended).map(Some)
+    follow(context, machine, &mut steps, out, ended).map(Some)
 }
 
 /// What a task that ended without a word of its own still owes the person who waited for it.

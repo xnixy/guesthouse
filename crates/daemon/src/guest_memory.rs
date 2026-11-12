@@ -1,9 +1,11 @@
-//! The guest's memory, from the memfds the app hands QEMU and this daemon.
+//! The guest's memory, from the memfds the app hands QEMU and this daemon, or from two files that
+//! someone else's QEMU opens as well: see [`crate::memory_files`].
 
 use crate::handover::Part;
+use crate::memory_files::MemoryFiles;
 use crate::slot::Slot;
 use guesthouse_backend::{GuestMemory, HostBuffer, MemoryError, PagesView, in_window};
-pub use guesthouse_backend::{WINDOW_BASE, window_base};
+pub use guesthouse_backend::{WINDOW_BASE, WINDOW_SIZE, window_base};
 use guesthouse_frame_socket::sized_buffer;
 use std::fs::File;
 use std::io;
@@ -63,6 +65,18 @@ pub struct SharedMemory {
 }
 
 impl SharedMemory {
+    /// The files named in the environment, made if they aren't there, and else what the app left
+    /// open. `ram_bytes` is the size of the RAM file.
+    pub fn from_environment(slot: Slot, ram_bytes: u64) -> io::Result<Self> {
+        match MemoryFiles::from_environment().map_err(io::Error::other)? {
+            Some(files) => {
+                let (window, ram) = files.open(ram_bytes)?;
+                Self::new(&window, ram)
+            }
+            None => Self::inherited(slot),
+        }
+    }
+
     /// What the app left open for this daemon. See [`crate::handover`].
     pub fn inherited(slot: Slot) -> io::Result<Self> {
         Self::new(&Part::Window.inherited(slot)?, Part::Ram.inherited(slot)?)

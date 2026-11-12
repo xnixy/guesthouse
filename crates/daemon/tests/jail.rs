@@ -53,6 +53,32 @@ fn setup_runs_a_program(folder: &Path) {
 
 #[cfg(all(feature = "stand-in", not(feature = "nvidia")))]
 fn serving(folder: &Path) {
+    serve_jailed(folder, &[]);
+}
+
+/// The memory comes as two files that the daemon makes, which the jail names neither of.
+#[cfg(all(feature = "stand-in", not(feature = "nvidia")))]
+fn serving_with_memory_files(folder: &Path) {
+    use guesthouse_daemon::guest_memory::WINDOW_SIZE;
+    use std::os::unix::fs::PermissionsExt;
+
+    let (ram, window) = (folder.join("guest-ram"), folder.join("guest-window"));
+    serve_jailed(
+        folder,
+        &[
+            ("GUESTHOUSE_RAM", "1G"),
+            ("GUESTHOUSE_RAM_FILE", ram.to_str().unwrap()),
+            ("GUESTHOUSE_WINDOW_FILE", window.to_str().unwrap()),
+        ],
+    );
+    for (file, size) in [(&ram, 1 << 30), (&window, WINDOW_SIZE)] {
+        let found = fs::metadata(file).unwrap();
+        assert_eq!((found.len(), found.permissions().mode() & 0o777), (size, 0o600), "{}", file.display());
+    }
+}
+
+#[cfg(all(feature = "stand-in", not(feature = "nvidia")))]
+fn serve_jailed(folder: &Path, environment: &[(&str, &str)]) {
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
@@ -64,6 +90,7 @@ fn serving(folder: &Path) {
         // Its own store and home, so the test never reads the real ones.
         .env("GUESTHOUSE_STORE", folder.join("store"))
         .env("HOME", folder.join("home"))
+        .envs(environment.iter().copied())
         .env_remove("GUESTHOUSE_JAIL")
         .stderr(output)
         .spawn()
@@ -80,7 +107,11 @@ fn serving(folder: &Path) {
     let _ = daemon.wait();
     assert!(connected.is_ok(), "QEMU's socket answers");
     for wanted in [["NoNewPrivs:", "1"], ["Seccomp:", "2"]] {
-        assert!(status.lines().any(|line| line.split_whitespace().eq(wanted)), "{wanted:?}\n{status}");
+        assert!(
+            status.lines().any(|line| line.split_whitespace().eq(wanted)),
+            "{wanted:?}
+{status}"
+        );
     }
     assert!(log_of(folder).contains("jailed, with Landlock"), "{}", log_of(folder));
 }
@@ -107,6 +138,8 @@ const CASES: &[Case] = &[
     ("setup_runs_a_program", setup_runs_a_program),
     #[cfg(all(feature = "stand-in", not(feature = "nvidia")))]
     ("serving", serving),
+    #[cfg(all(feature = "stand-in", not(feature = "nvidia")))]
+    ("serving_with_memory_files", serving_with_memory_files),
 ];
 
 fn main() {

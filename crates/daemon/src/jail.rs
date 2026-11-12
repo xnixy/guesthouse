@@ -1,6 +1,7 @@
 //! The daemon's jail, which it puts itself in. A guest that takes the daemon over gets what's here
 //! and nothing more: the card, this VM's memory and run folder, and the system's libraries. The
-//! memory comes open from the app, so no rule names it.
+//! memory comes open from the app, or is opened by the daemon first, from the files it is told of, so no
+//! rule names it.
 //!
 //! It goes on in two steps. The files come first, before any thread exists, as Landlock covers only
 //! the thread that applies it. The calls come once the card is open and the sockets are bound, as

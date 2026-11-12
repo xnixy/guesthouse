@@ -9,6 +9,10 @@ use std::os::fd::OwnedFd;
 /// Where QEMU places the shared window in guest physical memory, on a host that can address it.
 pub const WINDOW_BASE: u64 = 1 << 40;
 
+/// How big the window is: 64 GiB, which QEMU is told too. It is sized, not filled, so it costs RAM only
+/// as far as the guest's locked allocations go.
+pub const WINDOW_SIZE: u64 = 64 << 30;
+
 /// Where the window goes on this host. KVM refuses guest memory above what the host's CPU can
 /// address, and many Intel CPUs address 39 bits, 512 GiB, which is below [`WINDOW_BASE`]. The app and
 /// the daemon each ask the CPU, so they agree without telling each other, even inside a jail.
@@ -134,8 +138,6 @@ pub struct HostBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const WINDOW_SIZE: u64 = 64 << 30;
 
     #[test]
     fn a_wide_host_keeps_the_window_where_it_always_was() {

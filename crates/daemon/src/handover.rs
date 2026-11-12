@@ -84,7 +84,7 @@ impl Part {
             let found = link.map_or_else(|_| "nothing".to_owned(), |link| link.display().to_string());
             return Err(io::Error::other(format!(
                 "the guest's {} should be open at descriptor {descriptor} as {wanted}, and {found} is there. \
-                 Start the machine from Guesthouse.",
+                 Start the machine from Guesthouse. To run the daemon beside your own QEMU,                  see docs/standalone.md.",
                 self.word()
             )));
         }

@@ -37,7 +37,23 @@ fn working_devices(task: &Task) -> Option<u32> {
 fn daemons_reason(task: &Task) -> Option<String> {
     let said = fs::read_to_string(task.run_file(daemon::OUTPUT_FILE)).ok()?;
     let last = said.lines().rev().find_map(|line| line.strip_prefix(DAEMON_ERROR_MARK))?;
+    let last = without_time(last);
     Some(last.trim().to_owned())
+}
+
+/// A verbose log line has its time in brackets after the level. The reason reads the same without it.
+fn without_time(message: &str) -> &str {
+    let Some(rest) = message.strip_prefix('[') else { return message };
+    match rest.split_once("] ") {
+        Some((time, after))
+            if !time.is_empty()
+                && time.bytes().all(|byte| byte.is_ascii_digit() || byte == b' ' || byte == b'.')
+                && time.matches('.').count() == 1 =>
+        {
+            after
+        }
+        _ => message,
+    }
 }
 
 pub(super) fn check_gpu(task: &Task) -> Result<()> {

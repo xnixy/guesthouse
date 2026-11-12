@@ -61,7 +61,7 @@ So Guesthouse teaches KVM to speak Hyper-V's GPU protocol. Windows boots, finds 
 
 The numbers, and how I check the picture is right, are in [performance](docs/performance.md).
 
-**Without a window.** `guesthouse-vm` lists, starts and stops machines from a terminal, so a PC with no desktop can run them. Machines are still made in the app. [How it works](docs/headless.md).
+**Without a window.** `guesthouse-vm` makes, installs, starts and stops machines from a terminal, so a PC with no desktop can run them. [How it works](docs/headless.md).
 
 ![The app's library, with a Windows machine and an Ubuntu machine](docs/images/app-library.jpg)
 

@@ -38,6 +38,7 @@ pub(super) enum Command<'a> {
     Stop(&'a str),
     Off(&'a str),
     Log(&'a str),
+    Standalone(&'a str),
     New { name: &'a str, options: NewOptions<'a> },
     Set { name: &'a str, key: &'a str, value: &'a str },
     Forward { name: &'a str, change: Forwarding<'a> },
@@ -109,7 +110,7 @@ pub(super) fn parse(arguments: &[String]) -> std::result::Result<Command<'_>, Pr
             Split::new(command, rest, &[], &[])?.exactly(command, "", 0)?;
             Ok(Command::List)
         }
-        "status" | "show" | "stop" | "off" | "log" => {
+        "status" | "show" | "stop" | "off" | "log" | "command" => {
             let split = Split::new(command, rest, &[], &[])?;
             let name = split.exactly(command, machine, 1)?[0];
             Ok(match command {
@@ -117,6 +118,7 @@ pub(super) fn parse(arguments: &[String]) -> std::result::Result<Command<'_>, Pr
                 "show" => Command::Show(name),
                 "stop" => Command::Stop(name),
                 "off" => Command::Off(name),
+                "command" => Command::Standalone(name),
                 _ => Command::Log(name),
             })
         }

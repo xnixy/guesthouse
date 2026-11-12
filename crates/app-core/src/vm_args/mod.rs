@@ -10,11 +10,13 @@ mod forwarding_jail;
 mod nic;
 mod own_linux;
 mod qemu_jail;
+mod standalone;
 mod ubuntu;
 
 pub use amd::{AmdBoot, RENDER_SERVER};
 pub use nic::PASST_PID_FILE;
 pub use qemu_jail::{PASST_FD, PID_FILE, TAP_FD};
+pub use standalone::memory_files_in;
 pub use ubuntu::{FORWARDED_INPUT_SOCKET, FRAMES_PREFIX, INSTALL_LOG, ssh_port};
 
 use crate::context::Context;
@@ -23,6 +25,7 @@ use crate::gpu_identity::{PciIdentity, shown_identity};
 use crate::linux::card::ForwardedCard;
 use crate::machine::{Drive, Machine};
 use crate::network::{Forward, Mode};
+use guesthouse_daemon::memory_files::MemoryFiles;
 use guesthouse_daemon::slot::Slot;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -138,6 +141,9 @@ pub struct VmPlan {
     /// What the machine's row says about the jail while it runs. Empty for a whole jail, and for a
     /// machine that has none to have.
     pub jail_note: String,
+    /// The two files a GPU machine's memory is in, for a QEMU that opens them by path. Without them
+    /// it is the app's descriptors, which only a child of the app can have: see [`standalone`].
+    pub memory_by_path: Option<MemoryFiles>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +206,7 @@ impl VmPlan {
             sound: None,
             jail: None,
             jail_note: String::new(),
+            memory_by_path: None,
             run_folder,
         }
     }

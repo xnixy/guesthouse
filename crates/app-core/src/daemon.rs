@@ -4,6 +4,7 @@
 use crate::context::{Context, SLOT_VARIABLE};
 use crate::failure::Result;
 use crate::guest_memory::GuestMemory;
+use guesthouse_daemon::memory_files::{MemoryFiles, RAM_VARIABLE, WINDOW_VARIABLE};
 use guesthouse_daemon::slot::Slot;
 use guesthouse_daemon::{card_choice, jail};
 use std::collections::BTreeMap;
@@ -51,6 +52,14 @@ impl DaemonStart {
     /// For a machine allowed to start with no jail, on a PC that can't give it one.
     pub fn without_jail(mut self) -> Self {
         self.environment.insert(jail::VARIABLE.to_owned(), jail::OFF.to_owned());
+        self
+    }
+
+    /// For a daemon that is not started with the memory open, but told the two files to make and
+    /// hold: see [`MemoryFiles`].
+    pub fn with_memory_files(mut self, files: &MemoryFiles) -> Self {
+        self.environment.insert(RAM_VARIABLE.to_owned(), files.ram.display().to_string());
+        self.environment.insert(WINDOW_VARIABLE.to_owned(), files.window.display().to_string());
         self
     }
 

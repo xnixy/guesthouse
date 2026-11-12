@@ -3,10 +3,11 @@
 use super::{Shared, is_off};
 use crate::rows::number_row;
 use adw::prelude::*;
-use guesthouse_app_core::host::{RamField, cpu_list, physical_cores, vcache_cpus};
-use guesthouse_app_core::machine::{Kind, MIN_CORES, MIN_RAM_GIB};
+use guesthouse_app_core::host::{cpu_list, physical_cores, vcache_cpus};
+use guesthouse_app_core::limits::{cores_range, ram_field};
+use guesthouse_app_core::machine::Kind;
 use guesthouse_app_core::settings::max_vram_gib;
-use guesthouse_app_core::tasks::{Status, slot_of};
+use guesthouse_app_core::tasks::Status;
 
 const VM_MUST_BE_OFF: &str = "The VM must be off to change these.";
 const SOUND_NOTE: &str = "Through PipeWire. Off, the guest's sound card plays nothing, and QEMU gets no way to your \
@@ -26,25 +27,15 @@ impl Hardware {
     pub fn new(shared: &Shared, page: &adw::PreferencesPage) -> Self {
         let context = shared.window.context();
         let machine = shared.machine.borrow().clone();
-        let plain = machine.kind == Kind::Plain;
         let group = adw::PreferencesGroup::builder().title("Hardware").build();
         page.add(&group);
         let host_cores = physical_cores(&context.cpus);
-        let cores = number_row(
-            "Cores",
-            machine.cores.into(),
-            if plain { 1.0 } else { MIN_CORES.into() },
-            host_cores.max(machine.cores).into(),
-        );
+        let (least_cores, most_cores) = cores_range(&context, &machine);
+        let cores = number_row("Cores", machine.cores.into(), least_cores.into(), most_cores.into());
         cores.set_subtitle(&format!("This PC has {host_cores} cores."));
         group.add(&cores);
         let wanted = machine.ram_gib.into();
-        let field = if machine.has_gpu() {
-            let slot = slot_of(&context, &machine).unwrap_or(context.slot);
-            RamField::for_gpu(&context, slot, MIN_RAM_GIB.into(), wanted)
-        } else {
-            RamField::for_plain(&context, if plain { 1 } else { MIN_RAM_GIB.into() }, wanted)
-        };
+        let field = ram_field(&context, &machine);
         // What it has stays, so a setting that no longer fits isn't changed behind the user's back.
         let ram = number_row(
             "RAM in GiB",

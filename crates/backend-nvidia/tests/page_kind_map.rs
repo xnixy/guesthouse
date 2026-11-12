@@ -75,3 +75,15 @@ fn a_host_that_refuses_the_kind_gets_the_map_without_it() {
     let mut backend = started(rm, &FAKE_ADA);
     assert_eq!(kinds_mapped(&mut backend, Z24S8_PROTECTION), [None]);
 }
+
+#[test]
+fn the_backend_says_two_values_differ_only_when_their_kinds_do() {
+    let (z16, z24s8) = (0x0200, 0x0400);
+    let ada = started(FakeRm::new(), &FAKE_ADA);
+    assert!(!ada.maps_differently(z16, z16 | 0xFF));
+    assert!(ada.maps_differently(0, z16));
+    assert!(ada.maps_differently(z16, z24s8));
+    let blackwell = started(FakeRm::new(), &FAKE_BLACKWELL);
+    assert!(!blackwell.maps_differently(0, z16));
+    assert!(!blackwell.maps_differently(z16, z24s8));
+}

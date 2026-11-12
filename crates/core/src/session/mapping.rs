@@ -368,9 +368,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                     && handle == allocation
                     && current.first + (address - current.address) == offset
                     && end <= current.address + current.length
-                    && current.driver_protection == driver_protection
+                    && !self.backend.maps_differently(current.driver_protection, driver_protection)
                 {
-                    // Already there, and the driver wants the pages the same way.
+                    // Already there, and the pages wouldn't be mapped any differently.
                     return Ok(());
                 }
                 self.unmap_gpu_addresses(address, size, space)?;

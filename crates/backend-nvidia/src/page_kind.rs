@@ -44,15 +44,27 @@ pub fn depth_class(driver_protection: u64) -> u8 {
     (driver_protection >> CLASS_SHIFT & CLASS_MASK) as u8
 }
 
+/// The page kind of a driver protection value's class, with nothing logged.
+fn kind_of(rule: PageKinds, driver_protection: u64) -> Option<u32> {
+    if rule == PageKinds::NotCarried {
+        return None;
+    }
+    let class = depth_class(driver_protection);
+    CLASS_KINDS.iter().find(|known| known.0 == class).map(|known| known.1)
+}
+
+/// Whether two driver protection values give different page kinds, which is when the pages need
+/// mapping again to change from one to the other.
+pub fn kinds_differ(rule: PageKinds, first: u64, second: u64) -> bool {
+    kind_of(rule, first) != kind_of(rule, second)
+}
+
 /// The page kind a mapping with this driver protection value needs, if it is a depth mapping on a
 /// generation whose entries carry a kind. A class this table doesn't know gets none, and is logged.
 pub fn page_kind(rule: PageKinds, driver_protection: u64) -> Option<u32> {
+    let kind = kind_of(rule, driver_protection);
     let class = depth_class(driver_protection);
-    if rule == PageKinds::NotCarried || class == CLASS_NONE {
-        return None;
-    }
-    let kind = CLASS_KINDS.iter().find(|known| known.0 == class).map(|known| known.1);
-    if kind.is_none() {
+    if kind.is_none() && rule == PageKinds::InEntries && class != CLASS_NONE {
         log::warn!("a map asks for depth class {class}, which has no page kind here, so it stays plain");
     }
     kind
@@ -86,6 +98,22 @@ mod tests {
         assert_eq!(page_kind(InEntries, 0), None);
         assert_eq!(page_kind(InEntries, with_class(6)), None);
         assert_eq!(page_kind(InEntries, with_class(0xFF)), None);
+    }
+
+    #[test]
+    fn values_differ_when_their_kinds_do() {
+        let (z16, z24s8) = (with_class(2), with_class(4));
+        assert!(!kinds_differ(InEntries, z16, z16));
+        assert!(!kinds_differ(InEntries, z16 | 0xFF, z16 | 0xAA0000));
+        assert!(!kinds_differ(InEntries, 0, 0x10000001));
+        assert!(kinds_differ(InEntries, 0, z16));
+        assert!(kinds_differ(InEntries, z16, z24s8));
+    }
+
+    #[test]
+    fn blackwell_never_has_values_that_differ() {
+        assert!(!kinds_differ(NotCarried, 0, with_class(2)));
+        assert!(!kinds_differ(NotCarried, with_class(2), with_class(4)));
     }
 
     #[test]

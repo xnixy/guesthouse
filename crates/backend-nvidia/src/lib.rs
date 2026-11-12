@@ -454,6 +454,10 @@ impl<R: Rm + OpenRm> Backend for NvidiaBackend<R> {
         Ok(())
     }
 
+    fn maps_differently(&self, first: u64, second: u64) -> bool {
+        page_kind::kinds_differ(self.generation.page_kinds, first, second)
+    }
+
     fn unmap(&mut self, unmap: &UnmapRequest) -> Result<(), BackendError> {
         let space = Self::space(&self.spaces, unmap.space)?;
         self.device.unmap(space, handle_of(unmap.memory), unmap.address, unmap.length).map_err(memory_error)

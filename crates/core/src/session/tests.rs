@@ -1162,6 +1162,7 @@ mod mappings {
     #[test]
     fn repeating_a_protected_map_is_skipped_but_another_value_maps_again() {
         let mut session = session();
+        session.backend_mut().protections_differ = true;
         let (_, handle) = allocate(&mut session, private(0x1000));
         let (sync, _, _) = create_fence(&mut session, 0);
         let first = protected(0x5000_0000, 0x1000, handle, 0, 0x0300);
@@ -1173,6 +1174,19 @@ mod mappings {
         let mapped = &session.backend_mut().mapped_protections;
         assert_eq!(mapped[made..], [(0x5000_0000, 0x0500)], "a new value maps again");
         assert_eq!(session.allocations[&handle].mappings.len(), 1);
+    }
+
+    #[test]
+    fn a_value_the_backend_maps_the_same_is_skipped_and_keeps_the_stored_one() {
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x1000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        update(&mut session, sync, 0, &[protected(0x5000_0000, 0x1000, handle, 0, 0x0300)]);
+        let made = session.backend_mut().mapped_protections.len();
+        update(&mut session, sync, 1, &[protected(0x5000_0000, 0x1000, handle, 0, 0x0500)]);
+        assert_eq!(session.backend_mut().mapped_protections.len(), made);
+        let held = session.allocations[&handle].mappings.iter().map(|m| m.driver_protection);
+        assert_eq!(held.collect::<Vec<_>>(), [0x0300]);
     }
 
     #[test]

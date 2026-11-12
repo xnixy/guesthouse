@@ -95,6 +95,12 @@ pub trait Backend: Sized {
     /// Maps memory. Must fail if the addresses are taken: the core then clears them and tries again.
     fn map(&mut self, request: &MapRequest) -> Result<(), BackendError>;
 
+    /// Whether two of the driver's protection values need different mappings of the same pages. Most
+    /// backends map every value the same way, which is what this says unless they know better.
+    fn maps_differently(&self, _first: u64, _second: u64) -> bool {
+        false
+    }
+
     fn unmap(&mut self, unmap: &UnmapRequest) -> Result<(), BackendError>;
 
     /// Reads a vendor driver's private data for a new allocation.

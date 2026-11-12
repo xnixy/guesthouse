@@ -13,7 +13,8 @@ pub const QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a queue may wait behind a fence before going on regardless.
 pub const GATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a submission's reply may be held for ring room. It is bounded, because what the GPU is
-/// waiting for may be in a later submission from the same guest thread.
+/// waiting for may be in a later submission from the same guest thread. A submission's own work never
+/// holds its reply past the limit rule, so a hold that runs this long is for work ahead of it.
 pub const RING_ROOM_TIMEOUT: Duration = Duration::from_millis(100);
 /// How many of a process's queues may stop answering before the whole process comes off the GPU. A
 /// card that stalled for someone else can cost one queue, so one isn't enough to give up on a process.
@@ -69,6 +70,7 @@ pub enum Pending {
     RingRoom {
         queue: u32,
         fence: u64,
+        work: u32,
         ticket: ReplyTicket,
         started: Instant,
     },

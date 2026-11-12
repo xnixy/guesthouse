@@ -2177,6 +2177,24 @@ mod held_replies {
     }
 
     #[test]
+    fn a_submission_over_the_limit_on_its_own_is_answered_at_once() {
+        let (mut session, queue, _) = busy_queue(50);
+        assert_eq!(send_with_ticket(&mut session, &submission(queue, 1)).0, Answer::Now);
+    }
+
+    #[test]
+    fn a_submission_over_the_limit_waits_only_for_the_work_ahead_of_it() {
+        let (mut session, queue, fence) = busy_queue(50);
+        let _ = send_with_ticket(&mut session, &submission(queue, 1));
+        assert_eq!(send_with_ticket(&mut session, &submission(queue, 2)).0, Answer::Held);
+        assert_eq!(session.take_replies().count(), 0);
+        session.memory_mut().write_u64(fence, 1).unwrap();
+        let _ = session.poll(Instant::now());
+        let replies: Vec<_> = session.take_replies().collect();
+        assert_eq!(replies, [HeldReply { ticket: TICKET, bytes: SUCCESS.to_le_bytes().to_vec() }]);
+    }
+
+    #[test]
     fn a_hold_leaves_other_messages_free_to_run() {
         let (mut session, queue, _) = busy_queue(100);
         let _ = send_with_ticket(&mut session, &submission(queue, 1));

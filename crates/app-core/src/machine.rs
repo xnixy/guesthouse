@@ -27,6 +27,9 @@ pub const MIN_CORES: u32 = 2;
 /// Windows 11's own minimum, and above 2.75 GiB, where q35 changes how it splits RAM around the
 /// 4 GiB hole. The daemon relies on the larger-RAM split.
 pub const MIN_RAM_GIB: u32 = 4;
+/// The AHCI controller has six ports. The disk and two discs have the first three, and the rest
+/// are for drives.
+pub const MAX_DRIVES: usize = 3;
 const MACHINE_FILE: &str = "machine.json";
 const OTHER_MAKER: &str =
     "Windows here was installed for the card it has now. For a card from another maker, make a new machine.";
@@ -87,6 +90,14 @@ fn default_on() -> bool {
 
 fn default_bridge() -> String {
     network::DEFAULT_BRIDGE.to_owned()
+}
+
+/// One of the host's drives, given to a machine whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Drive {
+    /// Its name under `/dev/disk/by-id`, as `sdb` and its like change from one boot to the next.
+    pub id: String,
 }
 
 /// Fields beyond the first three can be missing: older files don't have them, and each default keeps
@@ -173,6 +184,10 @@ pub struct Machine {
     /// file when empty, so an older build can still read it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub user: String,
+    /// Drives of this PC the guest has beside its disk. Left out of the file when there are none, so
+    /// an older build can still read it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drives: Vec<Drive>,
 }
 
 impl Machine {
@@ -208,6 +223,7 @@ impl Machine {
             sound: true,
             amd_gpu: String::new(),
             user: String::new(),
+            drives: Vec::new(),
         }
     }
 
@@ -342,8 +358,30 @@ impl Machine {
             }
         }
         found.extend(self.network_problems());
+        found.extend(self.drive_problems());
         if self.vram_gib > max_vram_gib {
             found.push(format!("The video memory cap must be a whole number up to {max_vram_gib} GiB."));
+        }
+        found
+    }
+
+    /// What is wrong with the list of drives, whatever the host has.
+    fn drive_problems(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        // Ubuntu's machine line has no AHCI controller to put them on.
+        if self.kind == Kind::Linux && !self.drives.is_empty() {
+            found.push("Drives are for Windows and plain machines.".to_owned());
+        }
+        if self.drives.len() > MAX_DRIVES {
+            found.push(format!("A machine can have {MAX_DRIVES} drives at most."));
+        }
+        for (at, drive) in self.drives.iter().enumerate() {
+            // The name is joined to a folder, so it must not lead out of it.
+            if matches!(drive.id.as_str(), "" | "." | "..") || drive.id.contains('/') {
+                found.push("A drive must be one of the names under /dev/disk/by-id.".to_owned());
+            } else if self.drives[..at].iter().any(|before| before.id == drive.id) {
+                found.push(format!("{} is given twice.", drive.id));
+            }
         }
         found
     }
@@ -679,5 +717,47 @@ mod tests {
         assert!(machine.summary().starts_with("Windows with GPU-PV, "));
         machine.kind = Kind::Plain;
         assert!(machine.summary().starts_with("Plain VM, ") && machine.summary().contains("no GPU"));
+    }
+
+    fn drive(id: &str) -> Drive {
+        Drive { id: id.to_owned() }
+    }
+
+    #[test]
+    fn drives_stay_out_of_the_file_when_there_are_none_and_an_older_file_has_none() {
+        assert!(!serde_json::to_string(&sample()).unwrap().contains("drives"), "the default stays out");
+        let older = r#"{"name": "Old", "disk": "/d", "vars": "/v"}"#;
+        assert!(serde_json::from_str::<Machine>(older).unwrap().drives.is_empty());
+        let drives = vec![drive("ata-A_1"), drive("ata-B_2")];
+        let given = Machine { drives, ..sample() };
+        let text = serde_json::to_string(&given).unwrap();
+        assert!(text.contains(r#""drives":[{"id":"ata-A_1"},{"id":"ata-B_2"}]"#), "{text}");
+        let read = serde_json::from_str::<Machine>(&text).unwrap();
+        assert_eq!(read, Machine { id: String::new(), ..given });
+    }
+
+    #[test]
+    fn a_machine_has_three_drives_at_most_and_none_twice() {
+        let three = Machine { drives: vec![drive("a"), drive("b"), drive("c")], ..sample() };
+        assert!(three.problems(0).is_empty());
+        let four = Machine { drives: vec![drive("a"), drive("b"), drive("c"), drive("d")], ..sample() };
+        assert!(four.problems(0).iter().any(|text| text.contains("3 drives at most")));
+        let twice = Machine { drives: vec![drive("a"), drive("a")], ..sample() };
+        assert!(twice.problems(0).iter().any(|text| text.contains("a is given twice")));
+    }
+
+    #[test]
+    fn a_drive_cannot_be_named_to_reach_outside_the_folder_of_names() {
+        for id in ["", ".", "..", "../sda", "by-id/x", "/dev/sda"] {
+            let problems = Machine { drives: vec![drive(id)], ..sample() }.problems(0);
+            assert!(problems.iter().any(|text| text.contains("/dev/disk/by-id")), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn ubuntu_has_no_drives_to_give() {
+        let ubuntu = Machine { kind: Kind::Linux, drives: vec![drive("a")], ..sample() };
+        assert!(ubuntu.problems(0).iter().any(|text| text.contains("Windows and plain machines")));
+        assert!(Machine { kind: Kind::Plain, drives: vec![drive("a")], ..sample() }.problems(0).is_empty());
     }
 }

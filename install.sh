@@ -14,9 +14,9 @@
 set -eu
 
 # A release sets these three, last of all, once its files are up. Until the first one they're empty.
-RELEASE_VERSION="0.4.1"
-PAYLOAD_SHA256="175d9546c14fdbe6fba5a9b83805b7190b86f4addbe75492c99d0fedd8aff1e0"
-SOURCE_SHA256="255aecf67782a66ddfb916884481f3c0d4315662c676a3f6cd3c4c315dad60c0"
+RELEASE_VERSION="0.5.0"
+PAYLOAD_SHA256="4b0d53243513659234aeb83a6a4e05cf4f14ee07e46700a7a0fb0467623200b7"
+SOURCE_SHA256="b865d9f435e47fc9bdbddd28b232f120c351588ef2c1a672339b828bc5500c43"
 
 REPO_URL=https://github.com/xnixy/guesthouse
 RELEASE_URL=$REPO_URL/releases/download

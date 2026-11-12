@@ -31,7 +31,7 @@ What you have to provide:
 
 - Put both files on `/dev/shm`, or another tmpfs. Not hugetlbfs: the daemon maps single pages of the RAM file, and hugetlbfs wants whole huge pages. Not a disk file either. It works, but the guest's memory would go through the page cache and out to the disk.
 - Leave room. `/dev/shm` is half your RAM by default, and the RAM file takes its size from it at once. `sudo mount -o remount,size=20G /dev/shm` makes it bigger. The window only takes what the guest uses of it.
-- Remove the files when both processes have stopped. They stay until you do, and the RAM file keeps its memory.
+- Remove the files when both processes have stopped. They stay until you do, and the RAM file keeps its memory. It also still holds what the guest had in memory, which is one more reason.
 
 The daemon puts its jail on after it has opened them, so the jail needs no rule for either path.
 
@@ -132,7 +132,7 @@ libvirt starts QEMU as a user. The daemon makes its files and sockets private to
 
 What's missing from it, and what I'm unsure of:
 
-- `mmio-base` and `iomem-base` are where the window sits in the guest's address space: `0x10000000000` on a CPU with a wide address bus, and lower on one with 39 bits. The daemon works it out the same way, so copy the number `guesthouse-vm command` prints for your PC.
+- `mmio-base` and `iomem-base` are where the window sits in the guest's address space: `0x10000000000` on a CPU that addresses more than 40 bits, and lower on one that addresses 40 or fewer, such as 39 bits, where it is `0x4000000000`. The daemon works it out the same way, so copy the number `guesthouse-vm command` prints for your PC.
 - It has no VGA, no TPM, no network and no USB. Take them from the printed list, in order. Windows was installed with them.
 - libvirt makes a RAM object of its own for the machine, and I don't know if `-machine memory-backend=ram0` reliably wins over it. If it doesn't, the guest's RAM isn't the file, and the GPU won't work.
 - libvirt can add QEMU's own `-sandbox`. I haven't tried the devices under it.

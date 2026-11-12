@@ -9,6 +9,7 @@
 use crate::context::Context;
 use crate::failure::{Failure, Result};
 use crate::host::{GIB, available_ram, fits_now, short_now};
+use guesthouse_daemon::guest_memory::WINDOW_SIZE;
 use guesthouse_daemon::handover::{self, Part};
 use guesthouse_daemon::slot::Slot;
 use rustix::fs::{
@@ -19,8 +20,8 @@ use std::os::fd::{OwnedFd, RawFd};
 use std::process::Command;
 
 /// The window's size, which QEMU is told too.
-pub const WINDOW_GIB: u64 = 64;
-pub const WINDOW_BYTES: u64 = WINDOW_GIB * GIB;
+pub const WINDOW_BYTES: u64 = WINDOW_SIZE;
+pub const WINDOW_GIB: u64 = WINDOW_BYTES / GIB;
 /// The memfds are kept above this in the app, so placing one at its number in a child can never
 /// land on the other.
 const KEPT_ABOVE: RawFd = handover::KEPT_ABOVE;

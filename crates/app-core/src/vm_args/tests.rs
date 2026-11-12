@@ -51,6 +51,29 @@ fn a_gpu_vms_arguments_stay_word_for_word_the_same() {
     assert_eq!(plan.qemu_arguments(), expected);
 }
 
+/// A QEMU that opens the memory by path has the same machine, and only these two words change.
+#[test]
+fn memory_by_path_changes_the_two_paths_and_nothing_else() {
+    let (_scratch, plan) = plan(&windows(), Boot::Gpu);
+    let files = memory_files_in(Path::new("/dev/shm"), slots::first());
+    let plan = VmPlan {
+        qemu_files: Some("/x/p/qemu/pc-bios".into()),
+        firmware: Firmware::fedora(),
+        run_folder: PathBuf::from("/x/run"),
+        ..plan
+    }
+    .standalone(files, Path::new("/dev/disk/by-id"));
+    let base = format!("{:#x}", guesthouse_daemon::guest_memory::window_base());
+    let expected: Vec<String> = include_str!("gpu-arguments.txt")
+        .lines()
+        .map(|line| line.replace("0x10000000000", &base))
+        .map(|line| line.replace("/proc/self/fd/12", "/dev/shm/gpupv-window.standalone"))
+        .map(|line| line.replace("/proc/self/fd/13", "/dev/shm/gpupv-ram.standalone"))
+        .collect();
+    assert_eq!(plan.qemu_arguments(), expected);
+    assert_eq!(plan.qemu_command()[0], plan.qemu.to_string_lossy(), "nothing goes in front of QEMU");
+}
+
 #[test]
 fn a_gpu_vm_gets_the_time_sync_channel_after_its_bus() {
     let (_scratch, plan) = plan(&windows(), Boot::Gpu);
@@ -328,4 +351,19 @@ fn an_install_and_ubuntu_are_given_no_drives() {
     let ubuntu = Machine { kind: Kind::Linux, ..machine };
     let (_scratch, ubuntu_plan) = plan(&ubuntu, Boot::Ubuntu(UbuntuBoot::NoGpu { reason_file: "/r".into() }));
     assert!(ubuntu_plan.drives.is_empty() && !has(&ubuntu_plan.qemu_arguments(), "-add-fd"));
+}
+
+#[test]
+fn standalone_keeps_the_drives_and_opens_them_by_name() {
+    let machine = with_drives(windows(), &["a", "b"]);
+    let (_scratch, plan) = plan(&machine, Boot::Gpu);
+    let files = memory_files_in(Path::new("/dev/shm"), slots::first());
+    let plan = plan.standalone(files, Path::new("/ids"));
+    assert_eq!(plan.drives, machine.drives);
+    let arguments = plan.qemu_arguments();
+    assert!(has(
+        &arguments,
+        "driver=host_device,node-name=drive2,filename=/ids/b,cache.direct=on,discard=unmap"
+    ));
+    assert!(!arguments.iter().any(|word| word == "-add-fd" || word.contains("fdset")));
 }

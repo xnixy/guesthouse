@@ -89,12 +89,12 @@ fn serve_amd(
         .ok_or("No AMD graphics card was found at the address this guest was given.")?;
     log::info!("AMD card at {}", node.display());
     let run_folder = slot.run_folder(&project);
-    let memory = SharedMemory::inherited(slot)?;
+    let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
+    let memory = SharedMemory::from_environment(slot, guest_ram(ram.as_deref()))?;
     let needs = Needs::of_amd_card(slot, &project, &setup.driver_folder, node);
     needs.prepare()?;
     let locked = lock_files(&needs)?;
     let backend: AmdBackend = start_backend(&setup)?;
-    let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
     let limits = MemoryLimits::new(backend.facts(), video_cap(cap.as_deref()), guest_ram(ram.as_deref()));
     let config = Config::new(limits);
     let mut session = Session::new(backend, memory, config);
@@ -122,7 +122,8 @@ fn serve_nvidia(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::
 
     let setup = read_setup()?;
     let run_folder = slot.run_folder(&project);
-    let memory = SharedMemory::inherited(slot)?;
+    let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
+    let memory = SharedMemory::from_environment(slot, guest_ram(ram.as_deref()))?;
     let needs = Needs::of_card(slot, &project, &setup.driver_folder);
     needs.prepare()?;
     let locked = lock_files(&needs)?;
@@ -130,7 +131,6 @@ fn serve_nvidia(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::
     if let Some(micros) = timeslice(env::var("GUESTHOUSE_TIMESLICE_US").ok().as_deref()) {
         backend.set_graphics_timeslice(micros);
     }
-    let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
     let limits = MemoryLimits::new(backend.facts(), video_cap(cap.as_deref()), guest_ram(ram.as_deref()));
     let config = Config::new(limits);
     let mut session = Session::new(backend, memory, config);
@@ -164,6 +164,7 @@ fn serve(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::Error>>
     use guesthouse_daemon::guest_memory::WINDOW_BASE;
     use guesthouse_daemon::handover::Part;
     use guesthouse_daemon::jail::{Needs, lock_calls, lock_files};
+    use guesthouse_daemon::memory_files::MemoryFiles;
     use guesthouse_daemon::router::Router;
     use guesthouse_daemon::server::Server;
 
@@ -171,17 +172,23 @@ fn serve(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::Error>>
     const WINDOW_SIZE: u64 = 8 << 30;
 
     let run_folder = slot.run_folder(&project);
-    // It keeps nothing in them, but holds them as the real one does, so a start from the app is
-    // the same from outside. By hand there are none, which is fine here.
-    let handed: Vec<_> = Part::ALL.iter().filter_map(|part| part.inherited(slot).ok()).collect();
-    if handed.is_empty() {
+    let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
+    // It keeps nothing in them, but holds them as the real one does, so a start from the app, or
+    // with the files named, is the same from outside. By hand there are none, which is fine here.
+    let held: Vec<_> = match MemoryFiles::from_environment()? {
+        Some(files) => {
+            let (window, ram) = files.open(guest_ram(ram.as_deref()))?;
+            vec![window, ram]
+        }
+        None => Part::ALL.iter().filter_map(|part| part.inherited(slot).ok()).collect(),
+    };
+    if held.is_empty() {
         log::warn!("no guest memory was handed over");
     }
     let needs = Needs { run_folder: run_folder.clone(), ..Needs::default() };
     needs.prepare()?;
     let locked = lock_files(&needs)?;
     let backend = StandIn::new();
-    let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
     let limits = MemoryLimits::new(backend.facts(), video_cap(cap.as_deref()), guest_ram(ram.as_deref()));
     let memory = SparseMemory::new(WINDOW_BASE + WINDOW_SIZE);
     let router = Router::new(Session::new(backend, memory, Config::new(limits)));

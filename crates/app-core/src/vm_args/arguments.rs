@@ -6,6 +6,7 @@ use crate::guest_memory::WINDOW_GIB;
 use crate::text::qemu_value;
 use guesthouse_daemon::guest_memory::window_base;
 use guesthouse_daemon::handover::Part;
+use std::path::PathBuf;
 
 const HYPERV_FEATURES: &str = "hv-relaxed,hv-vapic,hv-spinlocks=0x1fff,hv-vpindex,hv-runtime,hv-time,hv-synic,\
                                hv-stimer,hv-stimer-direct,hv-frequencies,hv-reset,hv-ipi,hv-tlbflush";
@@ -31,6 +32,15 @@ impl VmPlan {
     pub(super) fn vga_memory_mib(&self) -> u64 {
         let (width, height) = self.screen_size();
         (width * height * BYTES_PER_PIXEL).div_ceil(MIB).next_power_of_two().max(1)
+    }
+
+    /// Where QEMU opens a part of the guest's memory: its own descriptor, or the file named for it.
+    fn memory_path(&self, part: Part) -> PathBuf {
+        match (&self.memory_by_path, part) {
+            (None, _) => part.path_for_qemu(),
+            (Some(files), Part::Window) => files.window.clone(),
+            (Some(files), Part::Ram) => files.ram.clone(),
+        }
     }
 
     fn sound_backend(&self) -> (String, &'static str) {
@@ -165,7 +175,7 @@ impl VmPlan {
             "-object",
             &format!(
                 "memory-backend-file,id=gpio,size={WINDOW_GIB}G,mem-path={},share=on",
-                Part::Window.path_for_qemu().display()
+                self.memory_path(Part::Window).display()
             ),
             "-device",
             &format!(
@@ -181,7 +191,7 @@ impl VmPlan {
             &format!(
                 "memory-backend-file,id=ram0,size={},mem-path={},share=on",
                 self.ram,
-                Part::Ram.path_for_qemu().display()
+                self.memory_path(Part::Ram).display()
             ),
             "-machine",
             "memory-backend=ram0",

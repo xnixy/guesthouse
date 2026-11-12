@@ -4,6 +4,7 @@
 use crate::context::{Context, SLOT_VARIABLE};
 use crate::failure::Result;
 use crate::guest_memory::GuestMemory;
+use guesthouse_daemon::memory_files::{MemoryFiles, RAM_VARIABLE, WINDOW_VARIABLE};
 use guesthouse_daemon::slot::Slot;
 use guesthouse_daemon::{card_choice, jail};
 use std::collections::BTreeMap;
@@ -54,17 +55,30 @@ impl DaemonStart {
         self
     }
 
+    /// For a daemon that is not started with the memory open, but told the two files to make and
+    /// hold: see [`MemoryFiles`].
+    pub fn with_memory_files(mut self, files: &MemoryFiles) -> Self {
+        self.environment.insert(RAM_VARIABLE.to_owned(), files.ram.display().to_string());
+        self.environment.insert(WINDOW_VARIABLE.to_owned(), files.window.display().to_string());
+        self
+    }
+
+    /// The program with its words and environment. The memory files are taken out of what the app
+    /// inherited unless this start names them, so a variable left in someone's shell can't put the
+    /// daemon on files while QEMU is on the descriptors.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        command.arg(&self.base).env_remove(RAM_VARIABLE).env_remove(WINDOW_VARIABLE).envs(&self.environment);
+        command
+    }
+
     /// Starts it with the guest's memory open, where it looks for it.
     pub fn spawn(&self, run_folder: &Path, memory: &GuestMemory) -> Result<Child> {
         let output = File::create(run_folder.join(OUTPUT_FILE))?;
-        let mut command = Command::new(&self.program);
+        let mut command = self.command();
         memory.hand_to(&mut command);
-        let spawned = detached(command.arg(&self.base))
-            .envs(&self.environment)
-            .stdin(Stdio::null())
-            .stdout(output.try_clone()?)
-            .stderr(output)
-            .spawn()?;
+        let spawned =
+            detached(&mut command).stdin(Stdio::null()).stdout(output.try_clone()?).stderr(output).spawn()?;
         Ok(spawned)
     }
 }
@@ -121,6 +135,28 @@ mod tests {
         assert!(!start.environment.contains_key("GUESTHOUSE_AMD_CARD"));
         let start = start.on_amd_card("0000:7c:00.0");
         assert_eq!(start.environment["GUESTHOUSE_AMD_CARD"], "0000:7c:00.0");
+    }
+
+    #[test]
+    fn the_apps_start_clears_memory_files_left_in_the_environment() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let envs = |start: &DaemonStart| {
+            let command = start.command();
+            command
+                .get_envs()
+                .map(|(name, value)| (name.to_owned(), value.map(OsStr::to_owned)))
+                .collect::<Vec<_>>()
+        };
+        let removed = |name: &str| (OsStr::new(name).to_owned(), None);
+        let start = DaemonStart::new(&context, slots::first(), "16G", None);
+        let found = envs(&start);
+        assert!(found.contains(&removed(RAM_VARIABLE)) && found.contains(&removed(WINDOW_VARIABLE)));
+        let files = MemoryFiles { ram: "/dev/shm/ram".into(), window: "/dev/shm/window".into() };
+        let found = envs(&start.with_memory_files(&files));
+        let set = |name: &str, value: &str| (OsStr::new(name).to_owned(), Some(OsStr::new(value).to_owned()));
+        assert!(found.contains(&set(RAM_VARIABLE, "/dev/shm/ram")));
+        assert!(found.contains(&set(WINDOW_VARIABLE, "/dev/shm/window")));
     }
 
     #[test]

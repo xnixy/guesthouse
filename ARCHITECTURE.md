@@ -96,7 +96,7 @@ QEMU is started by `guesthouse-jail`, which applies a plan the app writes in `vm
 
 ## The guest's memory
 
-A GPU guest's RAM and its IO window are memfds. The app makes both before QEMU or the daemon starts, and each finds them open at the same descriptor numbers (`daemon/src/handover.rs`). Nothing of the guest is a file anyone can open by name, so `/dev/shm`'s size doesn't limit a machine, and the memory goes back as soon as the last of QEMU and the daemon has gone. Each memfd is named for its slot, as `gpupv-ram-2`, which is how the app tells from `/proc` what each slot holds when it works out how much RAM it can offer.
+A GPU guest's RAM and its IO window are memfds. The app makes both before QEMU or the daemon starts, and each finds them open at the same descriptor numbers (`daemon/src/handover.rs`). Nothing of the guest is a file anyone can open by name, so `/dev/shm`'s size doesn't limit a machine, and the memory goes back as soon as the last of QEMU and the daemon has gone. Each memfd is named for its slot, as `gpupv-ram-2`, which is how the app tells from `/proc` what each slot holds when it works out how much RAM it can offer. For a QEMU the app didn't start, the daemon can make two files instead and map those (`daemon/src/memory_files.rs`), which QEMU opens by the same paths. The daemon opens them before its jail goes on. [Standalone](docs/standalone.md) says how that's used.
 
 ## The vendor line
 

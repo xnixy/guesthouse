@@ -6,6 +6,7 @@ mod change;
 mod make;
 mod pick;
 mod setup;
+mod standalone;
 mod steps;
 #[cfg(test)]
 mod tests;
@@ -36,6 +37,7 @@ pub const USAGE: &str = "usage: guesthouse-vm COMMAND [MACHINE]
   stop MACHINE               ask the guest to shut down, and wait for it
   off MACHINE                cut the power, as Force Off does
   log MACHINE                where the log is, and the end of it
+  command MACHINE            what would start it beside your own QEMU or libvirt, printed
 
   new NAME --iso PATH [--kind windows|ubuntu|plain] [--disk GIB] [--cores N] [--ram GIB]
                              [--user NAME] [--amd-card PCI]
@@ -93,6 +95,7 @@ pub fn run(context: &Context, arguments: &[String], out: &mut dyn Write) -> std:
         Command::Stop(name) => stop(context, &find(context, name)?, "stop", out)?,
         Command::Off(name) => stop(context, &find(context, name)?, "force", out)?,
         Command::Log(name) => show_log(context, &find(context, name)?, out)?,
+        Command::Standalone(name) => standalone::command(context, &find(context, name)?, out)?,
         Command::New { name, options } => make::new_machine(context, name, &options, out)?,
         Command::Set { name, key, value } => change::set(context, find(context, name)?, key, value, out)?,
         Command::Forward { name, change } => change::forward(context, find(context, name)?, &change, out)?,

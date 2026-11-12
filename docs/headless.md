@@ -9,6 +9,7 @@ guesthouse-vm start NAME [--no-wait]
 guesthouse-vm stop NAME
 guesthouse-vm off NAME
 guesthouse-vm log NAME
+guesthouse-vm command NAME
 
 guesthouse-vm new NAME --iso PATH [--kind windows|ubuntu|plain] [--disk GIB] [--cores N] [--ram GIB]
                        [--user NAME] [--amd-card PCI]
@@ -82,6 +83,10 @@ There isn't one. QEMU runs with no viewer, and the machine runs the same. To use
 3. Connect Remote Desktop to `127.0.0.1:3389` on that PC. From another PC, tunnel it first with `ssh -L 3389:127.0.0.1:3389 user@host` and connect to `127.0.0.1:3389` on your own PC. The other way is `guesthouse-vm set NAME network bridged`, which gives the guest an address of its own on your network.
 
 A Windows machine's password is in the `windows-password` file in the machine's folder, and `show` says where the folder is.
+
+## Starting it by hand
+
+`guesthouse-vm command NAME` prints what would start a machine: the daemon with its environment, then QEMU's words, as a script. It starts nothing. It is for running the machine from your own script or from libvirt, and [standalone](standalone.md) says how.
 
 ## Logging in over ssh
 

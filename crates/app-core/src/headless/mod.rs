@@ -1,7 +1,11 @@
 //! `guesthouse-vm`: the machines from a terminal, with no window. It does what the app's buttons do, by
 //! the same calls, so a machine started here is the app's to stop and the other way round.
 
+mod args;
+mod change;
+mod make;
 mod pick;
+mod setup;
 mod steps;
 #[cfg(test)]
 mod tests;
@@ -13,26 +17,39 @@ use crate::machine::{Kind, Machine, load_all};
 use crate::setup::checks::gpu_warning;
 use crate::slots;
 use crate::tasks::{State, Status, launch, status};
+use args::{Command, parse};
 use pick::find;
 use std::fmt;
 use std::io::{self, Write};
 use std::time::Duration;
 use steps::Steps;
 
-const NO_WAIT: &str = "--no-wait";
 /// How often a running task is looked at.
 const POLL: Duration = Duration::from_millis(300);
 const LOG_LINES: usize = 40;
 
 pub const USAGE: &str = "usage: guesthouse-vm COMMAND [MACHINE]
 
-  list                     each machine and what it is doing
-  status MACHINE           one machine in full
-  start MACHINE [--no-wait]
-                           start it, saying each step until it is ready
-  stop MACHINE             ask the guest to shut down, and wait for it
-  off MACHINE              cut the power, as Force Off does
-  log MACHINE              where the log is, and the end of it
+  list                       each machine and what it is doing
+  status MACHINE             one machine in full
+  start MACHINE [--no-wait]  start it, saying each step until it is ready
+  stop MACHINE               ask the guest to shut down, and wait for it
+  off MACHINE                cut the power, as Force Off does
+  log MACHINE                where the log is, and the end of it
+
+  new NAME --iso PATH [--kind windows|ubuntu|plain] [--disk GIB] [--cores N] [--ram GIB]
+                             [--user NAME] [--amd-card PCI]
+  install MACHINE [--no-wait]
+                             run the install of a Windows or Ubuntu machine
+  remove MACHINE [--yes]     delete it, or forget it if its disk is elsewhere
+
+  show MACHINE               its settings
+  set MACHINE SETTING VALUE  cores, ram, vram, screen, refresh, network, passt, bridge, sound, share
+  forward MACHINE add|remove tcp|udp HOST GUEST
+                             a port on this PC that reaches a port in the guest
+
+  setup [--driver PATH] [--card PCI]
+                             the first-run setup for GPU machines
 
 MACHINE is a machine's id, or its name in any case.";
 
@@ -64,59 +81,23 @@ impl From<io::Error> for Problem {
     }
 }
 
-enum Command<'a> {
-    Help,
-    List,
-    Status(&'a str),
-    Start { name: &'a str, wait: bool },
-    Stop(&'a str),
-    Off(&'a str),
-    Log(&'a str),
-}
-
-fn mistake(why: impl fmt::Display) -> Problem {
-    Problem::Usage(format!("guesthouse-vm: {why}\n\n{USAGE}"))
-}
-
-fn parse(arguments: &[String]) -> std::result::Result<Command<'_>, Problem> {
-    let Some((command, rest)) = arguments.split_first() else { return Err(Problem::Usage(USAGE.to_owned())) };
-    let command = command.as_str();
-    if matches!(command, "help" | "-h" | "--help") {
-        return Ok(Command::Help);
-    }
-    let (flags, names): (Vec<&str>, Vec<&str>) =
-        rest.iter().map(String::as_str).partition(|word| word.starts_with('-'));
-    let allowed: &[&str] = if command == "start" { &[NO_WAIT] } else { &[] };
-    if let Some(flag) = flags.iter().find(|flag| !allowed.contains(flag)) {
-        return Err(mistake(format!("{command} has no option {flag}.")));
-    }
-    let one = || match names[..] {
-        [name] => Ok(name),
-        [] => Err(mistake(format!("{command} needs a machine."))),
-        _ => Err(mistake(format!("{command} takes one machine."))),
-    };
-    match command {
-        "list" if names.is_empty() => Ok(Command::List),
-        "list" => Err(mistake("list takes no machine.")),
-        "status" => one().map(Command::Status),
-        "start" => one().map(|name| Command::Start { name, wait: !flags.contains(&NO_WAIT) }),
-        "stop" => one().map(Command::Stop),
-        "off" => one().map(Command::Off),
-        "log" => one().map(Command::Log),
-        other => Err(mistake(format!("there is no command called {other}."))),
-    }
-}
-
 /// Runs what the words ask, writing what a person should read to `out`.
 pub fn run(context: &Context, arguments: &[String], out: &mut dyn Write) -> std::result::Result<(), Problem> {
     match parse(arguments)? {
         Command::Help => writeln!(out, "{USAGE}")?,
         Command::List => list(context, out)?,
         Command::Status(name) => show_status(context, &find(context, name)?, out)?,
+        Command::Show(name) => change::show(context, &find(context, name)?, out)?,
         Command::Start { name, wait } => start(context, &find(context, name)?, wait, out)?,
+        Command::Install { name, wait } => make::install(context, &find(context, name)?, wait, out)?,
         Command::Stop(name) => stop(context, &find(context, name)?, "stop", out)?,
         Command::Off(name) => stop(context, &find(context, name)?, "force", out)?,
         Command::Log(name) => show_log(context, &find(context, name)?, out)?,
+        Command::New { name, options } => make::new_machine(context, name, &options, out)?,
+        Command::Set { name, key, value } => change::set(context, find(context, name)?, key, value, out)?,
+        Command::Forward { name, change } => change::forward(context, find(context, name)?, &change, out)?,
+        Command::Setup { driver, card } => setup::setup(context, driver, card, out)?,
+        Command::Remove { name, yes } => make::remove(context, &find(context, name)?, yes, out)?,
     }
     Ok(())
 }
@@ -223,7 +204,7 @@ fn run_task(
 }
 
 /// What a task that ended without a word of its own still owes the person who waited for it.
-fn failure_of(found: &Status, said_nothing: String) -> Failure {
+fn follow_up(found: &Status, said_nothing: String) -> Failure {
     Failure(if found.error.is_empty() { said_nothing } else { found.error.clone() })
 }
 
@@ -251,7 +232,7 @@ fn start(context: &Context, machine: &Machine, wait: bool, out: &mut dyn Write) 
     };
     if found.state != State::Running {
         let log = context.paths.log_file();
-        return Err(failure_of(&found, format!("{name} did not start. The log has more: {}", log.display())));
+        return Err(follow_up(&found, format!("{name} did not start. The log has more: {}", log.display())));
     }
     if !found.error.is_empty() {
         writeln!(out, "Note: {}", found.error)?;
@@ -273,7 +254,7 @@ fn stop(context: &Context, machine: &Machine, action: &str, out: &mut dyn Write)
     }
     let found = run_task(context, machine, action, true, out)?.unwrap_or_default();
     if found.state != State::Off {
-        return Err(failure_of(&found, format!("{name} is still running.")));
+        return Err(follow_up(&found, format!("{name} is still running.")));
     }
     if !found.error.is_empty() {
         writeln!(out, "Note: {}", found.error)?;

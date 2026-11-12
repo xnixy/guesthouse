@@ -134,6 +134,18 @@ pub fn remember_card(context: &Context) -> Result<()> {
 fn remember_card_with(context: &Context, memory_of: impl Fn(&str) -> Option<u64>) -> Result<()> {
     let cards = find_cards(context);
     let card = cards.first().ok_or_else(|| Failure::new("No NVIDIA card was found."))?;
+    write_card(context, card, memory_of)
+}
+
+/// The same for the card at this address, on a PC where the best one isn't the one to use.
+pub fn remember_card_at(context: &Context, pci: &str) -> Result<()> {
+    let wanted = normal_address(pci);
+    let card = find_cards(context).into_iter().find(|card| card.pci == wanted);
+    let card = card.ok_or_else(|| Failure(format!("There is no NVIDIA card at {}.", pci.trim())))?;
+    write_card(context, &card, card_memory_mib)
+}
+
+fn write_card(context: &Context, card: &Card, memory_of: impl Fn(&str) -> Option<u64>) -> Result<()> {
     let memory = memory_of(&card.pci).unwrap_or(0);
     let changes = json!({"card": card, CARD_MEMORY_FIELD: memory});
     write_setup(context, changes.as_object().cloned().unwrap_or_default())

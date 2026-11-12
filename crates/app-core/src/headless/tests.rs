@@ -43,8 +43,8 @@ fn the_words_typed_are_checked_before_anything_is_touched() {
     assert_eq!(usage_of(""), USAGE);
     assert!(usage_of("frobnicate").starts_with("guesthouse-vm: there is no command called frobnicate."));
     assert!(usage_of("start").contains("start needs a machine."));
-    assert!(usage_of("stop a b").contains("stop takes one machine."));
-    assert!(usage_of("list a").contains("list takes no machine."));
+    assert!(usage_of("stop a b").contains("stop takes only a machine."));
+    assert!(usage_of("list a").contains("list takes no words, only options."));
     assert!(usage_of("stop a --no-wait").contains("stop has no option --no-wait."));
     assert!(usage_of("start a --wait").contains("start has no option --wait."));
 }
@@ -290,3 +290,6 @@ fn the_log_command_says_where_the_log_is_and_shows_its_end() {
     assert_eq!(lines.len(), 3 + LOG_LINES);
     assert!(lines[3].ends_with("line 5") && lines.last().unwrap().ends_with("line 44"), "{out}");
 }
+
+mod making;
+mod settings;

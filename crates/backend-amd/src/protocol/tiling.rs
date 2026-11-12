@@ -92,7 +92,7 @@ impl Layout {
 
     /// The bits a copy ORs into the surface's address: the tile swizzle in the address bits it stands
     /// for, kept inside the first block so the copy can't start past it. Zero for a mode without XOR.
-    /// GFX12 numbers its modes differently, and nothing here copies its tiles.
+    /// GFX12 numbers its modes differently and has no tile swizzle in the address.
     pub fn address_bits(self, gfx: GfxVersion) -> u64 {
         if gfx.0 >= 12 || self.swizzle_mode < FIRST_XOR_MODE {
             return 0;

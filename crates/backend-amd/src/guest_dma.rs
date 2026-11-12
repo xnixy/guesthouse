@@ -138,7 +138,7 @@ pub fn reaches(commands: &[u32]) -> Vec<Reach> {
 mod tests {
     use super::*;
     use crate::protocol::tiling::Layout as Tiling;
-    use crate::sdma_copy::{LinearCopy, TiledCopy};
+    use crate::sdma_copy::{LinearCopy, TiledCopy, TiledForm};
     use crate::submit::sdma_write_ib;
 
     const SOURCE: u64 = 0x4_5d00_0000;
@@ -170,6 +170,7 @@ mod tests {
             tiled_width: 640,
             tiled_height: 400,
             swizzle_mode: 27,
+            form: TiledForm::Sdma5,
             linear_address: TARGET,
             linear_pitch: 640,
             linear_height: 400,

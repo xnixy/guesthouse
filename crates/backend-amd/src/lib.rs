@@ -161,20 +161,38 @@ impl AmdBackend {
         let target_bytes =
             (u64::from(plan.height - 1) * u64::from(plan.linear_pitch) + u64::from(plan.width)) * PIXEL_BYTES;
         let reaches = [(plan.tiled_address, PIXEL_BYTES), (plan.linear_address + target_start, target_bytes)];
+        if !self.tiled_dma_known() {
+            return Err("the DMA copy is written for GFX10 to GFX12".into());
+        }
         self.run_dma(space, &reaches, &plan.commands())
     }
 
-    /// Whether the DMA engine's commands here are written for this card.
+    /// Whether the DMA engine's plain copies here are written for this card.
     fn dma_known(&self) -> bool {
         matches!(self.device.info().details.gfx_version.0, 10 | 11)
+    }
+
+    /// Whether the DMA engine's tiled copies here are written for this card, which GFX12 is as well.
+    fn tiled_dma_known(&self) -> bool {
+        matches!(self.device.info().details.gfx_version.0, 10..=12)
+    }
+
+    /// Runs a plain copy on the DMA engine, which is only written for GFX10 and GFX11.
+    fn run_linear_dma(
+        &mut self,
+        space: SpaceId,
+        reaches: &[(u64, u64)],
+        commands: &[u32],
+    ) -> Result<(), String> {
+        if !self.dma_known() {
+            return Err("the DMA copy is written for GFX10 and GFX11".into());
+        }
+        self.run_dma(space, reaches, commands)
     }
 
     /// Runs commands on the DMA engine in the daemon's space, and waits for them. `reaches` are the
     /// ranges they touch, each of which must be mapped there.
     fn run_dma(&mut self, space: SpaceId, reaches: &[(u64, u64)], commands: &[u32]) -> Result<(), String> {
-        if !self.dma_known() {
-            return Err("the DMA copy is written for GFX10 and GFX11".into());
-        }
         let alignment = self.device.info().va_alignment;
         if self.copy_ib.is_none() {
             let made = CopyIb::make(&self.device, alignment)
@@ -233,7 +251,7 @@ impl AmdBackend {
             .and_then(|plan| LinearCopy::of(&plan, staging.source_address, staging.target_address));
         let Some(linear) = linear else { return self.copy_staging(staging) };
         let reaches = [(linear.source_address, linear.bytes), (linear.target_address, linear.bytes)];
-        self.run_dma(staging.own_space, &reaches, &linear.commands())
+        self.run_linear_dma(staging.own_space, &reaches, &linear.commands())
     }
 
     /// Copies what `from` holds into `to`, a window at a time, by the DMA engine. The work that wrote
@@ -254,7 +272,7 @@ impl AmdBackend {
                     let copy =
                         LinearCopy { source_address: source, target_address: target, bytes: piece.bytes };
                     let reaches = [(source, piece.bytes), (target, piece.bytes)];
-                    self.run_dma(space, &reaches, &copy.commands())
+                    self.run_linear_dma(space, &reaches, &copy.commands())
                 });
             // The windows are one place each, so a mapping left in one would stop every later move.
             let space_vm = &mut self.spaces.get_mut(&space).ok_or("no such space")?.vm;
@@ -840,11 +858,12 @@ impl Backend for AmdBackend {
 
     /// A tiled surface is copied by the DMA engine, which takes any start inside it.
     fn tiled_bytes(&self, surface: &SurfaceShape, _x: u64, _y: u64) -> Option<u64> {
-        if !matches!(self.device.info().details.gfx_version.0, 10 | 11) {
+        if !self.tiled_dma_known() {
             return None;
         }
         let layout = protocol::tiling::Layout::of(surface.tiling?);
-        sdma_copy::surface_bytes(surface.pitch, surface.height, layout.swizzle_mode)
+        let gfx = self.device.info().details.gfx_version;
+        sdma_copy::surface_bytes(surface.pitch, surface.height, layout.swizzle_mode, gfx)
     }
 
     fn poll_staging_copy(&mut self, _host: &mut dyn HostServices, _now: Instant) -> Option<Status> {

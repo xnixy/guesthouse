@@ -6,6 +6,7 @@ use crate::failure::Result;
 use crate::gpu_support::{NO_GPU_PART, gpu_ready};
 use crate::held_memory::used_by_others;
 use crate::host::{self, GIB, physical_cores, ram_limit_for, vcache_cpus};
+use crate::host_drives::drive_problems;
 use crate::machine::{Kind, Machine};
 use crate::network_settings::{network_start_problems, other_machines};
 use crate::processes::{memory_taken, qemu_pid};
@@ -172,6 +173,7 @@ pub fn start_problems(context: &Context, machine: &Machine) -> Result<Vec<String
     if others.iter().any(|other| other.disk == machine.disk) {
         found.push(ALREADY_RUNNING.to_owned());
     }
+    found.extend(drive_problems(context, machine, &others));
     if qemu_pid(context, None).is_some() {
         found.push(no_slot_text(context));
     } else if machine.has_gpu() && memory_taken(context, None) {
@@ -438,5 +440,41 @@ mod tests {
             !says(&start_problems(&context, &machine).unwrap(), MEMORY_TAKEN),
             "a plain VM does not use it"
         );
+    }
+
+    /// A disk of the PC under a name, with a file standing in for its node.
+    fn plug_in_a_disk(scratch: &Scratch) -> Context {
+        let (context, _) = startable(scratch);
+        scratch.write("block/sdb/dev", "8:16\n");
+        let node = scratch.write("dev/sdb", "");
+        fs::create_dir_all(scratch.path("drive-ids")).unwrap();
+        std::os::unix::fs::symlink(node, scratch.path("drive-ids/ata-Disk_1")).unwrap();
+        scratch.write("block/sdb/size", "100\n");
+        context
+    }
+
+    fn with_drive(machine: Machine, id: &str) -> Machine {
+        Machine { drives: vec![crate::machine::Drive { id: id.into() }], ..machine }
+    }
+
+    #[test]
+    fn a_free_drive_is_no_problem_and_a_mounted_one_says_where() {
+        let scratch = Scratch::new();
+        let context = plug_in_a_disk(&scratch);
+        let (_, machine) = startable(&scratch);
+        let machine = with_drive(machine, "ata-Disk_1");
+        assert_eq!(start_problems(&context, &machine).unwrap(), Vec::<String>::new());
+        scratch.write("mountinfo", "30 1 8:16 / /mnt/data rw - ext4 /dev/sdb rw\n");
+        let found = start_problems(&context, &machine).unwrap();
+        assert!(says(&found, "is mounted at /mnt/data"), "{found:?}");
+    }
+
+    #[test]
+    fn a_drive_that_is_not_plugged_in_is_missing() {
+        let scratch = Scratch::new();
+        let context = plug_in_a_disk(&scratch);
+        let (_, machine) = startable(&scratch);
+        let found = start_problems(&context, &with_drive(machine, "ata-Other_2")).unwrap();
+        assert!(says(&found, "The drive ata-Other_2 is missing"), "{found:?}");
     }
 }

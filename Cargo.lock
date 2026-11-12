@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-app"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-channel",
  "chrono",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-app-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "guesthouse-backend-nvidia",
@@ -568,14 +568,14 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-backend"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "guesthouse-messages",
 ]
 
 [[package]]
 name = "guesthouse-backend-amd"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-messages",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-backend-nvidia"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-backend-nvidia",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-backend-standin"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-messages",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-card-check"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-backend-nvidia",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-backend-standin",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-daemon"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-backend-amd",
@@ -644,25 +644,25 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-frame-socket"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "rustix",
 ]
 
 [[package]]
 name = "guesthouse-jail"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "guesthouse-messages"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "guesthouse-replay"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-backend-standin",
@@ -674,14 +674,14 @@ dependencies = [
 
 [[package]]
 name = "guesthouse-sensors"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "guesthouse-transport"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "hashbrown"

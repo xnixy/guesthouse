@@ -17,10 +17,8 @@ use std::rc::Rc;
 
 const WIDTH: i32 = 480;
 const HEIGHT: i32 = 560;
-/// Under a disk, a partition sits a little in.
-const INDENT: i32 = 24;
-const HELP: &str = "Disks and partitions of this PC. The guest can read and write all of one, and this PC \
-                    can't use it while the machine runs.";
+const HELP: &str = "Whole disks of this PC. The guest can read and write all of one, and this PC can't use \
+                    it while the machine runs.";
 const INSTALLING: &str = "Drives can be added once Windows is installed.";
 const NEXT_START: &str = "Changes apply the next time the VM starts.";
 const AT_MOST: &str = "A machine can have 3 drives at most.";
@@ -205,7 +203,7 @@ impl Drives {
         let dialog =
             adw::Dialog::builder().title("Add a Drive").content_width(WIDTH).content_height(HEIGHT).build();
         for drive in listed {
-            let reason = why_not_offered(drive, listed, machine, others);
+            let reason = why_not_offered(drive, machine, others);
             let mut lines = vec![drive.id.clone()];
             if drive.removable {
                 lines.push("Removable".to_owned());
@@ -219,9 +217,6 @@ impl Drives {
                 .activatable(reason.is_none())
                 .sensitive(reason.is_none())
                 .build();
-            if drive.is_partition() {
-                row.set_margin_start(INDENT);
-            }
             let (this, chosen, closing) = (self.clone(), drive.id.clone(), dialog.clone());
             row.connect_activated(move |_| {
                 closing.close();

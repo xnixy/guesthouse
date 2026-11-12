@@ -197,8 +197,8 @@ async fn new_machine(window: Window, folder: PathBuf, failures: Rc<Cell<u32>>) {
 }
 
 const FREE_DRIVE: &str = "ata-WDC_WD5000_WD-1234";
-const FREE_PARTITION: &str = "usb-Seagate_Expansion_NA9-0:0-part1";
-const MOUNTED_PARTITION: &str = "usb-SanDisk_Ultra_4C53-0:0-part1";
+const SEAGATE: &str = "usb-Seagate_Expansion_NA9-0:0";
+const STICK: &str = "usb-SanDisk_Ultra_4C53-0:0";
 
 /// A disk of the pretend PC: the kernel's folder for it, a file for its node, and its name.
 fn pretend_disk(pc: &Path, name: &str, id: &str, (dev, sectors): (&str, u64), model: &str, removable: bool) {
@@ -231,24 +231,17 @@ fn link_name(pc: &Path, kernel_name: &str, id: &str) {
     std::os::unix::fs::symlink(node, pc.join("by-id").join(id)).unwrap();
 }
 
-/// Four disks: the one this PC runs from, a free one, a USB disk with a partition, and a stick whose
-/// partition is mounted.
+/// Five disks: the one this PC runs from, a free one, a USB disk, a stick whose partition is mounted,
+/// and one nothing has.
 fn pretend_pc(context: &mut Context, pc: &Path) {
     pretend_disk(pc, "sda", "ata-Samsung_SSD_870_S5", ("8:0", 1_953_525_168), "Samsung SSD 870", false);
     pretend_partition(pc, "sda", "sda1", "ata-Samsung_SSD_870_S5-part1", ("8:1", 2_097_152));
     pretend_partition(pc, "sda", "sda2", "ata-Samsung_SSD_870_S5-part2", ("8:2", 1_951_000_000));
     pretend_disk(pc, "sdb", FREE_DRIVE, ("8:16", 976_773_168), "WDC WD5000", false);
-    pretend_disk(
-        pc,
-        "sdc",
-        "usb-Seagate_Expansion_NA9-0:0",
-        ("8:32", 3_907_029_168),
-        "Seagate Expansion",
-        false,
-    );
-    pretend_partition(pc, "sdc", "sdc1", FREE_PARTITION, ("8:33", 3_907_000_000));
-    pretend_disk(pc, "sdd", "usb-SanDisk_Ultra_4C53-0:0", ("8:48", 62_533_296), "SanDisk Ultra", true);
-    pretend_partition(pc, "sdd", "sdd1", MOUNTED_PARTITION, ("8:49", 62_531_000));
+    pretend_disk(pc, "sdc", SEAGATE, ("8:32", 3_907_029_168), "Seagate Expansion", false);
+    pretend_disk(pc, "sdd", STICK, ("8:48", 62_533_296), "SanDisk Ultra", true);
+    pretend_partition(pc, "sdd", "sdd1", "usb-SanDisk_Ultra_4C53-0:0-part1", ("8:49", 62_531_000));
+    pretend_disk(pc, "sde", "ata-CT500MX500SSD1_1949", ("8:64", 976_773_168), "CT500MX500SSD1", false);
     fs::write(
         pc.join("mountinfo"),
         "22 1 8:1 / /boot/efi rw - vfat /dev/sda1 rw\n23 1 8:2 / / rw - ext4 /dev/sda2 rw\n\
@@ -288,7 +281,7 @@ fn library_machines(context: &Arc<Context>, window: &Window, folder: &Path) -> V
     let disk = folder.join("win.qcow2").display().to_string();
     fs::copy(&plain.disk, &disk).unwrap();
     let drive = |id: &str| Drive { id: id.to_owned() };
-    let drives = vec![drive(FREE_DRIVE), drive(FREE_PARTITION), drive(MOUNTED_PARTITION)];
+    let drives = vec![drive(FREE_DRIVE), drive(SEAGATE), drive(STICK)];
     let windows =
         Machine { refresh_hz: 165, drives, ..Machine::new("win", "Windows 11", &disk, &plain.vars) };
     windows.save(context).unwrap();
@@ -311,14 +304,11 @@ async fn settings_pages(window: Window, folder: PathBuf, failures: Rc<Cell<u32>>
     let text = text_of(&window);
     check(
         &failures,
-        text.contains("Mounted at /run/media/me/STICK"),
-        "a drive the PC has mounted says where",
+        text.contains("In use, as sdd1 is mounted at /run/media/me/STICK"),
+        "a disk with a partition the PC has mounted says which and where",
     );
-    check(
-        &failures,
-        text.contains("Partition sdc1 of Seagate Expansion, 2.0 TB"),
-        "a partition says its disk",
-    );
+    check(&failures, text.contains("Seagate Expansion, 2.0 TB"), "a disk is shown by make and size");
+    check(&failures, !text.contains("Partition"), "no partition is given");
     shot_after_paint(&window, &folder, "08-settings-disk-snapshots").await;
     let add = all_of::<gtk::Button>(&window).into_iter().find(|b| b.label().as_deref() == Some("Add Drive"));
     check(&failures, add.is_some_and(|button| !button.is_sensitive()), "three drives are the most");

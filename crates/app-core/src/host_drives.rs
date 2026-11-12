@@ -32,31 +32,24 @@ const PARTITION_FILE: &str = "partition";
 /// What udev's rule and `udevadm` can be told without quoting.
 const RULE_VALUE_PUNCTUATION: &str = "_-.:+";
 
-/// A disk or a partition of this PC.
+/// A disk of this PC. Only a whole disk can be given: Windows can't use a partition without its disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostDrive {
     /// Its name under `/dev/disk/by-id`, which stays with it from one boot to the next.
     pub id: String,
-    /// What the kernel calls it now, as `sdb` or `nvme0n1p2`.
+    /// What the kernel calls it now, as `sdb` or `nvme0n1`.
     pub kernel_name: String,
     pub bytes: u64,
     pub model: String,
     pub removable: bool,
-    /// The disk this is a partition of.
-    pub disk: Option<String>,
-    /// Why the host can't let it go, as the end of a sentence about it. None if nothing uses it.
+    /// Why the host can't let it go, as the end of a sentence about it: it, or a partition of it, is
+    /// mounted, swap, or held by a volume. None if nothing uses it.
     pub in_use: Option<String>,
-    /// What udev matches a whole disk by. Empty if the disk has none.
+    /// What udev matches the disk by. Empty if it has none.
     pub serial: String,
-    /// What udev matches a partition by. Empty for a disk, and for a partition table that has none.
-    pub partition_uuid: String,
 }
 
 impl HostDrive {
-    pub fn is_partition(&self) -> bool {
-        self.disk.is_some()
-    }
-
     /// Its size as the maker would say it, as `1.0 TB` or `500 GB`.
     pub fn size_text(&self) -> String {
         let bytes = self.bytes as f64;
@@ -69,24 +62,17 @@ impl HostDrive {
         }
     }
 
-    /// What to call it: the make and size of a disk, and the disk a partition is part of.
+    /// What to call it: its make and size.
     pub fn title(&self) -> String {
-        let size = self.size_text();
         let model = if self.model.is_empty() { "Disk" } else { &self.model };
-        match &self.disk {
-            Some(_) => format!("Partition {} of {model}, {size}", self.kernel_name),
-            None => format!("{model}, {size}"),
-        }
+        format!("{model}, {}", self.size_text())
     }
 
-    /// The one step that needs root. uaccess gives the drive to whoever is logged in. A disk is matched
-    /// by its serial number and a partition by its UUID, as `sdb` and its like change between boots.
+    /// The one step that needs root. uaccess gives the drive to whoever is logged in. It's matched by the
+    /// serial number, as `sdb` and its like change between boots, and only for the disk: the partitions
+    /// in it carry the serial too.
     pub fn access_command(&self) -> Result<String> {
-        let (kind, property, value) = if self.is_partition() {
-            ("partition", "ID_PART_ENTRY_UUID", &self.partition_uuid)
-        } else {
-            ("disk", "ID_SERIAL", &self.serial)
-        };
+        let value = &self.serial;
         let plain = |text: &String| {
             text.chars()
                 .all(|letter| letter.is_ascii_alphanumeric() || RULE_VALUE_PUNCTUATION.contains(letter))
@@ -95,12 +81,12 @@ impl HostDrive {
             return Err(Failure(format!("{} has no number that tells it apart for a rule.", self.id)));
         }
         let rule = format!(
-            "SUBSYSTEM==\"block\", ENV{{DEVTYPE}}==\"{kind}\", ENV{{{property}}}==\"{value}\", TAG+=\"uaccess\""
+            "SUBSYSTEM==\"block\", ENV{{DEVTYPE}}==\"disk\", ENV{{ID_SERIAL}}==\"{value}\", TAG+=\"uaccess\""
         );
         Ok(format!(
             "echo '{rule}' | sudo tee /etc/udev/rules.d/70-guesthouse-drive-{value}.rules\n\
              sudo udevadm control --reload\n\
-             sudo udevadm trigger --subsystem-match=block --property-match={property}={value}"
+             sudo udevadm trigger --subsystem-match=block --property-match=ID_SERIAL={value}"
         ))
     }
 }
@@ -223,8 +209,9 @@ fn udev_value(context: &Context, device: &str, property: &str) -> String {
     found.unwrap_or_default().to_owned()
 }
 
-/// Every disk and partition that can be offered, each disk followed by its partitions. One with no
-/// name under `/dev/disk/by-id` isn't, as there is nothing to keep it by.
+/// Every disk that can be offered. One with no name under `/dev/disk/by-id` isn't, as there is nothing
+/// to keep it by. Its partitions aren't drives of their own, but what the host uses them for is the
+/// disk's.
 pub fn host_drives(context: &Context) -> Vec<HostDrive> {
     let names = names_by_kernel_name(context);
     let uses = Uses::read(context);
@@ -235,37 +222,27 @@ pub fn host_drives(context: &Context) -> Vec<HostDrive> {
         if !is_offered(&disk) || folder.join(PARTITION_FILE).exists() {
             continue;
         }
-        let partitions: Vec<String> = sorted_names(&folder)
-            .into_iter()
-            .filter(|name| folder.join(name).join(PARTITION_FILE).exists())
-            .collect();
-        let partition_use = partitions.iter().find_map(|name| {
-            let reason = uses.own_use(context, name, &folder.join(name))?;
+        let Some(id) = names.get(&disk).and_then(|names| best_name(names)) else { continue };
+        let bytes = sysfs_text(&folder.join("size")).parse::<u64>().unwrap_or(0) * SECTOR_BYTES;
+        // An empty card reader has a disk and nothing in it.
+        if bytes == 0 {
+            continue;
+        }
+        let partitions =
+            sorted_names(&folder).into_iter().filter(|name| folder.join(name).join(PARTITION_FILE).exists());
+        let partition_use = partitions.into_iter().find_map(|name| {
+            let reason = uses.own_use(context, &name, &folder.join(&name))?;
             Some(format!("in use, as {name} is {reason}"))
         });
-        let drive = |name: &str, folder: &Path, in_use: Option<String>| {
-            let id = best_name(names.get(name)?)?.clone();
-            let device = sysfs_text(&folder.join("dev"));
-            let is_partition = name != disk;
-            let bytes = sysfs_text(&folder.join("size")).parse::<u64>().unwrap_or(0) * SECTOR_BYTES;
-            // An empty card reader has a disk and nothing in it.
-            (bytes > 0).then(|| HostDrive {
-                id,
-                kernel_name: name.to_owned(),
-                bytes,
-                model: sysfs_text(&context.block_devices.join(&disk).join("device/model")),
-                removable: sysfs_text(&context.block_devices.join(&disk).join("removable")) == "1",
-                disk: is_partition.then(|| disk.clone()),
-                in_use,
-                serial: udev_value(context, &device, "ID_SERIAL"),
-                partition_uuid: udev_value(context, &device, "ID_PART_ENTRY_UUID"),
-            })
-        };
-        found.extend(drive(&disk, &folder, uses.own_use(context, &disk, &folder).or(partition_use)));
-        for name in &partitions {
-            let folder = folder.join(name);
-            found.extend(drive(name, &folder, uses.own_use(context, name, &folder)));
-        }
+        found.push(HostDrive {
+            id: id.clone(),
+            kernel_name: disk.clone(),
+            bytes,
+            model: sysfs_text(&folder.join("device/model")),
+            removable: sysfs_text(&folder.join("removable")) == "1",
+            in_use: uses.own_use(context, &disk, &folder).or(partition_use),
+            serial: udev_value(context, &sysfs_text(&folder.join("dev")), "ID_SERIAL"),
+        });
     }
     found
 }
@@ -286,6 +263,13 @@ fn not_a_drive(id: &str) -> String {
     format!("{id} is not a drive.")
 }
 
+fn is_a_partition(id: &str) -> String {
+    format!(
+        "{id} is a partition. Windows can't use one without its disk, and writes to it anyway, so only \
+         whole disks can be given."
+    )
+}
+
 fn node(context: &Context, drive: &Drive) -> PathBuf {
     context.drive_ids.join(&drive.id)
 }
@@ -295,9 +279,12 @@ pub fn can_open(context: &Context, drive: &Drive) -> bool {
     access(node(context, drive), Access::READ_OK | Access::WRITE_OK).is_ok()
 }
 
-/// Whether giving one of these is giving the other, or part of it: a disk holds its partitions.
-fn overlaps(a: &HostDrive, b: &HostDrive) -> bool {
-    a.id == b.id || a.disk.as_ref() == Some(&b.kernel_name) || b.disk.as_ref() == Some(&a.kernel_name)
+/// Whether the name leads to a partition. It's the device that says so, in sysfs, and not how the name
+/// is spelled.
+fn is_partition(context: &Context, drive: &Drive) -> bool {
+    let Ok(real) = fs::canonicalize(node(context, drive)) else { return false };
+    let Some(name) = real.file_name() else { return false };
+    context.block_devices.join(name).join(PARTITION_FILE).exists()
 }
 
 pub fn add_drive(context: &Context, machine: &mut Machine, drive: Drive) -> Result<()> {
@@ -315,20 +302,13 @@ pub fn remove_drive(context: &Context, machine: &mut Machine, id: &str) -> Resul
 }
 
 /// Why a drive can't be added to this machine, if it can't: the host has it, or this machine or
-/// another that is running has it or part of it.
-pub fn why_not_offered(
-    drive: &HostDrive,
-    listed: &[HostDrive],
-    machine: &Machine,
-    others: &[Machine],
-) -> Option<String> {
-    let overlapping = |theirs: &Drive| {
-        listed.iter().find(|found| found.id == theirs.id).is_some_and(|found| overlaps(drive, found))
-    };
-    if machine.drives.iter().any(overlapping) {
-        return Some("This machine has it, or the disk it is part of, already.".to_owned());
+/// another that is running has it.
+pub fn why_not_offered(drive: &HostDrive, machine: &Machine, others: &[Machine]) -> Option<String> {
+    let has_it = |theirs: &Drive| theirs.id == drive.id;
+    if machine.drives.iter().any(has_it) {
+        return Some("This machine has it already.".to_owned());
     }
-    if let Some(other) = others.iter().find(|other| other.drives.iter().any(overlapping)) {
+    if let Some(other) = others.iter().find(|other| other.drives.iter().any(has_it)) {
         return Some(format!("In use by {}, which is running.", other.name));
     }
     let reason = drive.in_use.as_deref()?;
@@ -348,11 +328,14 @@ pub fn drive_note(
     if !node(context, drive).exists() {
         return Some("Not plugged in.".to_owned());
     }
+    if is_partition(context, drive) {
+        return Some("A partition. Only whole disks can be given.".to_owned());
+    }
     let Some(host) = listed.iter().find(|host| host.id == drive.id) else {
         return Some(not_a_drive(&drive.id));
     };
     let nobody = Machine::new("", "", "", "");
-    why_not_offered(host, listed, &nobody, others)
+    why_not_offered(host, &nobody, others)
 }
 
 /// Why this machine's drives can't be given to it now. A machine is only judged by what is on the PC:
@@ -366,18 +349,11 @@ pub fn drive_problems(context: &Context, machine: &Machine, others: &[Machine]) 
     for drive in &machine.drives {
         let id = &drive.id;
         let host = listed.iter().find(|host| host.id == *id);
-        let overlapping = |theirs: &Drive| {
-            let found = listed.iter().find(|found| found.id == theirs.id);
-            theirs.id == *id || host.zip(found).is_some_and(|(host, found)| overlaps(host, found))
-        };
-        let held_by = others.iter().find(|other| other.drives.iter().any(overlapping));
-        // The same disk and one of its partitions, both given to this machine.
-        let twin = host.and_then(|host| {
-            let mut own = machine.drives.iter().filter(|other| other.id != *id);
-            own.find(|other| listed.iter().any(|found| found.id == other.id && overlaps(host, found)))
-        });
+        let held_by = others.iter().find(|other| other.drives.iter().any(|theirs| theirs.id == *id));
         if !node(context, drive).exists() {
             found.push(missing(id));
+        } else if is_partition(context, drive) {
+            found.push(is_a_partition(id));
         } else if let Some(other) = held_by {
             found.push(format!("The drive {id} is in use by {}, which is running.", other.name));
         } else if let Some(host) = host.filter(|host| host.in_use.is_some()) {
@@ -386,11 +362,6 @@ pub fn drive_problems(context: &Context, machine: &Machine, others: &[Machine]) 
                 .push(format!("The drive {id} is {reason}. Unmount it first, or remove it in the settings."));
         } else if host.is_none() {
             found.push(not_a_drive(id));
-        } else if let Some(twin) = twin {
-            found.push(format!(
-                "The drive {id} and {} are the same disk. Remove one in the settings.",
-                twin.id
-            ));
         } else if !can_open(context, drive) {
             found.push(cannot_open(id));
         }
@@ -431,6 +402,9 @@ fn open_drive(context: &Context, drive: &Drive) -> Result<OwnedFd> {
     // A name is only a link, and a hand-edited machine file could point it at any file. This looks
     // first, as opening some files (a pipe) would wait, and again on what was opened.
     let is_block = |kind: fs::FileType| kind.is_block_device();
+    if is_partition(context, drive) {
+        return Err(Failure(is_a_partition(&drive.id)));
+    }
     if fs::metadata(node(context, drive)).is_ok_and(|found| !is_block(found.file_type())) {
         return Err(Failure(not_a_drive(&drive.id)));
     }
@@ -472,6 +446,7 @@ mod tests {
 
     fn fake_partition(scratch: &Scratch, disk: &str, name: &str, dev: &str, sectors: u64) {
         scratch.write(&format!("block/{disk}/{name}/partition"), "1\n");
+        scratch.write(&format!("block/{name}/partition"), "1\n");
         scratch.write(&format!("block/{disk}/{name}/dev"), format!("{dev}\n"));
         scratch.write(&format!("block/{disk}/{name}/size"), format!("{sectors}\n"));
     }
@@ -486,7 +461,7 @@ mod tests {
         symlink(node, scratch.path(&format!("drive-ids/{id}"))).unwrap();
     }
 
-    /// A PC with one disk and two partitions, each with a name.
+    /// A PC with one disk and two partitions, each with a name under by-id.
     fn pc_with_a_disk(scratch: &Scratch) -> Context {
         fake_disk(scratch, "sda", "8:0", SDA_SECTORS, "Samsung SSD 860");
         fake_partition(scratch, "sda", "sda1", "8:1", 1_000);
@@ -502,22 +477,18 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_is_listed_with_its_size_model_and_partitions_after_it() {
+    fn a_disk_is_listed_with_its_size_and_model_and_its_partitions_are_not() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
         let found = host_drives(&context);
-        let kernel_names: Vec<&str> = found.iter().map(|drive| drive.kernel_name.as_str()).collect();
-        assert_eq!(kernel_names, ["sda", "sda1", "sda2"]);
+        assert_eq!(found.len(), 1, "{found:?}");
         let disk = &found[0];
+        assert_eq!(disk.kernel_name, "sda");
         assert_eq!(
             (disk.bytes, disk.model.as_str(), disk.removable),
             (SDA_SECTORS * 512, "Samsung SSD 860", false)
         );
-        assert!(!disk.is_partition() && found[1].is_partition());
-        assert_eq!(found[2].disk.as_deref(), Some("sda"));
-        assert_eq!(found[2].model, "Samsung SSD 860", "a partition is of its disk's make");
     }
-
     #[test]
     fn a_name_with_the_model_in_it_wins_over_the_hardware_number() {
         let scratch = Scratch::new();
@@ -562,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mounted_partition_says_where_and_its_disk_says_which_partition() {
+    fn a_disk_with_a_mounted_partition_says_which_and_where() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
         scratch.write(
@@ -571,37 +542,23 @@ mod tests {
              23 1 0:30 / /run/user/1000 rw - tmpfs tmpfs rw\n",
         );
         let found = host_drives(&context);
-        assert_eq!(
-            drive_named(&found, "ata-Samsung_SSD_860_S3Z-part1").in_use.as_deref(),
-            Some("mounted at /boot/efi")
-        );
-        assert_eq!(drive_named(&found, "ata-Samsung_SSD_860_S3Z-part2").in_use, None);
-        let disk = drive_named(&found, "ata-Samsung_SSD_860_S3Z");
-        assert_eq!(disk.in_use.as_deref(), Some("in use, as sda1 is mounted at /boot/efi"));
+        assert_eq!(found[0].in_use.as_deref(), Some("in use, as sda1 is mounted at /boot/efi"));
     }
-
     #[test]
     fn a_mount_is_found_by_the_source_when_the_filesystem_has_a_number_of_its_own() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
         scratch.write("mountinfo", "40 1 0:41 /@home /home rw - btrfs /dev/sda2 rw,subvol=/@home\n");
-        let found = host_drives(&context);
-        assert_eq!(
-            drive_named(&found, "ata-Samsung_SSD_860_S3Z-part2").in_use.as_deref(),
-            Some("mounted at /home")
-        );
+        assert_eq!(host_drives(&context)[0].in_use.as_deref(), Some("in use, as sda2 is mounted at /home"));
     }
-
     #[test]
     fn a_mount_point_with_a_space_in_it_is_read_back_as_it_was() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
         scratch.write("mountinfo", "41 1 8:2 / /media/my\\040disk\\134 rw - ext4 /dev/sda2 rw\n");
-        let found = host_drives(&context);
-        let reason = drive_named(&found, "ata-Samsung_SSD_860_S3Z-part2").in_use.clone();
-        assert_eq!(reason.as_deref(), Some("mounted at /media/my disk\\"));
+        let reason = host_drives(&context)[0].in_use.clone();
+        assert_eq!(reason.as_deref(), Some("in use, as sda2 is mounted at /media/my disk\\"));
     }
-
     #[test]
     fn swap_is_in_use() {
         let scratch = Scratch::new();
@@ -610,28 +567,17 @@ mod tests {
             "swaps",
             "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/sda2\t\t\t\tpartition\t8388604\t\t0\t\t-2\n",
         );
-        let found = host_drives(&context);
-        assert_eq!(
-            drive_named(&found, "ata-Samsung_SSD_860_S3Z-part2").in_use.as_deref(),
-            Some("used for swap")
-        );
-        assert!(drive_named(&found, "ata-Samsung_SSD_860_S3Z").in_use.is_some());
+        assert_eq!(host_drives(&context)[0].in_use.as_deref(), Some("in use, as sda2 is used for swap"));
     }
-
     #[test]
     fn a_partition_under_a_volume_is_held_by_it_under_its_name() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
         scratch.write("block/sda/sda2/holders/dm-0/x", "");
         scratch.write("block/dm-0/dm/name", "vg-root\n");
-        let found = host_drives(&context);
-        assert_eq!(
-            drive_named(&found, "ata-Samsung_SSD_860_S3Z-part2").in_use.as_deref(),
-            Some("held by vg-root")
-        );
-        assert!(drive_named(&found, "ata-Samsung_SSD_860_S3Z").in_use.as_deref().unwrap().contains("sda2"));
+        let reason = host_drives(&context)[0].in_use.clone();
+        assert_eq!(reason.as_deref(), Some("in use, as sda2 is held by vg-root"));
     }
-
     #[test]
     fn a_volume_with_no_name_of_its_own_is_shown_by_the_kernels() {
         let scratch = Scratch::new();
@@ -650,24 +596,20 @@ mod tests {
     }
 
     #[test]
-    fn the_rule_for_a_disk_is_matched_by_its_serial_and_for_a_partition_by_its_uuid() {
+    fn the_rule_for_a_disk_is_matched_by_its_serial() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
         scratch.write("udev/b8:0", "S:disk/by-id/x\nE:ID_SERIAL=Samsung_SSD_860_S3Z\nE:ID_BUS=ata\n");
         scratch.write("udev/b8:1", "E:ID_SERIAL=Samsung_SSD_860_S3Z\nE:ID_PART_ENTRY_UUID=0f1e-22\n");
-        let found = host_drives(&context);
-        let disk = drive_named(&found, "ata-Samsung_SSD_860_S3Z").access_command().unwrap();
+        let rule = host_drives(&context)[0].access_command().unwrap();
         assert!(
-            disk.contains(
+            rule.contains(
                 "ENV{DEVTYPE}==\"disk\", ENV{ID_SERIAL}==\"Samsung_SSD_860_S3Z\", TAG+=\"uaccess\""
             )
         );
-        assert!(disk.contains("--property-match=ID_SERIAL=Samsung_SSD_860_S3Z"), "{disk}");
-        let partition = drive_named(&found, "ata-Samsung_SSD_860_S3Z-part1").access_command().unwrap();
-        assert!(partition.contains("ENV{DEVTYPE}==\"partition\", ENV{ID_PART_ENTRY_UUID}==\"0f1e-22\""));
-        assert!(partition.contains("70-guesthouse-drive-0f1e-22.rules"), "{partition}");
+        assert!(rule.contains("--property-match=ID_SERIAL=Samsung_SSD_860_S3Z"), "{rule}");
+        assert!(rule.contains("70-guesthouse-drive-Samsung_SSD_860_S3Z.rules"), "{rule}");
     }
-
     #[test]
     fn no_rule_is_written_for_a_drive_with_no_number_or_one_that_needs_quoting() {
         let scratch = Scratch::new();
@@ -710,10 +652,9 @@ mod tests {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
         scratch.write("mountinfo", "22 1 8:1 / /boot rw - ext4 /dev/sda1 rw\n");
-        let found = drive_problems(&context, &machine_with(&["ata-Samsung_SSD_860_S3Z-part1"]), &[]);
-        assert!(says(&found, "is mounted at /boot. Unmount it first"), "{found:?}");
+        let found = drive_problems(&context, &machine_with(&["ata-Samsung_SSD_860_S3Z"]), &[]);
+        assert!(says(&found, "is in use, as sda1 is mounted at /boot. Unmount it first"), "{found:?}");
     }
-
     #[test]
     fn a_drive_another_running_machine_has_is_refused_with_its_name() {
         let scratch = Scratch::new();
@@ -791,30 +732,33 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_and_its_partition_are_in_use_by_a_running_machine_whichever_way_round() {
+    fn a_partition_is_refused_to_start_and_to_open_whatever_its_name_says() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
-        let (disk, partition) = ("ata-Samsung_SSD_860_S3Z", "ata-Samsung_SSD_860_S3Z-part1");
-        let games = |id: &str| Machine { name: "Games".into(), ..machine_with(&[id]) };
-        let found = drive_problems(&context, &machine_with(&[disk]), &[games(partition)]);
-        assert!(says(&found, "in use by Games, which is running"), "{found:?}");
-        let found = drive_problems(&context, &machine_with(&[partition]), &[games(disk)]);
-        assert!(says(&found, "in use by Games, which is running"), "{found:?}");
-        let other_partition = "ata-Samsung_SSD_860_S3Z-part2";
-        let found = drive_problems(&context, &machine_with(&[partition]), &[games(other_partition)]);
-        assert!(found.is_empty(), "two partitions of a disk can go to two machines: {found:?}");
+        // The name says nothing: it's the device behind it that is a partition.
+        name_it(&scratch, "ata-Samsung_SSD_860_S3Z-looks-like-a-disk", "sda1");
+        for id in ["ata-Samsung_SSD_860_S3Z-part1", "ata-Samsung_SSD_860_S3Z-looks-like-a-disk"] {
+            let found = drive_problems(&context, &machine_with(&[id]), &[]);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(
+                found[0].starts_with(&format!("{id} is a partition. Windows can't use one")),
+                "{found:?}"
+            );
+            let error = OpenDrives::open(&context, &[Drive { id: id.into() }]).unwrap_err();
+            assert_eq!(error.0, found[0]);
+        }
+        let disk = drive_problems(&context, &machine_with(&["ata-Samsung_SSD_860_S3Z"]), &[]);
+        assert!(!says(&disk, "partition"), "{disk:?}");
     }
 
     #[test]
-    fn a_disk_and_its_own_partition_cannot_both_go_to_one_machine() {
+    fn a_disk_another_running_machine_has_is_refused_with_its_name_too() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
-        let both = machine_with(&["ata-Samsung_SSD_860_S3Z", "ata-Samsung_SSD_860_S3Z-part1"]);
-        let found = drive_problems(&context, &both, &[]);
-        assert_eq!(found.len(), 2, "{found:?}");
-        assert!(says(&found, "are the same disk"), "{found:?}");
+        let games = Machine { name: "Games".into(), ..machine_with(&["ata-Samsung_SSD_860_S3Z"]) };
+        let found = drive_problems(&context, &machine_with(&["ata-Samsung_SSD_860_S3Z"]), &[games]);
+        assert!(says(&found, "in use by Games, which is running"), "{found:?}");
     }
-
     #[test]
     fn a_drive_with_nothing_in_it_is_not_offered() {
         let scratch = Scratch::new();
@@ -848,41 +792,29 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_and_a_partition_are_called_by_their_make_and_their_disk() {
+    fn a_disk_is_called_by_its_make_and_size() {
         let scratch = Scratch::new();
         let found = host_drives(&pc_with_a_disk(&scratch));
         assert_eq!(found[0].title(), "Samsung SSD 860, 1 GB");
-        assert_eq!(found[1].title(), "Partition sda1 of Samsung SSD 860, 1 MB");
     }
-
     #[test]
     fn the_list_says_why_a_drive_cannot_be_added() {
         let scratch = Scratch::new();
         let context = pc_with_a_disk(&scratch);
-        scratch.write(
-            "mountinfo",
-            "22 1 8:1 / /boot rw - ext4 /dev/sda1 rw
-",
-        );
-        let found = host_drives(&context);
-        let (disk, first, second) = (&found[0], &found[1], &found[2]);
-        let games = Machine { name: "Games".into(), ..machine_with(&["ata-Samsung_SSD_860_S3Z-part2"]) };
-        let reason = |drive: &HostDrive, machine: &Machine, others: &[Machine]| {
-            why_not_offered(drive, &found, machine, others)
-        };
+        scratch.write("mountinfo", "22 1 8:1 / /boot rw - ext4 /dev/sda1 rw\n");
+        let disk = host_drives(&context).remove(0);
         let nobody = machine_with(&[]);
-        assert_eq!(reason(first, &nobody, &[]).as_deref(), Some("Mounted at /boot."));
-        assert!(reason(disk, &nobody, &[]).unwrap().starts_with("In use, as sda1 is mounted"));
-        assert_eq!(reason(second, &nobody, &[]), None);
         assert_eq!(
-            reason(second, &nobody, std::slice::from_ref(&games)).as_deref(),
-            Some("In use by Games, which is running.")
+            why_not_offered(&disk, &nobody, &[]).as_deref(),
+            Some("In use, as sda1 is mounted at /boot.")
         );
-        assert!(reason(disk, &nobody, &[games]).unwrap().starts_with("In use by Games"));
-        let has_disk = machine_with(&["ata-Samsung_SSD_860_S3Z"]);
-        assert!(reason(second, &has_disk, &[]).unwrap().starts_with("This machine has it"));
+        let free = HostDrive { in_use: None, ..disk.clone() };
+        assert_eq!(why_not_offered(&free, &nobody, &[]), None);
+        let games = Machine { name: "Games".into(), ..machine_with(&[&disk.id]) };
+        let reason = why_not_offered(&free, &nobody, std::slice::from_ref(&games));
+        assert_eq!(reason.as_deref(), Some("In use by Games, which is running."));
+        assert_eq!(why_not_offered(&free, &games, &[]).as_deref(), Some("This machine has it already."));
     }
-
     #[test]
     fn drives_are_added_and_removed_in_the_saved_file() {
         let scratch = Scratch::new();

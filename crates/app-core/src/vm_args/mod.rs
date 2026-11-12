@@ -5,6 +5,7 @@
 
 mod amd;
 mod arguments;
+mod drives;
 mod forwarding_jail;
 mod nic;
 mod own_linux;
@@ -20,7 +21,7 @@ use crate::context::Context;
 use crate::firmware::Firmware;
 use crate::gpu_identity::{PciIdentity, shown_identity};
 use crate::linux::card::ForwardedCard;
-use crate::machine::Machine;
+use crate::machine::{Drive, Machine};
 use crate::network::{Forward, Mode};
 use guesthouse_daemon::slot::Slot;
 use std::fs;
@@ -116,6 +117,9 @@ pub struct VmPlan {
     /// CPUs to run on, as taskset takes them.
     pub pin: Option<String>,
     pub share: Option<String>,
+    /// The host's drives the guest has. The app opens each and hands it to QEMU: see
+    /// [`crate::host_drives::OpenDrives`].
+    pub drives: Vec<Drive>,
     pub share_program: PathBuf,
     /// The cap on video memory, as `8G`. The daemon reads it, and QEMU has no use for it.
     pub vram: Option<String>,
@@ -160,6 +164,7 @@ impl VmPlan {
     /// The plan for this machine in this slot. `vram_gib` is the cap to give the daemon, if any.
     pub fn new(context: &Context, machine: &Machine, boot: Boot, slot: Slot, vram_gib: u32) -> Self {
         let run_folder = context.paths.run_folder(slot);
+        let drives = Self::drives_for(machine, &boot);
         let tools = context.paths.store.join("iso/tools.iso");
         let passt = machine.network_mode == Mode::Nat && machine.passt && passt_installed();
         Self {
@@ -178,6 +183,7 @@ impl VmPlan {
             tpm: machine.tpm.then(|| machine.tpm_folder(context)),
             pin: None,
             share: Some(machine.share.clone()).filter(|share| !share.is_empty()),
+            drives,
             share_program: context.paths.binary(SHARE_PROGRAM),
             vram: (vram_gib > 0).then(|| format!("{vram_gib}G")),
             mouse: machine.has_gpu(),

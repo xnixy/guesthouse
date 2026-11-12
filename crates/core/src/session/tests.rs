@@ -1139,6 +1139,66 @@ mod mappings {
         assert_eq!(session.allocations[&handle].mappings.len(), 1);
     }
 
+    /// A protected map, which carries the driver's own protection value.
+    fn protected(address: u64, size: u64, handle: u32, offset: u64, driver_protection: u64) -> Vec<u8> {
+        let mut bytes = operation(3, address, size, u64::from(handle), offset);
+        set_u64(&mut bytes, 0x38, driver_protection);
+        bytes
+    }
+
+    #[test]
+    fn a_protected_map_passes_the_drivers_value_to_the_backend() {
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x2000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        update(&mut session, sync, 0, &[protected(0x5000_0000, 0x1000, handle, 0, 0x0400)]);
+        update(&mut session, sync, 1, &[operation(0, 0x5000_1000, 0x1000, u64::from(handle), 0x1000)]);
+        let mapped = &session.backend_mut().mapped_protections;
+        assert_eq!(mapped[mapped.len() - 2..], [(0x5000_0000, 0x0400), (0x5000_1000, 0)]);
+        let held = session.allocations[&handle].mappings.iter().find(|m| m.address == 0x5000_0000);
+        assert_eq!(held.map(|m| m.driver_protection), Some(0x0400));
+    }
+
+    #[test]
+    fn repeating_a_protected_map_is_skipped_but_another_value_maps_again() {
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x1000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        let first = protected(0x5000_0000, 0x1000, handle, 0, 0x0300);
+        update(&mut session, sync, 0, std::slice::from_ref(&first));
+        let made = session.backend_mut().mapped_protections.len();
+        update(&mut session, sync, 1, &[first]);
+        assert_eq!(session.backend_mut().mapped_protections.len(), made, "the repeat is skipped");
+        update(&mut session, sync, 2, &[protected(0x5000_0000, 0x1000, handle, 0, 0x0500)]);
+        let mapped = &session.backend_mut().mapped_protections;
+        assert_eq!(mapped[made..], [(0x5000_0000, 0x0500)], "a new value maps again");
+        assert_eq!(session.allocations[&handle].mappings.len(), 1);
+    }
+
+    #[test]
+    fn a_copy_keeps_the_value_of_the_mapping_it_copies() {
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x1000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        update(&mut session, sync, 0, &[protected(0x5000_0000, 0x1000, handle, 0, 0x0200)]);
+        update(&mut session, sync, 1, &[operation(2, 0x5000_0000, 0x1000, 0x6000_0000, 0)]);
+        let copied = session.allocations[&handle].mappings.iter().find(|m| m.address == 0x6000_0000);
+        assert_eq!(copied.map(|m| m.driver_protection), Some(0x0200));
+        assert_eq!(session.backend_mut().mapped_protections.last(), Some(&(0x6000_0000, 0x0200)));
+    }
+
+    #[test]
+    fn cutting_a_protected_mapping_keeps_its_value_on_both_sides() {
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x3000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        update(&mut session, sync, 0, &[protected(0x5000_0000, 0x3000, handle, 0, 0x0300)]);
+        update(&mut session, sync, 1, &[operation(1, 0x5000_1000, 0x1000, 0, 0)]);
+        let kept: Vec<_> =
+            session.allocations[&handle].mappings.iter().map(|m| m.driver_protection).collect();
+        assert_eq!(kept, [0x0300, 0x0300]);
+    }
+
     #[test]
     fn an_update_unmaps_the_middle_of_a_mapping() {
         let mut session = session();

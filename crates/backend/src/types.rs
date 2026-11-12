@@ -166,6 +166,9 @@ pub struct MapRequest {
     pub writable: bool,
     pub executable: bool,
     pub memory_type: MapMemoryType,
+    /// The guest driver's own word for how it wants these pages used, as the vendor defines it, or zero
+    /// if it gave none. The core only passes it on; a backend with no use for it ignores it.
+    pub driver_protection: u64,
 }
 
 /// A mapping to remove.

@@ -62,6 +62,8 @@ pub struct StandIn {
     pub run_work_at_once: bool,
     pub doorbells: Vec<(u32, u64)>,
     pub closed_queues: Vec<u32>,
+    /// The driver protection of every mapping made, with its address, in order.
+    pub mapped_protections: Vec<(u64, u64)>,
     pub preserved: Vec<(MemoryId, MemoryId, u64)>,
     pub copies: Vec<StagingCopy>,
     pub slot_copies: Vec<SlotCopy>,
@@ -147,6 +149,7 @@ impl StandIn {
             run_work_at_once: false,
             doorbells: Vec::new(),
             closed_queues: Vec::new(),
+            mapped_protections: Vec::new(),
             preserved: Vec::new(),
             copies: Vec::new(),
             slot_copies: Vec::new(),
@@ -347,6 +350,7 @@ impl Backend for StandIn {
             return Err(BackendError::new("these addresses are taken"));
         }
         space.mappings.insert(request.address, request.length);
+        self.mapped_protections.push((request.address, request.driver_protection));
         Ok(())
     }
 
@@ -572,6 +576,7 @@ mod tests {
             writable: true,
             executable: false,
             memory_type: guesthouse_backend::MapMemoryType::Default,
+            driver_protection: 0,
         }
     }
 

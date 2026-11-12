@@ -1,4 +1,5 @@
 use super::*;
+use crate::machine::Drive;
 use guesthouse_daemon::guest_memory::window_base;
 
 fn refused(context: &Context, words: &str) -> String {
@@ -134,4 +135,46 @@ fn what_the_pc_lacks_is_noted_and_the_command_still_prints() {
     let out = said(&context, "command win").0;
     assert!(out.lines().any(|line| line.starts_with("# Note: ")), "{out}");
     assert!(out.contains("guesthouse-daemon"));
+}
+
+#[test]
+fn drives_are_opened_by_their_names_in_the_right_ports() {
+    let scratch = Scratch::new();
+    let context = scratch_context(&scratch);
+    let drives = [Drive { id: "ata-One".to_owned() }, Drive { id: "ata-Two".to_owned() }];
+    Machine { drives: drives.to_vec(), ..make(&context, "win", "Win", Kind::Windows) }
+        .save(&context)
+        .unwrap();
+    let out = said(&context, "command win").0;
+    let words = qemu_words(&out);
+    let folder = context.drive_ids.display();
+    for (number, id, port) in [(1, "ata-One", 3), (2, "ata-Two", 4)] {
+        let node = format!(
+            "driver=host_device,node-name=drive{number},filename={folder}/{id},cache.direct=on,discard=unmap"
+        );
+        let at = words.iter().position(|word| *word == node).expect(&node);
+        assert_eq!(words[at - 1], "-blockdev");
+        assert_eq!(words[at + 2], format!("ide-hd,bus=ahci.{port},drive=drive{number}"));
+    }
+    assert!(!out.contains("-add-fd") && !out.contains("fdset"), "{out}");
+    assert!(out.contains("# Here nothing stops that: don't mount a drive while QEMU has it."));
+}
+
+#[test]
+fn a_machine_with_no_drives_says_nothing_of_them() {
+    let scratch = Scratch::new();
+    let context = scratch_context(&scratch);
+    make(&context, "win", "Win", Kind::Windows);
+    assert!(!said(&context, "command win").0.contains("mount a drive"));
+}
+
+#[test]
+fn a_plain_machines_drive_is_by_name_too() {
+    let scratch = Scratch::new();
+    let context = scratch_context(&scratch);
+    let drives = vec![Drive { id: "ata-One".to_owned() }];
+    Machine { drives, ..make(&context, "work", "Work", Kind::Plain) }.save(&context).unwrap();
+    let out = said(&context, "command work").0;
+    assert!(out.contains("filename="), "{out}");
+    assert!(!out.contains("-add-fd") && out.contains("ata-One,cache.direct=on"), "{out}");
 }

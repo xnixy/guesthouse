@@ -39,10 +39,10 @@ fn plan(context: &Context, machine: &Machine) -> Result<VmPlan> {
     };
     let plan = plan_for(context, machine, boot);
     if !plan.is_gpu() {
-        return Ok(plan);
+        return Ok(VmPlan { drives_by_path: Some(context.drive_ids.clone()), ..plan });
     }
     let files = memory_files_in(&context.paths.shared_memory, plan.slot);
-    Ok(plan.standalone(files))
+    Ok(plan.standalone(files, &context.drive_ids))
 }
 
 /// A line to be read as a command, with everything but the last continued, and the arguments each
@@ -170,6 +170,13 @@ pub(super) fn command(context: &Context, machine: &Machine, out: &mut dyn Write)
             token.display()
         )?;
         writeln!(out, "# Only Guesthouse's app makes requests of it.")?;
+    }
+    if !plan.drives.is_empty() {
+        writeln!(
+            out,
+            "# The app opens each drive exclusively, so the host can't mount it while the machine runs."
+        )?;
+        writeln!(out, "# Here nothing stops that: don't mount a drive while QEMU has it.")?;
     }
     show(out, &qemu_steps(&plan))?;
     if let Some(files) = &plan.memory_by_path {

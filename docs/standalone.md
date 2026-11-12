@@ -157,6 +157,7 @@ The app stops a machine by asking Windows to shut down through its agent. Here u
 - **Make the machine with Guesthouse first.** Its install puts the GPU driver files, the display driver and the agent into Windows, and I haven't written a way to do that by hand. Make the machine, install it, and let it start once in the app. Then its disk, its firmware file and its TPM folder, which are in its folder in the store, can be run from elsewhere.
 - **There's no viewer.** The picture goes to the app's viewer, which this route doesn't have. Use Remote Desktop, or Sunshine on NVIDIA. [Without a window](headless.md) says how to reach the guest.
 - **QEMU's jail is yours.** See above.
+- **A drive of the host's is open to everyone.** The app opens each drive it gives a machine exclusively, so the kernel refuses to mount it while the machine runs. The printed command opens it by its name under `/dev/disk/by-id` instead, and nothing stops a mount. Don't mount a drive while QEMU has it.
 - **The agent's token** is in the machine's folder, `guest.token`. Only the app makes requests of the agent, so nothing here needs it.
 - **It isn't tested every release.** The daemon's jail and the memory files are, in the test suite, and `guesthouse-vm command` is tested for the words it prints. A whole GPU machine on this route isn't.
 

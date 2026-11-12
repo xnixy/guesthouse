@@ -144,6 +144,9 @@ pub struct VmPlan {
     /// The two files a GPU machine's memory is in, for a QEMU that opens them by path. Without them
     /// it is the app's descriptors, which only a child of the app can have: see [`standalone`].
     pub memory_by_path: Option<MemoryFiles>,
+    /// The folder of the drives' names, when QEMU opens each by its path and not from a descriptor
+    /// the app opened: see [`standalone`].
+    pub drives_by_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +210,7 @@ impl VmPlan {
             jail: None,
             jail_note: String::new(),
             memory_by_path: None,
+            drives_by_path: None,
             run_folder,
         }
     }

@@ -62,7 +62,7 @@ fn memory_by_path_changes_the_two_paths_and_nothing_else() {
         run_folder: PathBuf::from("/x/run"),
         ..plan
     }
-    .standalone(files);
+    .standalone(files, Path::new("/dev/disk/by-id"));
     let base = format!("{:#x}", guesthouse_daemon::guest_memory::window_base());
     let expected: Vec<String> = include_str!("gpu-arguments.txt")
         .lines()
@@ -351,4 +351,19 @@ fn an_install_and_ubuntu_are_given_no_drives() {
     let ubuntu = Machine { kind: Kind::Linux, ..machine };
     let (_scratch, ubuntu_plan) = plan(&ubuntu, Boot::Ubuntu(UbuntuBoot::NoGpu { reason_file: "/r".into() }));
     assert!(ubuntu_plan.drives.is_empty() && !has(&ubuntu_plan.qemu_arguments(), "-add-fd"));
+}
+
+#[test]
+fn standalone_keeps_the_drives_and_opens_them_by_name() {
+    let machine = with_drives(windows(), &["a", "b"]);
+    let (_scratch, plan) = plan(&machine, Boot::Gpu);
+    let files = memory_files_in(Path::new("/dev/shm"), slots::first());
+    let plan = plan.standalone(files, Path::new("/ids"));
+    assert_eq!(plan.drives, machine.drives);
+    let arguments = plan.qemu_arguments();
+    assert!(has(
+        &arguments,
+        "driver=host_device,node-name=drive2,filename=/ids/b,cache.direct=on,discard=unmap"
+    ));
+    assert!(!arguments.iter().any(|word| word == "-add-fd" || word.contains("fdset")));
 }

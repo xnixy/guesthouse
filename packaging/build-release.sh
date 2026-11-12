@@ -441,7 +441,7 @@ stage_app() {
     (cd "$REPO" && cargo build --release --locked -p guesthouse-app -p guesthouse-app-core \
         -p guesthouse-daemon $(daemon_features))
     mkdir -p "$OUT/stage"
-    for program in guesthouse guesthouse-check guesthouse-daemon guesthouse-jail guesthouse-share guesthouse-task; do
+    for program in guesthouse guesthouse-check guesthouse-daemon guesthouse-jail guesthouse-share guesthouse-task guesthouse-vm; do
         cp "$target_folder/release/$program" "$OUT/stage/"
     done
     # A build with HDR won't load on GTK older than 4.16, so a second one goes along for those, and

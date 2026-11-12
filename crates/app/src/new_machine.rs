@@ -7,6 +7,7 @@ use crate::window::Window;
 use adw::prelude::*;
 use guesthouse_app_core::account::{default_user, name_problem, password_problem};
 use guesthouse_app_core::card_choice::{CardChoice, default_choice, windows_card_choices};
+use guesthouse_app_core::defaults::{NO_GPU, account_name, sizes_for, suggested_name};
 use guesthouse_app_core::display::DriverPackage;
 use guesthouse_app_core::gpu_support::{kind_offered, plain_reason, ubuntu_note};
 use guesthouse_app_core::host::{RamField, physical_cores};
@@ -20,10 +21,8 @@ use guesthouse_app_core::setup::checks::gpu_warning;
 use guesthouse_app_core::setup::guest_driver::guest_driver;
 use guesthouse_app_core::tasks::no_slot_text;
 use std::cell::{Cell, RefCell};
-use std::path::Path;
 use std::rc::Rc;
 
-const NO_GPU: &str = "This machine gets no GPU acceleration. It runs on the CPU, with a basic display.";
 const DISPLAY_DRIVER_NOTE: &str =
     "Guesthouse adds its own display driver to Windows, signed with a certificate made on this machine.";
 const WINDOWS_ACCOUNT_NOTE: &str = "Windows signs in by itself. The password is for permission prompts and Remote \
@@ -39,17 +38,6 @@ const AMD_NOT_FINISHED: &str = "starts on the AMD card. GPU-PV on AMD is not fin
                                 GPU there yet";
 const CARD_NOTE: &str = "Windows is installed for this card's maker. It can move to another card of the same maker \
                          later, but not to another maker's.";
-
-/// Sizes to start from. A plain machine is usually something small being tried out.
-struct Sizes {
-    cores: u32,
-    ram: u64,
-    disk: u32,
-}
-
-const WINDOWS_SIZES: Sizes = Sizes { cores: 8, ram: 16, disk: 128 };
-const PLAIN_SIZES: Sizes = Sizes { cores: 4, ram: 4, disk: 32 };
-const UBUNTU_SIZES: Sizes = Sizes { cores: 8, ram: 8, disk: 80 };
 
 struct Parts {
     window: Window,
@@ -80,16 +68,6 @@ struct Parts {
     vm_running: Cell<bool>,
 }
 
-fn suggested_name(kind: Kind, path: &str) -> String {
-    match kind {
-        Kind::Windows => "Windows 11".to_owned(),
-        Kind::Linux => "Ubuntu".to_owned(),
-        Kind::Plain => {
-            Path::new(path).file_stem().map_or_else(String::new, |name| name.to_string_lossy().into_owned())
-        }
-    }
-}
-
 /// A name the user typed stays when they choose another disc. One this dialog offered goes with its
 /// disc, or a machine ends up named after the disc they changed their mind about.
 fn keeps_following_the_disc(name: &str, suggested: &str) -> bool {
@@ -98,12 +76,6 @@ fn keeps_following_the_disc(name: &str, suggested: &str) -> bool {
 
 #[derive(Clone)]
 pub struct NewMachineDialog(Rc<Parts>);
-
-/// The name as the machine keeps it: empty for the default, so a machine made with the default reads
-/// the same as one from before the choice.
-fn account_name(kind: Kind, typed: &str) -> String {
-    if typed == default_user(kind) { String::new() } else { typed.to_owned() }
-}
 
 /// A row with a problem says so, in red and in its tooltip.
 fn mark_problem(row: &gtk::Widget, problem: Option<&str>) {
@@ -341,11 +313,7 @@ impl NewMachineDialog {
     fn set_sizes(&self, kind: Kind) {
         let context = self.0.window.context();
         let windows = kind == Kind::Windows;
-        let sizes = match kind {
-            Kind::Windows => WINDOWS_SIZES,
-            Kind::Linux => UBUNTU_SIZES,
-            Kind::Plain => PLAIN_SIZES,
-        };
+        let sizes = sizes_for(kind);
         let field = if windows {
             RamField::for_gpu(&context, context.slot, MIN_RAM_GIB.into(), sizes.ram)
         } else {
@@ -507,20 +475,5 @@ mod tests {
     fn a_typed_name_stays() {
         assert!(!keeps_following_the_disc("My VM", "win11-eval"));
         assert!(!keeps_following_the_disc("My VM", ""));
-    }
-
-    #[test]
-    fn the_default_account_is_kept_as_no_choice() {
-        assert_eq!(account_name(Kind::Windows, "gpupv"), "");
-        assert_eq!(account_name(Kind::Linux, "desk"), "");
-        assert_eq!(account_name(Kind::Windows, "ana"), "ana");
-        assert_eq!(account_name(Kind::Linux, "gpupv"), "gpupv");
-    }
-
-    #[test]
-    fn each_kind_of_disc_has_its_name() {
-        assert_eq!(suggested_name(Kind::Windows, "/discs/win.iso"), "Windows 11");
-        assert_eq!(suggested_name(Kind::Linux, "/discs/server.iso"), "Ubuntu");
-        assert_eq!(suggested_name(Kind::Plain, "/discs/tiny-linux.iso"), "tiny-linux");
     }
 }

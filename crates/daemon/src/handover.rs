@@ -102,14 +102,22 @@ impl Part {
 /// Leaves each part open in what this command starts, at the part's number. The copies passed here
 /// must be at [`KEPT_ABOVE`] or past it.
 pub fn leave_open(command: &mut Command, parts: [(&OwnedFd, Part); 2]) {
-    let placed = parts.map(|(fd, part)| (fd.as_raw_fd(), part.descriptor()));
-    assert!(placed.iter().all(|(from, _)| *from >= KEPT_ABOVE), "a part's copy is too low to place safely");
+    let placed = parts.map(|(fd, part)| (fd, part.descriptor()));
+    leave_open_at(command, &placed);
+}
+
+/// The same for any descriptors, such as the drives the app opens for QEMU. The numbers must be below
+/// [`KEPT_ABOVE`].
+pub fn leave_open_at(command: &mut Command, placed: &[(&OwnedFd, RawFd)]) {
+    let placed: Vec<(RawFd, RawFd)> = placed.iter().map(|(fd, to)| (fd.as_raw_fd(), *to)).collect();
+    assert!(placed.iter().all(|(from, _)| *from >= KEPT_ABOVE), "a copy is too low to place safely");
+    assert!(placed.iter().all(|(_, to)| *to < KEPT_ABOVE), "a number is too high to be clear of the copies");
     // SAFETY: between fork and exec the closure only calls dup2, which is async-signal-safe and makes
     // a copy without the close-on-exec flag. The copies are above every part's number, so placing
     // one never overwrites another before it's placed. The caller keeps them open until the spawn.
     unsafe {
         command.pre_exec(move || {
-            for (from, to) in placed {
+            for &(from, to) in &placed {
                 if libc::dup2(from, to) < 0 {
                     return Err(io::Error::last_os_error());
                 }

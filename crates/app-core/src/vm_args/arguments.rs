@@ -245,6 +245,7 @@ impl VmPlan {
         arguments.extend(self.qemu_sandbox_arguments());
         // Last, so the devices the guest was installed with keep their places.
         arguments.extend(self.own_linux_arguments());
+        arguments.extend(self.drive_arguments());
         arguments
     }
 

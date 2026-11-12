@@ -5,6 +5,7 @@
 mod account;
 mod disk;
 mod display;
+mod drives;
 mod forwards;
 mod gpu_choice;
 mod gpu_preview;
@@ -90,6 +91,7 @@ struct Parts {
     hardware: hardware::Hardware,
     display: display::Display,
     disk: disk::Disk,
+    drives: drives::Drives,
     snapshots: snapshots::Snapshots,
     _token: token::Token,
     _account: account::Account,
@@ -123,6 +125,7 @@ impl SettingsDialog {
             remove: remove::Remove::new(&shared, &pages.general),
             display: display::Display::new(&shared, &pages.display),
             disk: disk::Disk::new(&shared, &pages.storage),
+            drives: drives::Drives::new(&shared, &pages.storage),
             snapshots: snapshots::Snapshots::new(&shared, &pages.storage),
             network: network::Network::new(&shared, &pages.network),
             sharing: sharing::Sharing::new(&shared, &pages.devices),
@@ -147,6 +150,7 @@ impl SettingsDialog {
         parts.hardware.set_status(status);
         parts.display.set_status(status);
         parts.disk.set_status(status);
+        parts.drives.set_status(status);
         parts.snapshots.set_status(status);
         parts.sharing.set_status(status);
         parts.network.set_status(status);

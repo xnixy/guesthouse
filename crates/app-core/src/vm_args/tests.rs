@@ -262,3 +262,70 @@ fn a_vram_cap_is_given_in_the_daemons_words() {
     assert_eq!(VmPlan::new(&context, &windows(), Boot::Gpu, slots::first(), 8).vram.as_deref(), Some("8G"));
     assert_eq!(VmPlan::new(&context, &windows(), Boot::Gpu, slots::first(), 0).vram, None);
 }
+
+fn with_drives(machine: Machine, drives: &[&str]) -> Machine {
+    let drives = drives.iter().map(|id| Drive { id: (*id).to_owned() });
+    Machine { drives: drives.collect(), ..machine }
+}
+
+#[test]
+fn a_drive_is_handed_over_and_put_on_the_first_free_port() {
+    let machine = with_drives(plain_machine(), &["ata-Disk_1"]);
+    let (_scratch, plan) = plan(&machine, plain_boot());
+    let arguments = plan.qemu_arguments();
+    let at = arguments.iter().position(|word| word == "-add-fd").unwrap();
+    assert_eq!(
+        arguments[at..],
+        [
+            "-add-fd",
+            "fd=40,set=40",
+            "-blockdev",
+            "driver=host_device,node-name=drive1,filename=/dev/fdset/40,cache.direct=on,discard=unmap",
+            "-device",
+            "ide-hd,bus=ahci.3,drive=drive1",
+        ]
+    );
+}
+
+#[test]
+fn three_drives_have_their_own_numbers_and_ports() {
+    let machine = with_drives(plain_machine(), &["a", "b", "c"]);
+    let (_scratch, plan) = plan(&machine, plain_boot());
+    let arguments = plan.qemu_arguments();
+    for (number, port) in [(1, 3), (2, 4), (3, 5)] {
+        assert!(has(&arguments, &format!("fd={0},set={0}", 39 + number)));
+        assert!(has(&arguments, &format!("ide-hd,bus=ahci.{port},drive=drive{number}")));
+    }
+    let nodes: Vec<&String> = arguments.iter().filter(|word| word.contains("host_device")).collect();
+    assert!(nodes.iter().all(|node| node.ends_with("cache.direct=on,discard=unmap")));
+    assert!(nodes[2].contains("node-name=drive3,filename=/dev/fdset/42,"));
+}
+
+#[test]
+fn drives_come_last_and_change_nothing_before_them() {
+    let drives = with_drives(plain_machine(), &["a", "b"]).drives;
+    for (machine, boot) in [(plain_machine(), plain_boot()), (windows(), Boot::Gpu)] {
+        let (_scratch, plain) = plan(&machine, boot);
+        let driven = VmPlan { drives: drives.clone(), ..plain.clone() };
+        let (before, after) = (plain.qemu_arguments(), driven.qemu_arguments());
+        assert_eq!(after[..before.len()], before[..]);
+        assert_eq!(after.len(), before.len() + 12);
+        assert!(!has(&before, "-add-fd") && !before.iter().any(|word| word.contains("fdset")));
+    }
+}
+
+/// Windows setup would offer a host drive as a place to put Windows.
+#[test]
+fn an_install_and_ubuntu_are_given_no_drives() {
+    let machine = with_drives(windows(), &["a"]);
+    let install = Boot::Install { iso: String::new(), answer: "/m/answer.iso".into() };
+    let (_scratch, installing) = plan(&machine, install);
+    assert!(installing.drives.is_empty() && !has(&installing.qemu_arguments(), "-add-fd"));
+    let (_scratch, unfinished) = plan(&Machine { installing: true, ..machine.clone() }, plain_boot());
+    assert!(unfinished.drives.is_empty());
+    let (_scratch, running) = plan(&machine, Boot::Gpu);
+    assert_eq!(running.drives, machine.drives);
+    let ubuntu = Machine { kind: Kind::Linux, ..machine };
+    let (_scratch, ubuntu_plan) = plan(&ubuntu, Boot::Ubuntu(UbuntuBoot::NoGpu { reason_file: "/r".into() }));
+    assert!(ubuntu_plan.drives.is_empty() && !has(&ubuntu_plan.qemu_arguments(), "-add-fd"));
+}

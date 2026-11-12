@@ -34,6 +34,14 @@ pub struct Context {
     pub cpus: PathBuf,
     pub usb_devices: PathBuf,
     pub usb_nodes: PathBuf,
+    /// The kernel's block devices, one folder for each disk with its partitions inside.
+    pub block_devices: PathBuf,
+    /// The names that stay with a drive, as links to wherever the kernel put it this time.
+    pub drive_ids: PathBuf,
+    pub mount_table: PathBuf,
+    pub swaps: PathBuf,
+    /// What udev knows of each block device, a file for each by its major and minor numbers.
+    pub udev_data: PathBuf,
     pub pci_devices: PathBuf,
     pub pci_names: PathBuf,
     /// The NVIDIA driver's own list of its cards, a folder for each by PCI address.
@@ -66,6 +74,11 @@ impl Context {
             cpus: "/sys/devices/system/cpu".into(),
             usb_devices: "/sys/bus/usb/devices".into(),
             usb_nodes: "/dev/bus/usb".into(),
+            block_devices: "/sys/class/block".into(),
+            drive_ids: "/dev/disk/by-id".into(),
+            mount_table: "/proc/self/mountinfo".into(),
+            swaps: "/proc/swaps".into(),
+            udev_data: "/run/udev/data".into(),
             pci_devices: "/sys/bus/pci/devices".into(),
             pci_names: "/usr/share/hwdata/pci.ids".into(),
             nvidia_cards: "/proc/driver/nvidia/gpus".into(),

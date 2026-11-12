@@ -17,6 +17,7 @@ What a guest can still do:
 - **See some of your hardware.** Windows sees your card's real UUID and ECID, your CPU and how much RAM you have.
 - **Reach the card's driver.** The daemon keeps the card open, so a bug in it that hands a guest the daemon also hands it the host's GPU driver, NVIDIA's or amdgpu, and a bug there is a bug in your kernel. Only run a Windows guest you'd trust with that.
 - **Reach your audio server.** With sound, QEMU keeps its connection to PipeWire, so a QEMU taken over could in principle record from your microphone, not just play. On Ubuntu 24.04, whose Landlock can't hold back sockets and which doesn't let bubblewrap make namespaces out of the box, it could also reach your desktop's other sockets, like the session bus. The machine's row says when that's the case. Turning the machine's sound off closes both, but not for a Linux guest's QEMU, which makes the socket its picture goes out on.
+- **Do anything to a drive you give it.** A drive of this PC that you give a VM is the guest's, all of it. It can read, change or wipe every byte, so a drive with your own files on it is a drive with your files at its mercy. QEMU gets the drive open and nothing else of your devices, and this PC can't mount it while the VM runs. And if you give yourself access to a drive with the rule the settings show, every program of yours can write to it, not only the VM.
 
 What's still coming:
 

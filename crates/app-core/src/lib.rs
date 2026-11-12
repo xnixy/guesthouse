@@ -27,6 +27,7 @@ pub mod guest_memory;
 pub mod headless;
 pub mod held_memory;
 pub mod host;
+pub mod host_drives;
 pub mod host_sensors;
 pub mod input;
 pub mod iso;

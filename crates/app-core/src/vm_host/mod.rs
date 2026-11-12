@@ -79,4 +79,6 @@ pub mod stand_in {
 }
 
 #[cfg(test)]
+mod drive_tests;
+#[cfg(test)]
 mod tests;

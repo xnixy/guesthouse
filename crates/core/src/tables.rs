@@ -11,6 +11,8 @@ pub struct Mapping {
     pub first: u64,
     pub length: u64,
     pub space: SpaceId,
+    /// The driver's own word for how it wants the pages, as the backend was given it. Zero if none.
+    pub driver_protection: u64,
 }
 
 impl Mapping {

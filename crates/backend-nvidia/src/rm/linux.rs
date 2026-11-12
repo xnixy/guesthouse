@@ -49,6 +49,8 @@ const MAP_FLAG_SMALL_PAGES: u32 = 1 << 8;
 /// The guest maps host pages cached, so the GPU has to snoop. Video memory ignores this.
 const MAP_FLAG_SNOOP: u32 = 1 << 4;
 const MAP_FLAG_GPU_CACHED: u32 = 1 << 17;
+/// Takes the page kind from the request's kind field, not from the memory.
+const MAP_FLAG_PAGE_KIND_OVERRIDE: u32 = 1 << 19;
 
 const DOORBELL_MAP_SIZE: usize = 0x10000;
 /// Where the doorbell register is in the page.
@@ -98,6 +100,31 @@ fn put32(request: &mut [u8], at: usize, value: u32) {
 
 fn put64(request: &mut [u8], at: usize, value: u64) {
     request[at..at + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+/// The bytes of a request to map memory into a GPU address range.
+fn map_dma_request(sizes: &HostBranch, client: Handle, map: &DmaMap) -> Vec<u8> {
+    let mut flags = MAP_FLAG_FIXED_ADDRESS | MAP_FLAG_SNOOP;
+    if map.small_pages {
+        flags |= MAP_FLAG_SMALL_PAGES;
+    }
+    if map.gpu_cached {
+        flags |= MAP_FLAG_GPU_CACHED;
+    }
+    let mut request = vec![0; sizes.map_dma_request];
+    if let Some(kind) = map.page_kind {
+        flags |= MAP_FLAG_PAGE_KIND_OVERRIDE;
+        put32(&mut request, sizes.map_dma_request_kind, kind);
+    }
+    put32(&mut request, 0, client);
+    put32(&mut request, 4, map.device);
+    put32(&mut request, 8, map.range);
+    put32(&mut request, 12, map.memory);
+    put64(&mut request, 16, map.offset);
+    put64(&mut request, 24, map.length);
+    put32(&mut request, 32, flags);
+    put64(&mut request, sizes.map_dma_request_address, map.address);
+    request
 }
 
 fn get32(request: &[u8], at: usize) -> u32 {
@@ -293,22 +320,7 @@ impl Rm for LinuxRm {
 
     fn map_dma(&mut self, map: &DmaMap) -> Result<(), RmError> {
         let sizes = self.sizes;
-        let mut flags = MAP_FLAG_FIXED_ADDRESS | MAP_FLAG_SNOOP;
-        if map.small_pages {
-            flags |= MAP_FLAG_SMALL_PAGES;
-        }
-        if map.gpu_cached {
-            flags |= MAP_FLAG_GPU_CACHED;
-        }
-        let mut request = vec![0; sizes.map_dma_request];
-        put32(&mut request, 0, self.client);
-        put32(&mut request, 4, map.device);
-        put32(&mut request, 8, map.range);
-        put32(&mut request, 12, map.memory);
-        put64(&mut request, 16, map.offset);
-        put64(&mut request, 24, map.length);
-        put32(&mut request, 32, flags);
-        put64(&mut request, sizes.map_dma_request_address, map.address);
+        let mut request = map_dma_request(sizes, self.client, map);
         ioctl(&self.control_file, ESCAPE_MAP_MEMORY_DMA, &mut request)?;
         let status = get32(&request, sizes.map_dma_request_status);
         RmError::check(|| format!("map at {:#x}", map.address), status)
@@ -437,5 +449,41 @@ mod tests {
     fn request_numbers_follow_the_kernels_encoding() {
         assert_eq!(request_number(ESCAPE_ALLOC, 32), 0xC020_462B);
         assert_eq!(request_number(ESCAPE_REGISTER_FD, 4), 0xC004_46C9);
+    }
+
+    fn a_map() -> DmaMap {
+        DmaMap {
+            device: 1,
+            range: 2,
+            memory: 3,
+            offset: 0x1000,
+            length: 0x2000,
+            address: 0x5000_0000,
+            small_pages: true,
+            gpu_cached: false,
+            page_kind: None,
+        }
+    }
+
+    fn flags_of(request: &[u8]) -> u32 {
+        get32(request, 32)
+    }
+
+    #[test]
+    fn a_map_with_a_page_kind_overrides_the_memorys() {
+        let sizes = &crate::profile::HOST_615;
+        let request = map_dma_request(sizes, 9, &DmaMap { page_kind: Some(0x05), ..a_map() });
+        assert_ne!(flags_of(&request) & MAP_FLAG_PAGE_KIND_OVERRIDE, 0);
+        assert_eq!(get32(&request, sizes.map_dma_request_kind), 0x05);
+        assert_eq!(get32(&request, 0), 9);
+        assert_eq!(request.len(), sizes.map_dma_request);
+    }
+
+    #[test]
+    fn a_map_with_no_page_kind_leaves_the_field_and_flag_clear() {
+        let sizes = &crate::profile::HOST_615;
+        let request = map_dma_request(sizes, 9, &a_map());
+        assert_eq!(flags_of(&request) & MAP_FLAG_PAGE_KIND_OVERRIDE, 0);
+        assert_eq!(get32(&request, sizes.map_dma_request_kind), 0);
     }
 }

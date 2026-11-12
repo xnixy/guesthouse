@@ -86,6 +86,7 @@ fn the_backend_trait_opens_allocates_maps_and_exports() {
         writable: true,
         executable: false,
         memory_type: guesthouse_backend::MapMemoryType::Default,
+        driver_protection: 0,
     };
     backend.map(&request).unwrap();
     let _fd = backend.export_memory(memory, size).unwrap();

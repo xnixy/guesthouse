@@ -86,7 +86,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 map_answer(0, Status::UNSUCCESSFUL, out);
                 return Ok(());
             }
-            self.add_mapping(handle, Mapping { address: request.address, first, length, space });
+            self.add_mapping(
+                handle,
+                Mapping { address: request.address, first, length, space, driver_protection: 0 },
+            );
             map_answer(request.address, Status::SUCCESS, out);
             return Ok(());
         }
@@ -129,6 +132,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             writable: true,
             executable: false,
             memory_type: guesthouse_backend::MapMemoryType::Default,
+            driver_protection: 0,
         };
         if let Err(error) = self.backend.map(&map) {
             log::warn!("mapping {handle:#x}: {error}");
@@ -137,7 +141,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             return Ok(());
         }
         self.mapped_addresses.insert(base, (whole, align));
-        self.add_mapping(handle, Mapping { address: base, first: 0, length: mapped, space });
+        self.add_mapping(
+            handle,
+            Mapping { address: base, first: 0, length: mapped, space, driver_protection: 0 },
+        );
         map_answer(base + first, Status::SUCCESS, out);
         Ok(())
     }
@@ -216,6 +223,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             writable: true,
             executable: false,
             memory_type: guesthouse_backend::MapMemoryType::Default,
+            driver_protection: 0,
         };
         if self.backend.map(&map).is_ok() {
             return Ok(());
@@ -225,31 +233,25 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     }
 
     /// Maps part of an allocation, at an address the guest chose earlier.
-    fn map_piece(
-        &mut self,
-        address: u64,
-        length: u64,
-        handle: u32,
-        offset: u64,
-        space: SpaceId,
-    ) -> Result<(), BackendError> {
+    fn map_piece(&mut self, handle: u32, piece: Mapping) -> Result<(), BackendError> {
         let allocation = self.allocations.get(&handle).ok_or(UNKNOWN_ALLOCATION)?;
         let memory = allocation.memory.ok_or(UNKNOWN_ALLOCATION)?;
         let gpu_cached = allocation.gpu_cached;
         self.backend.map(&MapRequest {
-            space,
+            space: piece.space,
             memory,
-            offset,
-            length,
-            address,
+            offset: piece.first,
+            length: piece.length,
+            address: piece.address,
             small_pages: true,
             gpu_cached,
             readable: true,
             writable: true,
             executable: false,
             memory_type: guesthouse_backend::MapMemoryType::Default,
+            driver_protection: piece.driver_protection,
         })?;
-        self.add_mapping(handle, Mapping { address, first: offset, length, space });
+        self.add_mapping(handle, piece);
         Ok(())
     }
 
@@ -277,11 +279,14 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             })?;
             allocation.mappings.retain(|mapping| *mapping != found);
             if found.address < address {
-                self.map_piece(found.address, address - found.address, handle, found.first, space)?;
+                let head = Mapping { length: address - found.address, ..found };
+                self.map_piece(handle, head)?;
             }
             let found_end = found.address + found.length;
             if end < found_end {
-                self.map_piece(end, found_end - end, handle, found.first + (end - found.address), space)?;
+                let first = found.first + (end - found.address);
+                let tail = Mapping { address: end, first, length: found_end - end, ..found };
+                self.map_piece(handle, tail)?;
             }
         }
         Ok(())
@@ -346,7 +351,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             };
             let piece = (size - done).min(found.address + found.length - source - done);
             let offset = found.first + (source + done - found.address);
-            self.map_piece(destination + done, piece, handle, offset, space)?;
+            let copy = Mapping { address: destination + done, first: offset, length: piece, ..found };
+            self.map_piece(handle, copy)?;
             done += piece;
         }
         Ok(())
@@ -354,19 +360,22 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     fn apply_update(&mut self, operation: UpdateOperation, space: SpaceId) -> Result<(), BackendError> {
         match operation {
-            UpdateOperation::Map { address, size, allocation, offset } => {
+            UpdateOperation::Map { address, size, allocation, offset, driver_protection } => {
+                let driver_protection = driver_protection.unwrap_or(0);
                 let end = range_end(address, size)?;
                 range_end(offset, size)?;
                 if let Some((handle, current)) = self.mapping_at(address, space)
                     && handle == allocation
                     && current.first + (address - current.address) == offset
                     && end <= current.address + current.length
+                    && !self.backend.maps_differently(current.driver_protection, driver_protection)
                 {
-                    // Already there. Only page attributes could differ, and those stay at the default.
+                    // Already there, and the pages wouldn't be mapped any differently.
                     return Ok(());
                 }
                 self.unmap_gpu_addresses(address, size, space)?;
-                self.map_piece(address, size, allocation, offset, space)
+                let piece = Mapping { address, first: offset, length: size, space, driver_protection };
+                self.map_piece(allocation, piece)
             }
             UpdateOperation::Unmap { address, size } => self.unmap_gpu_addresses(address, size, space),
             UpdateOperation::Copy { source, size, destination } => {
@@ -382,8 +391,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     fn apply_updates(&mut self, operations: &[u8], space: SpaceId) -> Result<(), super::Failure> {
         for bytes in operations.chunks(UpdateRequest::OPERATION_SIZE) {
             let operation = UpdateOperation::parse(bytes)?;
-            if matches!(operation, UpdateOperation::Map { .. }) {
-                log::debug!("update {operation:x?}, protection {:02x?}", UpdateOperation::protection(bytes));
+            if let UpdateOperation::Map { address, size, allocation, offset, driver_protection } = operation {
+                let driver_protection = driver_protection.unwrap_or(0);
+                log::debug!(
+                    "update maps {size:#x} bytes of {allocation:#x} from {offset:#x} at {address:#x}, driver protection {driver_protection:#x}"
+                );
             }
             self.apply_update(operation, space)?;
         }
@@ -506,12 +518,13 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             writable: true,
             executable: false,
             memory_type: guesthouse_backend::MapMemoryType::Default,
+            driver_protection: 0,
         };
         if let Err(error) = self.backend.map(&map) {
             self.gpu_addresses.give_back(address, whole, ALLOCATION_ALIGN, AddressUse::Host);
             return Err(error);
         }
-        self.add_mapping(handle, Mapping { address, first: 0, length: size, space });
+        self.add_mapping(handle, Mapping { address, first: 0, length: size, space, driver_protection: 0 });
         Ok(address)
     }
 }

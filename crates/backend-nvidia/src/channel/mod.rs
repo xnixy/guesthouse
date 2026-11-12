@@ -347,6 +347,7 @@ impl Channel {
                 address,
                 small_pages: false,
                 gpu_cached: true,
+                page_kind: None,
             },
         );
         if let Err(error) = mapped {

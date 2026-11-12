@@ -2,6 +2,7 @@
 
 use super::guest::{ChannelObject, GuestBranch};
 use crate::depth::DepthKinds;
+use crate::page_kind::PageKinds;
 
 /// One class bound to a channel, and the size of its parameters.
 pub type ChannelClass = (u32, usize);
@@ -63,6 +64,8 @@ pub struct Generation {
     pub video_record_flags: VideoRecordFlags,
     /// Which surfaces get a depth kind for their memory.
     pub depth_kinds: DepthKinds,
+    /// Whether a map of depth memory sets a page kind of its own.
+    pub page_kinds: PageKinds,
     /// Guest branches this generation has been run with. On any other the backend still starts, and
     /// says so in the log.
     pub run_on_guest_branches: &'static [&'static str],
@@ -139,6 +142,7 @@ pub const BLACKWELL: Generation = Generation {
         encoder: BLACKWELL_ENCODER_FLAGS,
     },
     depth_kinds: DepthKinds::AsStated,
+    page_kinds: PageKinds::NotCarried,
     run_on_guest_branches: &["617"],
 };
 
@@ -200,6 +204,7 @@ pub const ADA: Generation = Generation {
     copy_node_flags: None,
     video_record_flags: NO_VIDEO_FLAGS,
     depth_kinds: DepthKinds::Always,
+    page_kinds: PageKinds::InEntries,
     run_on_guest_branches: &[],
 };
 
@@ -231,6 +236,7 @@ pub const AMPERE: Generation = Generation {
     copy_node_flags: None,
     video_record_flags: NO_VIDEO_FLAGS,
     depth_kinds: DepthKinds::Always,
+    page_kinds: PageKinds::InEntries,
     run_on_guest_branches: &[],
 };
 
@@ -263,6 +269,7 @@ pub const TURING: Generation = Generation {
     copy_node_flags: None,
     video_record_flags: NO_VIDEO_FLAGS,
     depth_kinds: DepthKinds::Always,
+    page_kinds: PageKinds::InEntries,
     run_on_guest_branches: &[],
 };
 

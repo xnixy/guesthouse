@@ -407,6 +407,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 writable: true,
                 executable: false,
                 memory_type: guesthouse_backend::MapMemoryType::Default,
+                driver_protection: 0,
             })?;
         }
         allocation.memory = Some(shared);

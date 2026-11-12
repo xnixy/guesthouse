@@ -129,9 +129,24 @@ impl<'a> UpdateRequest<'a> {
 /// One change of a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateOperation {
-    Map { address: u64, size: u64, allocation: u32, offset: u64 },
-    Unmap { address: u64, size: u64 },
-    Copy { source: u64, size: u64, destination: u64 },
+    /// `driver_protection` is the driver's own word on how it wants the pages, which only a protected
+    /// map carries.
+    Map {
+        address: u64,
+        size: u64,
+        allocation: u32,
+        offset: u64,
+        driver_protection: Option<u64>,
+    },
+    Unmap {
+        address: u64,
+        size: u64,
+    },
+    Copy {
+        source: u64,
+        size: u64,
+        destination: u64,
+    },
     Unknown(u32),
 }
 
@@ -144,13 +159,10 @@ impl UpdateOperation {
     const SIZE: usize = 0x10;
     const THIRD: usize = 0x18;
     const OFFSET: usize = 0x20;
+    /// After the offset come the allocation range's size and the protection, then the driver's value.
+    const DRIVER_PROTECTION: usize = 0x38;
     /// Reads past here would pass the end of an operation cut short by the message.
     const FULL_SIZE: usize = 0x40;
-
-    /// What a map carries after its offset: how the driver wants the pages protected.
-    pub fn protection(operation: &[u8]) -> &[u8] {
-        operation.get(Self::OFFSET + 8..).unwrap_or_default()
-    }
 
     pub fn parse(operation: &[u8]) -> Result<Self, Malformed> {
         let kind = u32_at(operation, 0)?;
@@ -163,7 +175,11 @@ impl UpdateOperation {
                     return Err(Malformed);
                 }
                 let offset = u64_at(operation, Self::OFFSET)?;
-                Self::Map { address, size, allocation: third as u32, offset }
+                let driver_protection = match kind {
+                    Self::KIND_MAP_PROTECTED => Some(u64_at(operation, Self::DRIVER_PROTECTION)?),
+                    _ => None,
+                };
+                Self::Map { address, size, allocation: third as u32, offset, driver_protection }
             }
             Self::KIND_UNMAP => Self::Unmap { address, size },
             Self::KIND_COPY => Self::Copy { source: address, size, destination: third },
@@ -221,8 +237,29 @@ mod tests {
         set_u64(&mut bytes, 16, 0x2000);
         set_u64(&mut bytes, 24, 0xAAAA_0000_0040);
         set_u64(&mut bytes, 32, 0x10);
-        let expected = UpdateOperation::Map { address: 0x1000, size: 0x2000, allocation: 0x40, offset: 0x10 };
+        let expected = UpdateOperation::Map {
+            address: 0x1000,
+            size: 0x2000,
+            allocation: 0x40,
+            offset: 0x10,
+            driver_protection: Some(0),
+        };
         assert_eq!(UpdateOperation::parse(&bytes), Ok(expected));
+    }
+
+    #[test]
+    fn only_a_protected_map_has_the_drivers_protection() {
+        let mut bytes = [0; 64];
+        set_u64(&mut bytes, 0x38, 0x0300);
+        let mut driver_protection = |kind: u8| {
+            bytes[0] = kind;
+            match UpdateOperation::parse(&bytes) {
+                Ok(UpdateOperation::Map { driver_protection, .. }) => driver_protection,
+                other => panic!("not a map: {other:?}"),
+            }
+        };
+        assert_eq!(driver_protection(3), Some(0x0300));
+        assert_eq!(driver_protection(0), None);
     }
 
     #[test]

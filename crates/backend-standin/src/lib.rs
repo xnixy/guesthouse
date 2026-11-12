@@ -62,6 +62,10 @@ pub struct StandIn {
     pub run_work_at_once: bool,
     pub doorbells: Vec<(u32, u64)>,
     pub closed_queues: Vec<u32>,
+    /// The driver protection of every mapping made, with its address, in order.
+    pub mapped_protections: Vec<(u64, u64)>,
+    /// Set to say that any two different driver protection values need different mappings.
+    pub protections_differ: bool,
     pub preserved: Vec<(MemoryId, MemoryId, u64)>,
     pub copies: Vec<StagingCopy>,
     pub slot_copies: Vec<SlotCopy>,
@@ -147,6 +151,8 @@ impl StandIn {
             run_work_at_once: false,
             doorbells: Vec::new(),
             closed_queues: Vec::new(),
+            mapped_protections: Vec::new(),
+            protections_differ: false,
             preserved: Vec::new(),
             copies: Vec::new(),
             slot_copies: Vec::new(),
@@ -332,6 +338,10 @@ impl Backend for StandIn {
         assert!(self.spaces.remove(&space).is_some(), "{space:?} was destroyed twice");
     }
 
+    fn maps_differently(&self, first: u64, second: u64) -> bool {
+        self.protections_differ && first != second
+    }
+
     fn map(&mut self, request: &MapRequest) -> Result<(), BackendError> {
         assert!(self.live_memory.contains(&request.memory), "mapping memory that does not exist");
         if std::mem::take(&mut self.fail_next_map) {
@@ -347,6 +357,7 @@ impl Backend for StandIn {
             return Err(BackendError::new("these addresses are taken"));
         }
         space.mappings.insert(request.address, request.length);
+        self.mapped_protections.push((request.address, request.driver_protection));
         Ok(())
     }
 
@@ -572,6 +583,7 @@ mod tests {
             writable: true,
             executable: false,
             memory_type: guesthouse_backend::MapMemoryType::Default,
+            driver_protection: 0,
         }
     }
 

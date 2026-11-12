@@ -65,6 +65,8 @@ pub struct FakeRm {
     pub refuse_exports: bool,
     /// A GPU address no mapping may start at.
     pub refuse_map_at: Option<u64>,
+    /// Set to refuse every map that carries a page kind, as an RM that does not take the override.
+    pub refuse_page_kind: bool,
     /// What each export handed out, so a test can look at what a viewer would see.
     pub exports: HashMap<Handle, File>,
     /// What video memory starts with, for a copy out to host pages to find.
@@ -100,6 +102,7 @@ impl FakeRm {
             refuse_control: None,
             refuse_exports: false,
             refuse_map_at: None,
+            refuse_page_kind: false,
             exports: HashMap::new(),
             memory_starts: HashMap::new(),
             copies_looked_at: 0,
@@ -347,7 +350,9 @@ impl Rm for FakeRm {
     }
 
     fn map_dma(&mut self, map: &DmaMap) -> Result<(), RmError> {
-        if self.overlaps(map.range, map.address, map.length) || self.refuse_map_at == Some(map.address) {
+        let refused =
+            self.refuse_map_at == Some(map.address) || self.refuse_page_kind && map.page_kind.is_some();
+        if self.overlaps(map.range, map.address, map.length) || refused {
             return Err(RmError::refused(format!("map at {:#x}", map.address), STATUS_NOT_SUPPORTED));
         }
         self.mappings.insert((map.range, map.address), map.length);

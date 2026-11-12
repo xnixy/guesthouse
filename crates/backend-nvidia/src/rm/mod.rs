@@ -80,6 +80,8 @@ pub struct DmaMap {
     pub address: u64,
     pub small_pages: bool,
     pub gpu_cached: bool,
+    /// The page kind this one mapping takes in place of the memory's own, if any.
+    pub page_kind: Option<u32>,
 }
 
 /// The RM's calls, as this backend uses them.

@@ -75,6 +75,8 @@ pub struct Mapping {
     pub address: u64,
     pub small_pages: bool,
     pub gpu_cached: bool,
+    /// The page kind for this mapping alone, if it needs one the memory doesn't have.
+    pub page_kind: Option<u32>,
 }
 
 /// The client, and the handles it hands out.
@@ -257,6 +259,7 @@ impl<R: Rm> Device<R> {
             address: map.address,
             small_pages: map.small_pages,
             gpu_cached: map.gpu_cached,
+            page_kind: map.page_kind,
         })
     }
 

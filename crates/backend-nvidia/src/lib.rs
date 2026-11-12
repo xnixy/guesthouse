@@ -18,6 +18,7 @@ mod guest_clock;
 pub mod inf;
 mod list_repair;
 mod local_window;
+mod page_kind;
 mod peek;
 pub mod private_data;
 pub mod profile;
@@ -315,6 +316,17 @@ impl<R: Rm> NvidiaBackend<R> {
         &mut self.device
     }
 
+    /// The page kind a map needs, from the driver's protection value, if its generation has kinds to set.
+    fn page_kind_of(&self, request: &MapRequest) -> Option<u32> {
+        let kind = page_kind::page_kind(self.generation.page_kinds, request.driver_protection)?;
+        let class = page_kind::depth_class(request.driver_protection);
+        log::debug!(
+            "a map at {:#x} is depth class {class}, so its pages get kind {kind:#x}",
+            request.address
+        );
+        Some(kind)
+    }
+
     fn space(spaces: &HashMap<SpaceId, AddressSpace>, space: SpaceId) -> Result<&AddressSpace, BackendError> {
         spaces.get(&space).ok_or_else(|| BackendError::new("this address space is closed"))
     }
@@ -428,8 +440,16 @@ impl<R: Rm + OpenRm> Backend for NvidiaBackend<R> {
             address: request.address,
             small_pages: request.small_pages,
             gpu_cached: request.gpu_cached,
+            page_kind: self.page_kind_of(request),
         };
-        self.device.map(space, &map).map_err(memory_error)?;
+        if let Err(error) = self.device.map(space, &map) {
+            if map.page_kind.is_none() {
+                return Err(memory_error(error));
+            }
+            // A host that doesn't take the override maps the pages plain, as it did before.
+            log::warn!("the RM refused a map with a page kind ({error}), so it is made without");
+            self.device.map(space, &rm::device::Mapping { page_kind: None, ..map }).map_err(memory_error)?;
+        }
         self.ring_moves.mapped(request.memory, request.address);
         Ok(())
     }

@@ -5,6 +5,7 @@
 #include <linux/mman.h>
 #include <linux/poll.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/uaccess.h>
 #include "nvfwd_guest.h"
 
@@ -62,24 +63,57 @@ static int nvf_open_kind(struct file *file, int kind)
 	return 0;
 }
 
+#ifndef NV_VERSION
+#define NV_VERSION "unknown"
+#endif
+
+#define KMS_ALLOC_DEVICE 0
+#define KMS_FREE_DEVICE 1
+#define KMS_REPLY_AT 624 /* where the reply starts in NvKmsAllocDeviceParams */
+
+/*
+ * NvKmsAllocDeviceParams for each driver branch, from its nvkms-api.h. Branch 620 took subDeviceMask
+ * out of the reply, so the parameters are 8 bytes shorter and the fields after it moved up.
+ */
+struct kms_branch {
+	const char *version_start;
+	u32 params_bytes;
+	u32 reply[5]; /* the reply's first words: status, device handle, then what the branch has */
+};
+static const struct kms_branch kms_branches[] = {
+	{ "615.", 1448, { 0 /* success */, 1 /* handle */, 1 /* subDeviceMask */, 0 /* heads */, 0 /* disps */ } },
+	{ "620.", 1440, { 0 /* success */, 1 /* handle */, 0 /* heads */, 0 /* disps */, 0 } },
+};
+
+static const struct kms_branch *kms_branch(void)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(kms_branches); i++)
+		if (!strncmp(NV_VERSION, kms_branches[i].version_start, strlen(kms_branches[i].version_start)))
+			return &kms_branches[i];
+	return NULL;
+}
+
 /* /dev/nvidia-modeset never reaches the host. It answers for a device with no displays, and logs the rest. */
 static long kms_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+	const struct kms_branch *branch = kms_branch();
 	struct { u32 cmd, size; u64 address; } p;
 
 	if (copy_from_user(&p, (void __user *)arg, sizeof(p)))
 		return -EFAULT;
 	pr_info("nvfwd: modeset ioctl %x size %x\n", p.cmd, p.size);
-	if (p.cmd == 0 && p.size == 1448) { /* ALLOC_DEVICE: a device with no displays */
-		static const u32 reply[5] = { 0 /* success */, 1 /* handle */, 1 /* subdevices */, 0, 0 };
-		static u8 zero[1448 - 624];
+	if (branch && p.cmd == KMS_ALLOC_DEVICE && p.size == branch->params_bytes) {
+		static u8 zero[1448 - KMS_REPLY_AT];
+		void __user *reply = u64_to_user_ptr(p.address + KMS_REPLY_AT);
 
-		if (copy_to_user(u64_to_user_ptr(p.address + 624), zero, sizeof(zero)) ||
-		    copy_to_user(u64_to_user_ptr(p.address + 624), reply, sizeof(reply)))
+		if (copy_to_user(reply, zero, branch->params_bytes - KMS_REPLY_AT) ||
+		    copy_to_user(reply, branch->reply, sizeof(branch->reply)))
 			return -EFAULT;
 		return 0;
 	}
-	if (p.cmd == 1) /* FREE_DEVICE */
+	if (p.cmd == KMS_FREE_DEVICE)
 		return 0;
 	return -ENOTTY;
 }

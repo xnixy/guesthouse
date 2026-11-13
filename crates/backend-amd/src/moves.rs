@@ -52,7 +52,7 @@ pub fn pieces(size: u64) -> impl Iterator<Item = Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sdma_copy::LinearCopy;
+    use crate::sdma_copy::{EngineForm, LinearCopy};
 
     #[test]
     fn a_small_buffer_goes_in_one_piece_mapped_in_whole_pages() {
@@ -77,6 +77,8 @@ mod tests {
     fn a_whole_windows_commands_fit_the_commands_buffer() {
         let copy =
             LinearCopy { source_address: SOURCE_WINDOW, target_address: TARGET_WINDOW, bytes: WINDOW_BYTES };
-        assert!(size_of_val(copy.commands().as_slice()) <= copy_ib::BYTES);
+        for form in [EngineForm::Sdma5, EngineForm::Sdma7] {
+            assert!(size_of_val(copy.commands(form).as_slice()) <= copy_ib::BYTES);
+        }
     }
 }

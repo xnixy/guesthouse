@@ -138,7 +138,7 @@ pub fn reaches(commands: &[u32]) -> Vec<Reach> {
 mod tests {
     use super::*;
     use crate::protocol::tiling::Layout as Tiling;
-    use crate::sdma_copy::{LinearCopy, TiledCopy, TiledForm};
+    use crate::sdma_copy::{EngineForm, LinearCopy, TiledCopy};
     use crate::submit::sdma_write_ib;
 
     const SOURCE: u64 = 0x4_5d00_0000;
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn a_plain_copy_names_both_ends_for_all_its_bytes() {
         let copy = LinearCopy { source_address: SOURCE, target_address: TARGET, bytes: 0x6000 };
-        let named = reaches(&copy.commands());
+        let named = reaches(&copy.commands(EngineForm::Sdma5));
         assert_eq!(
             named,
             [Reach { address: SOURCE, bytes: 0x6000 }, Reach { address: TARGET, bytes: 0x6000 }]
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn a_copy_in_pieces_names_each_piece() {
         let copy = LinearCopy { source_address: SOURCE, target_address: TARGET, bytes: 0x80_0000 };
-        let named = reaches(&copy.commands());
+        let named = reaches(&copy.commands(EngineForm::Sdma5));
         assert_eq!(named.len(), 6);
         assert_eq!(named.iter().step_by(2).map(|reach| reach.bytes).sum::<u64>(), 0x80_0000);
         assert_eq!(named[2].address, SOURCE + named[0].bytes);
@@ -170,7 +170,7 @@ mod tests {
             tiled_width: 640,
             tiled_height: 400,
             swizzle_mode: 27,
-            form: TiledForm::Sdma5,
+            form: EngineForm::Sdma5,
             linear_address: TARGET,
             linear_pitch: 640,
             linear_height: 400,
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn a_packet_cut_short_names_nothing() {
         let copy = LinearCopy { source_address: SOURCE, target_address: TARGET, bytes: 0x1000 };
-        assert_eq!(reaches(&copy.commands()[..5]), []);
+        assert_eq!(reaches(&copy.commands(EngineForm::Sdma5)[..5]), []);
         assert_eq!(reaches(&[OPCODE_WRITE, TARGET as u32, (TARGET >> 32) as u32]), []);
     }
 }

@@ -13,6 +13,7 @@
 #define CTRL_EXPORT_FD 0x3d05u       /* fd at 16 of its parameters */
 #define CTRL_NO_PUBLIC_SOURCE 0x20808163u /* forwarded at exactly 4 bytes and no other size */
 #define CTRL_NO_PUBLIC_SOURCE_BYTES 4
+#define CLASS_CONTEXT_SHARE 0x9067 /* parameters of 12 bytes in branch 615, 16 in 620 */
 #define FUZZ_ROUNDS 3000000
 
 static uint8_t data[4096];
@@ -193,6 +194,23 @@ static void test_alloc_and_memory(void)
     assert(walk(RM_CMD(ESC_RM_FREE, 16), 128, &params, 1) == -EINVAL);
 }
 
+static void test_a_branch_picks_its_class_sizes(void)
+{
+    struct nvfwd_fix params = { NVFWD_FIX_PTR, RM_ALLOC_PARAMS, 64, 0 };
+
+    memset(data, 0, sizeof(data));
+    put32(RM_ALLOC_CLASS, CLASS_CONTEXT_SHARE);
+    put32(RM_ALLOC_LONG_PARAMS_SIZE, 0);
+    assert(!rmargs_use_driver("610.1.2") && !rmargs_use_driver("6150.1") && !rmargs_use_driver(""));
+    assert(rmargs_use_driver("615.78.08"));
+    assert(walk(RM_CMD(ESC_RM_ALLOC, 48), 76, &params, 1) == 2);
+    assert(walk(RM_CMD(ESC_RM_ALLOC, 48), 80, &params, 1) == 2);
+    assert(rmargs_use_driver("620.70.06"));
+    assert(walk(RM_CMD(ESC_RM_ALLOC, 48), 76, &params, 1) == -EINVAL);
+    assert(walk(RM_CMD(ESC_RM_ALLOC, 48), 80, &params, 1) == 2);
+    assert(rmargs_use_driver("615.78.08"));
+}
+
 static void test_uvm(void)
 {
     struct nvfwd_fix fd = { NVFWD_FIX_FD, 24, 3, 0 };
@@ -261,6 +279,7 @@ int main(void)
     test_xfer_points_at_what_was_read();
     test_control();
     test_alloc_and_memory();
+    test_a_branch_picks_its_class_sizes();
     test_uvm();
     fuzz();
     puts("ok");

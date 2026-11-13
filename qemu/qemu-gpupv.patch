@@ -8726,3 +8726,417 @@ index d319160..ff1077c 100644
 -- 
 2.56.0
 
+From fb2d6463d8c1a09f51a67146019eab4e19bd1260 Mon Sep 17 00:00:00 2001
+From: xnixy <x@ruxn.com>
+Date: Fri, 13 Nov 2026 09:32:29 -0800
+Subject: [PATCH 31/31] hw/misc/nvfwd: read calls as the host's driver branch
+ does
+
+Driver branch 620 grows the parameters of two classes, and the RM takes
+those sizes from its own table when a call gives none. The device keeps
+a table of class sizes for each branch it knows, 615 and 620, and picks
+one from the loaded module's version before the guest runs. A branch it
+has no table for stops the device from starting.
+
+The sensor daemon knows 620.70.06 too: the shared data page it reads is
+laid out the same there.
+
+class_tables_620.h comes from NVIDIA's open modules at 620.70.06, under
+NVIDIA's MIT notice.
+---
+ hw/misc/nvfwd/class_tables_620.h | 192 +++++++++++++++++++++++++++++++
+ hw/misc/nvfwd/host_card.c        |  30 +++++
+ hw/misc/nvfwd/rmargs.c           |  39 ++++++-
+ hw/misc/nvfwd/rmargs.h           |   6 +
+ hw/misc/nvfwd/rusd.c             |  17 ++-
+ 5 files changed, 276 insertions(+), 8 deletions(-)
+ create mode 100644 hw/misc/nvfwd/class_tables_620.h
+
+diff --git a/hw/misc/nvfwd/class_tables_620.h b/hw/misc/nvfwd/class_tables_620.h
+new file mode 100644
+index 0000000..7ca7bd4
+--- /dev/null
++++ b/hw/misc/nvfwd/class_tables_620.h
+@@ -0,0 +1,192 @@
++/* SPDX-License-Identifier: MIT */
++/*
++ * Made from NVIDIA's open GPU kernel modules, whose notice follows.
++ *
++ * Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
++ * associated documentation files (the "Software"), to deal in the Software without restriction,
++ * including without limitation the rights to use, copy, modify, merge, publish, distribute,
++ * sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in all copies or
++ * substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
++ * NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES
++ * OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++{ 0x0, 4 }, /* NV01_ROOT NvHandle */
++{ 0x1, 4 }, /* NV01_ROOT_NON_PRIV NvHandle */
++{ 0x41, 4 }, /* NV01_ROOT_CLIENT NvHandle */
++{ 0xf, 16 }, /* FABRIC_MANAGER_SESSION NV000F_ALLOCATION_PARAMETERS */
++{ 0xf1, 32 }, /* NV_IMEX_SESSION NV00F1_ALLOCATION_PARAMETERS */
++{ 0x77cc, 8 }, /* NV_MNCC_SESSION NV77CC_ALLOC_PARAMETERS */
++{ 0x20, 4 }, /* NV0020_GPU_MANAGEMENT NvHandle */
++{ 0x90cd, 72 }, /* NV_EVENT_BUFFER NV_EVENT_BUFFER_ALLOC_PARAMETERS */
++{ 0x90d0, 104 }, /* NV_OPERATIONAL_EVENT_BUFFER_BIND NV_OPERATIONAL_EVENT_BUFFER_BIND_ALLOC_PARAMETERS */
++{ 0xda, 16 }, /* NV_SEMAPHORE_SURFACE NV_SEMAPHORE_SURFACE_ALLOC_PARAMETERS */
++{ 0x503b, 88 }, /* NV50_P2P NV503B_ALLOC_PARAMETERS */
++{ 0x60, 4 }, /* NV0060_SYNC_GPU_BOOST NV0060_ALLOC_PARAMETERS */
++{ 0x80, 56 }, /* NV01_DEVICE_0 NV0080_ALLOC_PARAMETERS */
++{ 0x83de, 12 }, /* GT200_DEBUGGER NV83DE_ALLOC_PARAMETERS */
++{ 0x30f1, 4 }, /* NV30_GSYNC NV30F1_ALLOC_PARAMETERS */
++{ 0xb1cc, 4 }, /* MAXWELL_PROFILER_CONTEXT NVB1CC_ALLOC_PARAMETERS */
++{ 0xb2cc, 8 }, /* MAXWELL_PROFILER_DEVICE NVB2CC_ALLOC_PARAMETERS */
++{ 0xb0cd, 8 }, /* PROFILER_DEVICE_EVENT NVB0CD_ALLOC_PARAMETERS */
++{ 0xb0ce, 16 }, /* PROFILER_CONTEXT_EVENT NVB0CE_ALLOC_PARAMETERS */
++{ 0xcdcd, 8 }, /* TRACE_DEVICE_EVENT NVCDCD_ALLOC_PARAMETERS */
++{ 0xd0cd, 8 }, /* WPPS_CONFIG_SESSION NVD0CD_ALLOC_PARAMETERS */
++{ 0x906f, 376 }, /* GF100_CHANNEL_GPFIFO NV_CHANNEL_ALLOC_PARAMS */
++{ 0xa06f, 376 }, /* KEPLER_CHANNEL_GPFIFO_A NV_CHANNEL_ALLOC_PARAMS */
++{ 0xa16f, 376 }, /* KEPLER_CHANNEL_GPFIFO_B NV_CHANNEL_ALLOC_PARAMS */
++{ 0xb06f, 376 }, /* MAXWELL_CHANNEL_GPFIFO_A NV_CHANNEL_ALLOC_PARAMS */
++{ 0xc06f, 376 }, /* PASCAL_CHANNEL_GPFIFO_A NV_CHANNEL_ALLOC_PARAMS */
++{ 0xc36f, 376 }, /* VOLTA_CHANNEL_GPFIFO_A NV_CHANNEL_ALLOC_PARAMS */
++{ 0xc46f, 376 }, /* TURING_CHANNEL_GPFIFO_A NV_CHANNEL_ALLOC_PARAMS */
++{ 0xc56f, 376 }, /* AMPERE_CHANNEL_GPFIFO_A NV_CHANNEL_ALLOC_PARAMS */
++{ 0xc86f, 376 }, /* HOPPER_CHANNEL_GPFIFO_A NV_CHANNEL_ALLOC_PARAMS */
++{ 0xc96f, 376 }, /* BLACKWELL_CHANNEL_GPFIFO_A NV_CHANNEL_ALLOC_PARAMS */
++{ 0xca6f, 376 }, /* BLACKWELL_CHANNEL_GPFIFO_B NV_CHANNEL_ALLOC_PARAMS */
++{ 0xc574, 8 }, /* UVM_CHANNEL_RETAINER NV_UVM_CHANNEL_RETAINER_ALLOC_PARAMS */
++{ 0x9067, 16 }, /* FERMI_CONTEXT_SHARE_A NV_CTXSHARE_ALLOCATION_PARAMETERS */
++{ 0x2080, 4 }, /* NV20_SUBDEVICE_0 NV2080_ALLOC_PARAMETERS */
++{ 0x2081, 4 }, /* NV2081_BINAPI NV2081_ALLOC_PARAMETERS */
++{ 0x2082, 4 }, /* NV2082_BINAPI_PRIVILEGED NV2082_ALLOC_PARAMETERS */
++{ 0xa06c, 32 }, /* KEPLER_CHANNEL_GROUP_A NV_CHANNEL_GROUP_ALLOCATION_PARAMETERS */
++{ 0x40, 128 }, /* NV01_MEMORY_LOCAL_USER NV_MEMORY_ALLOCATION_PARAMS */
++{ 0xc2, 24 }, /* NV01_MEMORY_LOCAL_PHYSICAL NV_PHYSICAL_MEMORY_ALLOCATION_PARAMS */
++{ 0x50a0, 128 }, /* NV50_MEMORY_VIRTUAL NV_MEMORY_ALLOCATION_PARAMS */
++{ 0x3e, 128 }, /* NV01_MEMORY_SYSTEM NV_MEMORY_ALLOCATION_PARAMS */
++{ 0x70, 24 }, /* NV01_MEMORY_VIRTUAL NV_MEMORY_VIRTUAL_ALLOCATION_PARAMS */
++{ 0xfe, 24 }, /* NV_MEMORY_MAPPER NV_MEMORY_MAPPER_ALLOCATION_PARAMS */
++{ 0x71, 40 }, /* NV01_MEMORY_SYSTEM_OS_DESCRIPTOR NV_OS_DESC_MEMORY_ALLOCATION_PARAMS */
++{ 0xc3, 4 }, /* NV01_MEMORY_SYNCPOINT NV_MEMORY_SYNCPOINT_ALLOCATION_PARAMS */
++{ 0x90ce, 128 }, /* NV01_MEMORY_DEVICELESS NV_MEMORY_ALLOCATION_PARAMS */
++{ 0xb1, 120 }, /* NV01_MEMORY_HW_RESOURCES NV_MEMORY_HW_RESOURCES_ALLOCATION_PARAMS */
++{ 0x81, 152 }, /* NV01_MEMORY_LIST_SYSTEM NV_MEMORY_LIST_ALLOCATION_PARAMS */
++{ 0x82, 152 }, /* NV01_MEMORY_LIST_FBMEM NV_MEMORY_LIST_ALLOCATION_PARAMS */
++{ 0x83, 152 }, /* NV01_MEMORY_LIST_OBJECT NV_MEMORY_LIST_ALLOCATION_PARAMS */
++{ 0xe0, 244 }, /* NV_MEMORY_EXPORT NV00E0_ALLOCATION_PARAMETERS */
++{ 0xf9, 64 }, /* NV_MEMORY_FABRIC_IMPORT_V2 NV00F9_ALLOCATION_PARAMETERS */
++{ 0xf8, 48 }, /* NV_MEMORY_FABRIC NV00F8_ALLOCATION_PARAMETERS */
++{ 0xfb, 32 }, /* NV_MEMORY_FABRIC_IMPORTED_REF NV00FB_ALLOCATION_PARAMETERS */
++{ 0x90f1, 56 }, /* FERMI_VASPACE_A NV_VASPACE_ALLOCATION_PARAMETERS */
++{ 0xfd, 80 }, /* NV_MEMORY_MULTICAST_FABRIC NV00FD_ALLOCATION_PARAMETERS */
++{ 0xa0bc, 20 }, /* NVENC_SW_SESSION NVA0BC_ALLOC_PARAMETERS */
++{ 0xa0bd, 20 }, /* NVFBC_SW_SESSION NVA0BD_ALLOC_PARAMETERS */
++{ 0xa084, 88 }, /* NVA084_KERNEL_HOST_VGPU_DEVICE NVA084_ALLOC_PARAMETERS */
++{ 0x503c, 4 }, /* NV50_THIRD_PARTY_P2P NV503C_ALLOC_PARAMETERS */
++{ 0xdb, 8 }, /* NV40_DEBUG_BUFFER NV00DB_ALLOCATION_PARAMETERS */
++{ 0xde, 8 }, /* RM_USER_SHARED_DATA NV00DE_ALLOC_PARAMETERS */
++{ 0xc661, 2 }, /* HOPPER_USERMODE_A NV_HOPPER_USERMODE_A_PARAMS */
++{ 0xc761, 2 }, /* BLACKWELL_USERMODE_A NV_HOPPER_USERMODE_A_PARAMS */
++{ 0xc365, 4 }, /* ACCESS_COUNTER_NOTIFY_BUFFER NV_ACCESS_COUNTER_NOTIFY_BUFFER_ALLOC_PARAMS */
++{ 0xc763, 528 }, /* MMU_VIDMEM_ACCESS_BIT_BUFFER NV_VIDMEM_ACCESS_BIT_ALLOCATION_PARAMS */
++{ 0xc863, 528 }, /* HOPPER_MMU_VIDMEM_ACCESS_BIT_BUFFER NV_VIDMEM_ACCESS_BIT_ALLOCATION_PARAMS */
++{ 0xc637, 16 }, /* AMPERE_SMC_PARTITION_REF NVC637_ALLOCATION_PARAMETERS */
++{ 0xc638, 16 }, /* AMPERE_SMC_EXEC_PARTITION_REF NVC638_ALLOCATION_PARAMETERS */
++{ 0xc639, 8 }, /* AMPERE_SMC_CONFIG_SESSION NVC639_ALLOCATION_PARAMETERS */
++{ 0xc640, 8 }, /* AMPERE_SMC_MONITOR_SESSION NVC640_ALLOCATION_PARAMETERS */
++{ 0x9010, 32 }, /* NV9010_VBLANK_CALLBACK NV_VBLANK_CALLBACK_ALLOCATION_PARAMETERS */
++{ 0x92, 32 }, /* NV0092_RG_LINE_CALLBACK NV0092_RG_LINE_CALLBACK_ALLOCATION_PARAMETERS */
++{ 0xc57a, 16 }, /* NVC57A_CURSOR_IMM_CHANNEL_PIO NV50VAIO_CHANNELPIO_ALLOCATION_PARAMETERS */
++{ 0xc67a, 16 }, /* NVC67A_CURSOR_IMM_CHANNEL_PIO NV50VAIO_CHANNELPIO_ALLOCATION_PARAMETERS */
++{ 0xc87a, 16 }, /* NVC87A_CURSOR_IMM_CHANNEL_PIO NV50VAIO_CHANNELPIO_ALLOCATION_PARAMETERS */
++{ 0xc97a, 16 }, /* NVC97A_CURSOR_IMM_CHANNEL_PIO NV50VAIO_CHANNELPIO_ALLOCATION_PARAMETERS */
++{ 0xca7a, 16 }, /* NVCA7A_CURSOR_IMM_CHANNEL_PIO NV50VAIO_CHANNELPIO_ALLOCATION_PARAMETERS */
++{ 0xcb7a, 16 }, /* NVCB7A_CURSOR_IMM_CHANNEL_PIO NV50VAIO_CHANNELPIO_ALLOCATION_PARAMETERS */
++{ 0xcc7a, 16 }, /* NVCC7A_CURSOR_IMM_CHANNEL_PIO NV50VAIO_CHANNELPIO_ALLOCATION_PARAMETERS */
++{ 0xc57b, 40 }, /* NVC57B_WINDOW_IMM_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc57d, 40 }, /* NVC57D_CORE_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc57e, 40 }, /* NVC57E_WINDOW_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc67b, 40 }, /* NVC67B_WINDOW_IMM_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc67d, 40 }, /* NVC67D_CORE_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc77d, 40 }, /* NVC77D_CORE_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc77f, 40 }, /* NVC77F_ANY_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc67e, 40 }, /* NVC67E_WINDOW_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc87b, 40 }, /* NVC87B_WINDOW_IMM_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc87d, 40 }, /* NVC87D_CORE_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc87e, 40 }, /* NVC87E_WINDOW_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc97b, 40 }, /* NVC97B_WINDOW_IMM_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc97d, 40 }, /* NVC97D_CORE_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xc97e, 40 }, /* NVC97E_WINDOW_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xca7b, 40 }, /* NVCA7B_WINDOW_IMM_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xca7d, 40 }, /* NVCA7D_CORE_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xca7e, 40 }, /* NVCA7E_WINDOW_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xcb7b, 40 }, /* NVCB7B_WINDOW_IMM_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xcb7d, 40 }, /* NVCB7D_CORE_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xcb7e, 40 }, /* NVCB7E_WINDOW_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xcc7b, 40 }, /* NVCC7B_WINDOW_IMM_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xcc7d, 40 }, /* NVCC7D_CORE_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0xcc7e, 40 }, /* NVCC7E_WINDOW_CHANNEL_DMA NV50VAIO_CHANNELDMA_ALLOCATION_PARAMETERS */
++{ 0x9072, 12 }, /* GF100_DISP_SW NV9072_ALLOCATION_PARAMETERS */
++{ 0x5080, 1 }, /* NV50_DEFERRED_API_CLASS NV5080_ALLOC_PARAMS */
++{ 0xb0b5, 8 }, /* MAXWELL_DMA_COPY_A NVB0B5_ALLOCATION_PARAMETERS */
++{ 0xc0b5, 8 }, /* PASCAL_DMA_COPY_A NVB0B5_ALLOCATION_PARAMETERS */
++{ 0xc5b5, 8 }, /* TURING_DMA_COPY_A NVB0B5_ALLOCATION_PARAMETERS */
++{ 0xc6b5, 8 }, /* AMPERE_DMA_COPY_A NVB0B5_ALLOCATION_PARAMETERS */
++{ 0xc7b5, 8 }, /* AMPERE_DMA_COPY_B NVB0B5_ALLOCATION_PARAMETERS */
++{ 0xc8b5, 8 }, /* HOPPER_DMA_COPY_A NVB0B5_ALLOCATION_PARAMETERS */
++{ 0xc9b5, 8 }, /* BLACKWELL_DMA_COPY_A NVB0B5_ALLOCATION_PARAMETERS */
++{ 0xcab5, 8 }, /* BLACKWELL_DMA_COPY_B NVB0B5_ALLOCATION_PARAMETERS */
++{ 0xb8b0, 12 }, /* NVB8B0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xc4b0, 12 }, /* NVC4B0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xc6b0, 12 }, /* NVC6B0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xc7b0, 12 }, /* NVC7B0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xc9b0, 12 }, /* NVC9B0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xcdb0, 12 }, /* NVCDB0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xceb0, 12 }, /* NVCEB0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xcfb0, 12 }, /* NVCFB0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xd1b0, 12 }, /* NVD1B0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xd2b0, 12 }, /* NVD2B0_VIDEO_DECODER NV_BSP_ALLOCATION_PARAMETERS */
++{ 0xb8d1, 12 }, /* NVB8D1_VIDEO_NVJPG NV_NVJPG_ALLOCATION_PARAMETERS */
++{ 0xc4d1, 12 }, /* NVC4D1_VIDEO_NVJPG NV_NVJPG_ALLOCATION_PARAMETERS */
++{ 0xc9d1, 12 }, /* NVC9D1_VIDEO_NVJPG NV_NVJPG_ALLOCATION_PARAMETERS */
++{ 0xcdd1, 12 }, /* NVCDD1_VIDEO_NVJPG NV_NVJPG_ALLOCATION_PARAMETERS */
++{ 0xced0, 12 }, /* NVCED0_VIDEO_NVJPG NV_NVJPG_ALLOCATION_PARAMETERS */
++{ 0xcfd1, 12 }, /* NVCFD1_VIDEO_NVJPG NV_NVJPG_ALLOCATION_PARAMETERS */
++{ 0xd2d1, 12 }, /* NVD2D1_VIDEO_NVJPG NV_NVJPG_ALLOCATION_PARAMETERS */
++{ 0xb8fa, 12 }, /* NVB8FA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xc6fa, 12 }, /* NVC6FA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xc7fa, 12 }, /* NVC7FA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xc9fa, 12 }, /* NVC9FA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xcdfa, 12 }, /* NVCDFA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xcefa, 12 }, /* NVCEFA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xcffa, 12 }, /* NVCFFA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xd1fa, 12 }, /* NVD1FA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xd2fa, 12 }, /* NVD2FA_VIDEO_OFA NV_OFA_ALLOCATION_PARAMETERS */
++{ 0xd1b7, 12 }, /* NVD1B7_VIDEO_ENCODER NV_MSENC_ALLOCATION_PARAMETERS */
++{ 0xc4b7, 12 }, /* NVC4B7_VIDEO_ENCODER NV_MSENC_ALLOCATION_PARAMETERS */
++{ 0xb4b7, 12 }, /* NVB4B7_VIDEO_ENCODER NV_MSENC_ALLOCATION_PARAMETERS */
++{ 0xc7b7, 12 }, /* NVC7B7_VIDEO_ENCODER NV_MSENC_ALLOCATION_PARAMETERS */
++{ 0xc9b7, 12 }, /* NVC9B7_VIDEO_ENCODER NV_MSENC_ALLOCATION_PARAMETERS */
++{ 0xceb7, 12 }, /* NVCEB7_VIDEO_ENCODER NV_MSENC_ALLOCATION_PARAMETERS */
++{ 0xcfb7, 12 }, /* NVCFB7_VIDEO_ENCODER NV_MSENC_ALLOCATION_PARAMETERS */
++{ 0xc697, 16 }, /* AMPERE_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xc6c0, 16 }, /* AMPERE_COMPUTE_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xc797, 16 }, /* AMPERE_B NV_GR_ALLOCATION_PARAMETERS */
++{ 0xc7c0, 16 }, /* AMPERE_COMPUTE_B NV_GR_ALLOCATION_PARAMETERS */
++{ 0xc997, 16 }, /* ADA_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xc9c0, 16 }, /* ADA_COMPUTE_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xcb97, 16 }, /* HOPPER_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xcbc0, 16 }, /* HOPPER_COMPUTE_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xcd97, 16 }, /* BLACKWELL_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xcdc0, 16 }, /* BLACKWELL_COMPUTE_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xcd40, 16 }, /* BLACKWELL_INLINE_TO_MEMORY_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xce97, 16 }, /* BLACKWELL_B NV_GR_ALLOCATION_PARAMETERS */
++{ 0xcec0, 16 }, /* BLACKWELL_COMPUTE_B NV_GR_ALLOCATION_PARAMETERS */
++{ 0x902d, 16 }, /* FERMI_TWOD_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xa140, 16 }, /* KEPLER_INLINE_TO_MEMORY_B NV_GR_ALLOCATION_PARAMETERS */
++{ 0xc597, 16 }, /* TURING_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0xc5c0, 16 }, /* TURING_COMPUTE_A NV_GR_ALLOCATION_PARAMETERS */
++{ 0x2, 32 }, /* NV01_CONTEXT_DMA NV_CONTEXT_DMA_ALLOCATION_PARAMS */
++{ 0x5, 24 }, /* NV01_EVENT NV0005_ALLOC_PARAMETERS */
++{ 0x79, 24 }, /* NV01_EVENT_OS_EVENT NV0005_ALLOC_PARAMETERS */
++{ 0x78, 24 }, /* NV01_EVENT_KERNEL_CALLBACK NV0005_ALLOC_PARAMETERS */
++{ 0x7e, 24 }, /* NV01_EVENT_KERNEL_CALLBACK_EX NV0005_ALLOC_PARAMETERS */
++{ 0xcb33, 4 }, /* NV_CONFIDENTIAL_COMPUTE NV_CONFIDENTIAL_COMPUTE_ALLOC_PARAMS */
++{ 0x50, 24 }, /* NV_CE_UTILS NV0050_ALLOCATION_PARAMETERS */
+diff --git a/hw/misc/nvfwd/host_card.c b/hw/misc/nvfwd/host_card.c
+index ad6797f..0a01901 100644
+--- a/hw/misc/nvfwd/host_card.c
++++ b/hw/misc/nvfwd/host_card.c
+@@ -8,6 +8,7 @@
+ #include <sys/ioctl.h>
+ #include "nvfwd.h"
+ #include "rm_layout.h"
++#include "rmargs.h"
+ 
+ #define IOCTL_MAGIC 'F'
+ #define CLASS_ROOT_CLIENT 0x41
+@@ -16,6 +17,8 @@
+ #define CLIENT_PARAMS_BYTES 120 /* NV0000_ALLOC_PARAMETERS */
+ #define DEVICE_PARAMS_BYTES 56  /* NV0080_ALLOC_PARAMETERS */
+ #define STATUS_INSUFFICIENT_PERMISSIONS 0x1b
++#define DRIVER_VERSION_FILE "/sys/module/nvidia/version"
++#define MOST_VERSION_BYTES 32
+ 
+ typedef struct LookupClient {
+     int control_fd;
+@@ -121,11 +124,38 @@ static const char *look_up(NvfwdState *s, const CardAddress *address)
+     return why;
+ }
+ 
++/* The loaded module's version, as the guest's driver files have to be, picks how calls are read. */
++static bool use_host_driver(NvfwdState *s, Error **errp)
++{
++    char version[MOST_VERSION_BYTES] = "";
++    FILE *f = fopen(DRIVER_VERSION_FILE, "r");
++
++    if (!f) {
++        error_setg_errno(errp, errno, "nvfwd: %s", DRIVER_VERSION_FILE);
++        return false;
++    }
++    if (!fgets(version, sizeof(version), f)) {
++        version[0] = 0;
++    }
++    fclose(f);
++    version[strcspn(version, "\n")] = 0;
++    if (!rmargs_use_driver(version)) {
++        error_setg(errp, "nvfwd: the host's driver %s is from a branch this QEMU has no tables for", version);
++        return false;
++    }
++    fprintf(s->log, "host driver %s\n", version);
++    return true;
++}
++
+ bool host_card_open(NvfwdState *s, Error **errp)
+ {
+     CardAddress address;
+     const char *why;
+ 
++    if (!use_host_driver(s, errp)) {
++        return false;
++    }
++
+     snprintf(s->card_path, sizeof(s->card_path), "/dev/nvidia%u", s->card_minor);
+     if (s->card_text && !card_parse_address(s->card_text, &address)) {
+         error_setg(errp, "nvfwd: card=%s is not a PCI address", s->card_text);
+diff --git a/hw/misc/nvfwd/rmargs.c b/hw/misc/nvfwd/rmargs.c
+index bc93134..f4b7979 100644
+--- a/hw/misc/nvfwd/rmargs.c
++++ b/hw/misc/nvfwd/rmargs.c
+@@ -47,9 +47,12 @@ static const struct control_size pinned_controls[] = {
+ struct class_size {
+     uint32_t hclass, size;
+ };
+-static const struct class_size class_sizes[] = {
++static const struct class_size class_sizes_615[] = {
+ #include "class_tables.h"
+ };
++static const struct class_size class_sizes_620[] = {
++#include "class_tables_620.h"
++};
+ 
+ struct uvm_call {
+     uint32_t cmd, size;
+@@ -62,6 +65,21 @@ static const struct uvm_call uvm_calls[] = {
+ 
+ #define ARRAY_LENGTH(a) (sizeof(a) / sizeof((a)[0]))
+ 
++/*
++ * A new driver branch can grow a class's parameters, and only the sizes of classes differ between
++ * the branches here. The first is what a call is read with until the device knows the host's.
++ */
++typedef struct Branch {
++    const char *name;
++    const struct class_size *sizes;
++    size_t count;
++} Branch;
++static const Branch branches[] = {
++    { "615", class_sizes_615, ARRAY_LENGTH(class_sizes_615) },
++    { "620", class_sizes_620, ARRAY_LENGTH(class_sizes_620) },
++};
++static const Branch *branch = &branches[0];
++
+ typedef struct Walk {
+     const RmCall *call;
+     RmField *fields;
+@@ -195,9 +213,9 @@ static void walk_control(Walk *w)
+ 
+ static uint32_t class_params_bytes(uint32_t hclass)
+ {
+-    for (size_t i = 0; i < ARRAY_LENGTH(class_sizes); i++) {
+-        if (class_sizes[i].hclass == hclass) {
+-            return class_sizes[i].size;
++    for (size_t i = 0; i < branch->count; i++) {
++        if (branch->sizes[i].hclass == hclass) {
++            return branch->sizes[i].size;
+         }
+     }
+     return 0;
+@@ -394,3 +412,16 @@ int rmargs_uvm_fields(uint32_t cmd, uint32_t len, const struct nvfwd_fix *fix, u
+     }
+     return -EPERM;
+ }
++
++bool rmargs_use_driver(const char *version)
++{
++    size_t length = strcspn(version, ".");
++
++    for (size_t i = 0; i < ARRAY_LENGTH(branches); i++) {
++        if (strlen(branches[i].name) == length && !strncmp(version, branches[i].name, length)) {
++            branch = &branches[i];
++            return true;
++        }
++    }
++    return false;
++}
+diff --git a/hw/misc/nvfwd/rmargs.h b/hw/misc/nvfwd/rmargs.h
+index 3687d71..68d413a 100644
+--- a/hw/misc/nvfwd/rmargs.h
++++ b/hw/misc/nvfwd/rmargs.h
+@@ -50,4 +50,10 @@ int rmargs_fields(const RmCall *call, RmField *fields, int *matched);
+ int rmargs_uvm_fields(uint32_t cmd, uint32_t len, const struct nvfwd_fix *fix, uint32_t nfix,
+                       RmField *fields, int *matched);
+ 
++/*
++ * Reads calls as the host's driver at `version` will, which is "615.78.08" or the like. False for
++ * a branch this device has no tables for, whose calls it can't read safely.
++ */
++bool rmargs_use_driver(const char *version);
++
+ #endif
+diff --git a/hw/misc/nvfwd/rusd.c b/hw/misc/nvfwd/rusd.c
+index d4bf6df..9f72ef1 100644
+--- a/hw/misc/nvfwd/rusd.c
++++ b/hw/misc/nvfwd/rusd.c
+@@ -16,8 +16,11 @@
+ #include <sys/mman.h>
+ #include <unistd.h>
+ 
+-/* Every offset below was read from this version's cl00de.h. Another driver may move them. */
+-#define DRIVER_VERSION "615.78.08"
++/*
++ * Every offset below was read from cl00de.h, which is the same at each of these versions. Another
++ * driver may move them.
++ */
++static const char *const known_versions[] = { "615.78.08", "620.70.06" };
+ #define DRIVER_VERSION_FILE "/sys/module/nvidia/version"
+ 
+ #define IOCTL_MAGIC 'F'
+@@ -163,7 +166,14 @@ static bool driver_matches(void)
+         fclose(f);
+     }
+     version[strcspn(version, "\n")] = 0;
+-    return !strcmp(version, DRIVER_VERSION);
++    for (size_t i = 0; i < sizeof(known_versions) / sizeof(known_versions[0]); i++) {
++        if (!strcmp(version, known_versions[i])) {
++            return true;
++        }
++    }
++    fprintf(stderr, "rusd: host driver %s is not one whose sensor page is known, so no sensor page\n",
++            version);
++    return false;
+ }
+ 
+ static int attach_card(Rusd *r, const RusdCard *card)
+@@ -240,7 +250,6 @@ Rusd *rusd_open(int page_fd, const RusdCard *card)
+     Rusd *r;
+ 
+     if (!driver_matches()) {
+-        fprintf(stderr, "rusd: host driver is not %s, so no sensor page\n", DRIVER_VERSION);
+         return NULL;
+     }
+     r = calloc(1, sizeof(*r));
+-- 
+2.56.0
+

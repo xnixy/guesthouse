@@ -287,6 +287,13 @@ impl SpaceVm {
         let Some(fence_ibs) = &self.fence_ibs else {
             return Err(io::Error::other("no fence writers were made here"));
         };
+        // As in `run`: nothing more is sent to a space whose work has faulted.
+        if let Some(fault) = self.faults.look(&self.file) {
+            return Err(io::Error::other(format!(
+                "work here reached {:#x}, where nothing is mapped (fault status {:#x}), so nothing more is sent",
+                fault.address, fault.status
+            )));
+        }
         let context = context_for(&mut self.contexts, &self.file, ip_type)?;
         let retired = Syncobj::create(&self.file).map_err(|error| step("making a sync object", error))?;
         // The guest doesn't say which buffers the work uses, so it may use any mapped here.

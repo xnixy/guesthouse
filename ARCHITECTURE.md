@@ -108,7 +108,7 @@ If you find yourself wanting to name a vendor in `core`, something belongs in a 
 
 `backend-nvidia` goes through `rm::Rm` for everything it asks of the host's driver. `rm/linux.rs` is the real one and `rm/fake.rs` plays its part in tests, so the whole crate can be tested with no card.
 
-`backend-amd` goes through amdgpu's render node. Each guest address space gets its own VM on the card, every submission names the buffers its space holds so amdgpu keeps them in place while it runs, and tiled frames reach the screen through a copy on the card's DMA engine. A frame for the viewer's ring is a copy to a surface of the slot's shape: one plain DMA copy when both have the same pitch, as the CPU reads video memory slowly, and otherwise the screen's way. The display driver's slots are linear buffers made with CPU access, so the CPU reads their stamps.
+`backend-amd` goes through amdgpu's render node. Each guest address space gets its own VM on the card, every submission names the buffers its space holds so amdgpu keeps them in place while it runs, and tiled frames reach the screen through a copy on the card's DMA engine. A frame for the viewer's ring is a copy to a surface of the slot's shape: one plain DMA copy when both have the same pitch, as the CPU reads video memory slowly, and otherwise the screen's way. The display driver's slots are linear buffers made with CPU access, so the CPU reads their stamps. The card writes each run's fence itself, as the run's last packet, so nothing in the daemon waits for a run.
 
 ## Frames
 
@@ -134,7 +134,7 @@ The rules:
 Different cards and drivers differ in different ways, and those ways shouldn't get tangled. A backend is built from these parts:
 
 - **Vendor.** The backend crate itself.
-- **Generation.** A small profile of what an architecture changes: class numbers, channel types, shader version rules, which engines get a node and what the record says of them. Blackwell has run, and Ada, Ampere and Turing are there to try. Their video nodes are listed and take no work yet. A card with no profile is refused.
+- **Generation.** A small profile of what an architecture changes: class numbers, channel types, shader version rules, which engines get a node and what the record says of them. Blackwell has run, and so have Ada, Ampere and Turing (the 16 series), which are still labelled experimental. Video has only been tested on the 50 series so far. A card with no profile is refused.
 - **Driver branch.** A second profile, beside generations, of what a driver branch changes in its data layouts: control and allocation structure sizes on the host, and the layout of the guest's record.
 
 Generations and branches stay separate, so they never multiply into a matrix of every generation with every branch. `Backend::open` is where a backend picks one of each. Nothing in the trait is per-generation or per-branch, so all of this stays inside the backend. In `backend-nvidia` they're in `profile/`: `host.rs` for the host's branch, `guest.rs` for the guest's, and `generation.rs`.

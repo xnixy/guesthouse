@@ -16,13 +16,18 @@ My card is the integrated Radeon in a Ryzen 9 9950X3D: RDNA2, 1002:13C0, on Fedo
 | OpenGL in a window | works, 4.6 compatibility and 3.3 core, 0 wrong pixels, about 100 to 110 fps |
 | Hardware video decode | not yet, it falls back to the CPU |
 
-Testers have run it on these too, on CachyOS with Mesa 26.2:
+Testers have run it on these too:
 
 | Card | How it went |
 |---|---|
-| RX 7900 XTX, RDNA3 | installs, display driver at 1920x1080 144 Hz, basic 3D works |
-| RX 6600 XT, RDNA2 | works: OpenGL games and Edge on the GPU. One old Direct3D 9 game shows stripes |
-| RX 6900 XT, RDNA2 | on 0.3.0 the display driver failed and Windows stayed on its basic display. Not tried on 0.4.0 yet |
+| RX 9070 XT, RDNA4 | works: Windows, 3ds Max and Superposition |
+| RX 7900 XTX, RDNA3 | installs, display driver at 1920x1080 144 Hz, all four graphics APIs start |
+| RX 6900 XT, RDNA2 | works |
+| RX 6700 XT, RDNA2 | works |
+| RX 6700, RDNA2 | works |
+| RX 6600 XT, RDNA2 | works: OpenGL games and Edge on the GPU |
+
+On an RX 9070 XT, Superposition at 720p Low reaches 65% of the same card on the host, and 4K Optimized 72%. That's on main, in the next release. [#118](https://github.com/xnixy/guesthouse/issues/118) has the rest.
 
 ## Setting it up
 
@@ -34,9 +39,9 @@ A machine made for AMD stays on AMD. It can move to another AMD card while it's 
 
 ## Other AMD cards
 
-Other RX 6000 and RX 7000 cards should work like the ones above. RX 5000 cards use the same driver package as the RX 6000s, but nobody has tried one. RDNA4 cards, the RX 9000 series, lay out their memory differently, and the copies to the screen don't handle that yet. Older cards like Polaris aren't handled.
+Other RX 6000, RX 7000 and RX 9000 cards should work like the ones above. RX 5000 cards use the same driver package as the RX 6000s, but nobody has tried one. Older cards like Polaris aren't handled.
 
-If you have an AMD card and want to help, [#1](https://github.com/xnixy/guesthouse/issues/1) is the place.
+If you have an AMD card, open an issue to say how it went.
 
 ## Linux guests on AMD
 

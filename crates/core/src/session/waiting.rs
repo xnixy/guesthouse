@@ -10,13 +10,13 @@ use crate::pending::{
 use crate::session::{Answer, HeldReply, ReplyTicket};
 use crate::tables::Queue;
 use crate::timing::{HeldFor, Stage};
-use guesthouse_backend::{Backend, GuestMemory, SpaceId, UnmapRequest, WorkStart};
+use guesthouse_backend::{Backend, Doorbell, GuestMemory, SpaceId, UnmapRequest, WorkStart};
 use guesthouse_messages::Status;
 use guesthouse_messages::notice::Notice;
 use guesthouse_messages::queue::PresentToken;
 use guesthouse_messages::sync::{SignalSharedFence, SignalSyncObject, WaitOnCpu, WaitOnGpu};
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// What became of a submission.
 pub(crate) enum GpuTook {
@@ -168,7 +168,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             self.run_queue_action(action);
         } else {
             let targets = self.queue_targets(handles);
-            let deadline = Instant::now() + QUEUE_TIMEOUT;
+            let deadline = Instant::now() + self.queue_timeout();
             self.pending.push(Pending::AfterQueues { targets, deadline, action });
         }
     }
@@ -335,7 +335,13 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                     }
                     self.leave_wait(id, &signals, can_go);
                 }
-                GateStep::Ring { doorbell, fence, value } => self.ring(queue, doorbell, fence, value),
+                GateStep::Ring { doorbell, fence, value } => {
+                    if !self.ring(queue, doorbell, fence, value) {
+                        let held = GateStep::Ring { doorbell, fence, value };
+                        self.gates.get_mut(&queue).expect("just read").push_front(held);
+                        return false;
+                    }
+                }
                 GateStep::Copy { id } => {
                     if self.copy_is_active(id) {
                         self.gates.get_mut(&queue).expect("just read").push_front(GateStep::Copy { id });
@@ -373,28 +379,38 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
     }
 
-    /// Lets work run, or leaves it behind the queue's gate if there is one.
+    /// Lets work run, or leaves it behind the queue's gate if there is one. A doorbell the backend
+    /// refuses for now starts a gate, so it is rung again before anything after it on the queue.
     pub(crate) fn ring_or_hold(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) {
-        match self.gates.get_mut(&queue) {
-            Some(gate) => gate.push_back(GateStep::Ring { doorbell, fence, value }),
-            None => self.ring(queue, doorbell, fence, value),
+        let step = GateStep::Ring { doorbell, fence, value };
+        if let Some(gate) = self.gates.get_mut(&queue) {
+            gate.push_back(step);
+        } else if !self.ring(queue, doorbell, fence, value) {
+            self.gates.insert(queue, VecDeque::from([step]));
+            self.pending.push(Pending::Gate { queue });
         }
     }
 
-    fn ring(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) {
-        if let Err(error) = self.backend.ring_doorbell(queue, doorbell) {
-            log::warn!("queue {queue:#x} couldn't start its work: {error}");
-            if let Some(record) = self.queues.get_mut(&queue) {
-                record.failed = true;
+    /// Rings a doorbell. False if the backend refused it for now, and it must be rung again.
+    fn ring(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) -> bool {
+        match self.backend.ring_doorbell(queue, doorbell) {
+            Ok(Doorbell::Rung) => {
+                self.timings.mark(Stage::Rung);
+                self.pending.push(Pending::Watch { queue, fence, value, rung: Instant::now() });
             }
-            // Nothing will run, so stand in for the GPU where the guest would notice.
-            if let Err(error) = self.memory.write_u64(fence, value) {
-                log::warn!("standing in for a failed doorbell: {error}");
+            Ok(Doorbell::NotYet) => return false,
+            Err(error) => {
+                log::warn!("queue {queue:#x} couldn't start its work: {error}");
+                if let Some(record) = self.queues.get_mut(&queue) {
+                    record.failed = true;
+                }
+                // Nothing will run, so stand in for the GPU where the guest would notice.
+                if let Err(error) = self.memory.write_u64(fence, value) {
+                    log::warn!("standing in for a failed doorbell: {error}");
+                }
             }
-            return;
         }
-        self.timings.mark(Stage::Rung);
-        self.pending.push(Pending::Watch { queue, fence, value, rung: Instant::now() });
+        true
     }
 
     /// Whether queues may still be given work.
@@ -405,6 +421,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// Whether faults have stopped all of this guest's GPU work.
     pub fn gpu_work_stopped(&self) -> bool {
         self.faults.stopped()
+    }
+
+    /// How long the GPU gets before the host stops waiting for a queue.
+    fn queue_timeout(&self) -> Duration {
+        self.backend.work_patience().unwrap_or(QUEUE_TIMEOUT)
     }
 
     /// Gives up on a queue the GPU has stopped answering, and frees the guest to carry on.
@@ -518,6 +539,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         if self.pending.is_empty() {
             return self.how_soon();
         }
+        if self.pending.iter().any(|item| matches!(item, Pending::Watch { .. })) {
+            self.backend.poll_work(&mut services!(self), now);
+        }
         // The two lists swap places, so polling does not allocate.
         let spare = std::mem::take(&mut self.pending_spare);
         let mut items = std::mem::replace(&mut self.pending, spare);
@@ -599,7 +623,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 } else if self.fence_value(fence) >= value {
                     self.timings.fence_seen(now.saturating_duration_since(rung));
                     None
-                } else if now.saturating_duration_since(rung) > QUEUE_TIMEOUT {
+                } else if now.saturating_duration_since(rung) > self.queue_timeout() {
                     self.queue_timed_out(queue, fence, value, now);
                     None
                 } else {

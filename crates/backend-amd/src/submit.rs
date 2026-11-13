@@ -2,9 +2,9 @@
 //!
 //! `DRM_AMDGPU_CS` takes a context, an indirect buffer at a GPU address, and a set of chunks. This
 //! backend sends two: the IB chunk and a syncobj-out chunk, so the kernel signals a sync object when
-//! the work retires. There is no doorbell: the submission is an ioctl, and completion arrives on an
-//! eventfd armed on that sync object. That is the shape AMD forces on the backend trait, which today
-//! expects a doorbell and polls fence memory.
+//! the work retires. There is no doorbell: the submission is an ioctl. The daemon's own runs wait
+//! for it on an eventfd armed on that sync object. A guest's run isn't waited for: it ends by
+//! writing the guest's fence, see `fence_ib`, and its sync object is only looked at afterwards.
 //!
 //! A buffer with a GPU address in this file's VM is not kept there for a submission by that alone:
 //! only buffers made for the VM itself are, and a space's are taken in from another open. amdgpu can
@@ -63,6 +63,12 @@ const CS_REQUEST_SIZE: usize = 24;
 // drm_syncobj_create / _destroy, 8 bytes.
 const SYNCOBJ_HANDLE: usize = 0;
 const SYNCOBJ_REQUEST_SIZE: usize = 8;
+
+// drm_syncobj_wait, 32 bytes: a pointer to the handles, a time to wait until, how many handles, flags,
+// and which one was signalled first. A time of 0 is already past, so the call only looks.
+const WAIT_HANDLES: usize = 0;
+const WAIT_COUNT: usize = 16;
+const WAIT_REQUEST_SIZE: usize = 32;
 
 // drm_syncobj_eventfd, 24 bytes: handle, flags, point (u64), fd (s32), pad.
 const EVENTFD_HANDLE: usize = 0;
@@ -127,6 +133,19 @@ impl Syncobj {
         put32(&mut request, EVENTFD_FD, event.as_raw_fd() as u32);
         ioctl::drm_ioctl(file, call::syncobj_eventfd(), &mut request)?;
         Ok(event)
+    }
+
+    /// Whether the kernel has signalled it, without waiting. A submission must have named it.
+    pub fn signalled(&self, file: &impl AsRawFd) -> io::Result<bool> {
+        let handles = [self.handle];
+        let mut request = [0u8; WAIT_REQUEST_SIZE];
+        put64(&mut request, WAIT_HANDLES, handles.as_ptr() as u64);
+        put32(&mut request, WAIT_COUNT, 1);
+        match ioctl::drm_ioctl(file, call::syncobj_wait(), &mut request) {
+            Ok(()) => Ok(true),
+            Err(error) if error.raw_os_error() == Some(libc::ETIME) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn destroy(&self, file: &impl AsRawFd) {

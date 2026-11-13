@@ -28,7 +28,7 @@ pub use pci_address::PciAddress;
 pub use types::*;
 
 use std::os::fd::OwnedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Everything a GPU vendor must provide.
 ///
@@ -198,6 +198,12 @@ pub trait Backend: Sized {
         None
     }
 
+    /// How long started work may take before its queue is given up. `None` leaves it to the core.
+    /// A backend whose card can be slow without being stuck says more here.
+    fn work_patience(&self) -> Option<Duration> {
+        None
+    }
+
     /// Prepares work without letting it run. [`WorkStart::Finished`] says nothing reached the GPU,
     /// and [`WorkStart::Ran`] that it all ran already. Either way the backend has done what the guest
     /// would otherwise wait for, except the queue's fence.
@@ -206,7 +212,14 @@ pub trait Backend: Sized {
     /// Lets prepared work run. The core delays this while a queue waits on a fence. A backend whose
     /// submission is a call that can fail says so here: nothing then runs, the core stands in for the
     /// GPU at the queue's fence, and the queue stops as if [`WorkStart::QueueFailed`] had come back.
-    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<(), BackendError>;
+    /// A call that is only refused for now answers [`Doorbell::NotYet`], and the core rings again
+    /// soon, holding the queue's later work behind it.
+    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<Doorbell, BackendError>;
+
+    /// Looks at work the GPU was given, while the core waits for queues to reach their fences. For a
+    /// backend whose driver can end work early, as when it resets a hung engine, without the GPU
+    /// writing the fence: it stands in at the fence then, as the work will never get there.
+    fn poll_work(&mut self, _host: &mut dyn HostServices, _now: Instant) {}
 
     /// A hardware queue has gone, so whatever backs it can go too.
     fn close_queue(&mut self, queue: u32);

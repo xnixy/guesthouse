@@ -41,10 +41,10 @@ use answers::registry::AdapterRegistry;
 use channel::{ListChannel, VideoEngine};
 use encode_sessions::EncodeSessions;
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, DriverSurvey, GpuRange, GuestBooks, HostServices,
-    MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName, RegistryValue, Setup, SlotCopy,
-    SpaceId, StagingCopy, StagingStart, StandardSurface, Status, SurfaceShape, UnmapRequest, VendorQuery,
-    Work, WorkStart,
+    AdapterFacts, AllocationShape, Backend, BackendError, Doorbell, DriverSurvey, GpuRange, GuestBooks,
+    HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName, RegistryValue, Setup,
+    SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status, SurfaceShape, UnmapRequest,
+    VendorQuery, Work, WorkStart,
 };
 use inf::{INF_NAME, Inf, read_infs};
 use profile::{
@@ -593,9 +593,9 @@ impl<R: Rm + OpenRm> Backend for NvidiaBackend<R> {
     }
 
     /// Writing a doorbell can't fail.
-    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<(), BackendError> {
+    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<Doorbell, BackendError> {
         self.ring(queue, doorbell);
-        Ok(())
+        Ok(Doorbell::Rung)
     }
 
     fn close_queue(&mut self, queue: u32) {

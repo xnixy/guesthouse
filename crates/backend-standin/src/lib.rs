@@ -14,8 +14,8 @@ mod memory;
 mod random_messages;
 
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, DriverFound, DriverSurvey, GpuRange,
-    GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
+    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, Doorbell, DriverFound, DriverSurvey,
+    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
     RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status,
     SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
 };
@@ -24,7 +24,7 @@ pub use random_messages::RandomMessages;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::os::fd::OwnedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const STAND_IN_VENDOR: u16 = 0xFFFE;
 const DEFAULT_SIZE: u64 = 4096;
@@ -96,8 +96,12 @@ pub struct StandIn {
     pub copy_done: bool,
     pub work_per_submission: u32,
     pub unfinished_limit: Option<u64>,
+    /// How long work may take before its queue is given up, when the core's own time isn't wanted.
+    pub work_patience: Option<Duration>,
     /// How many submissions to come are answered with no room, as a driver refusing one for now.
     pub busy_starts: u32,
+    /// How many doorbells to come are refused for now, as a driver refusing a submission call.
+    pub refused_rings: u32,
 }
 
 #[derive(Debug, Default)]
@@ -170,7 +174,9 @@ impl StandIn {
             copy_done: false,
             work_per_submission: 1,
             unfinished_limit: None,
+            work_patience: None,
             busy_starts: 0,
+            refused_rings: 0,
         }
     }
 
@@ -469,12 +475,16 @@ impl Backend for StandIn {
         WorkStart::Started { doorbell: work.fence_value, work: self.work_per_submission }
     }
 
-    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<(), BackendError> {
+    fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<Doorbell, BackendError> {
         if self.fail_rings {
             return Err(BackendError::new("the stand-in was told to fail its doorbells"));
         }
+        if self.refused_rings > 0 {
+            self.refused_rings -= 1;
+            return Ok(Doorbell::NotYet);
+        }
         self.doorbells.push((queue, doorbell));
-        Ok(())
+        Ok(Doorbell::Rung)
     }
 
     fn close_queue(&mut self, queue: u32) {
@@ -563,6 +573,10 @@ impl Backend for StandIn {
 
     fn unfinished_work_limit(&self) -> Option<u64> {
         self.unfinished_limit
+    }
+
+    fn work_patience(&self) -> Option<Duration> {
+        self.work_patience
     }
 }
 

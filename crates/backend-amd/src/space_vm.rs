@@ -9,11 +9,12 @@
 
 use crate::device::Device;
 use crate::fault::{self, Fault};
+use crate::fence_ib::{FenceIbs, Writer};
 use crate::memory::{self, GemHandle, MapFlags};
 use crate::run_wait::{self, Patience, Waited};
 use crate::submit::{self, Context, Ib, Syncobj};
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io;
 
@@ -135,6 +136,30 @@ pub struct SpaceVm {
     contexts: HashMap<u32, Context>,
     /// Whether work here has faulted, after which nothing more is run here.
     faults: fault::Watch,
+    /// The command buffers that have the card write a fence, made on first use.
+    fence_ibs: Option<FenceIbs>,
+    /// The runs sent without waiting that the kernel hasn't been seen to retire, oldest first.
+    on_card: VecDeque<OnCard>,
+    /// The fences of runs seen to retire since they were last asked for.
+    retired: Vec<GuestFence>,
+}
+
+/// Where a run's fence is in guest memory, by guest physical address, and the value it ends with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestFence {
+    pub queue: u32,
+    pub address: u64,
+    pub value: u64,
+}
+
+/// A run on the card: the slot its fence writer is in, what the kernel signals when it retires, and
+/// the fence the run writes last.
+#[derive(Debug)]
+struct OnCard {
+    slot: usize,
+    retired: Syncobj,
+    /// None once its queue has gone, as the fence's page may then be another queue's.
+    fence: Option<GuestFence>,
 }
 
 /// How a run on the card ended.
@@ -157,6 +182,9 @@ impl SpaceVm {
             books: Books::default(),
             contexts: HashMap::new(),
             faults: fault::Watch::default(),
+            fence_ibs: None,
+            on_card: VecDeque::new(),
+            retired: Vec::new(),
         })
     }
 
@@ -202,12 +230,7 @@ impl SpaceVm {
     }
 
     fn submit_and_wait(&mut self, ip_type: u32, ibs: &[Ib], patience: Patience) -> io::Result<Ran> {
-        let context = match self.contexts.entry(ip_type) {
-            Entry::Occupied(slot) => slot.into_mut(),
-            Entry::Vacant(slot) => {
-                slot.insert(Context::create(&self.file).map_err(|error| step("making a context", error))?)
-            }
-        };
+        let context = context_for(&mut self.contexts, &self.file, ip_type)?;
         let signal = Syncobj::create(&self.file).map_err(|error| step("making a sync object", error))?;
         // The guest doesn't say which buffers the work uses, so it may use any mapped here.
         let buffers = self.books.handles();
@@ -225,6 +248,102 @@ impl SpaceVm {
         };
         signal.destroy(&self.file);
         ran
+    }
+
+    /// Writes the command buffer that has the card store `value` at `fence` when a run is through,
+    /// to go last in that run. Returns its slot with it, or `None` while every slot's run is still
+    /// on the card.
+    pub fn fence_writer(
+        &mut self,
+        alignment: u64,
+        writer: Writer,
+        fence: u64,
+        value: u64,
+    ) -> io::Result<Option<(usize, Ib)>> {
+        self.take_back_slots(false);
+        if self.fence_ibs.is_none() {
+            let made =
+                FenceIbs::make(&self.file, alignment).map_err(|error| step("making fence writers", error))?;
+            self.fence_ibs = Some(made);
+        }
+        if let Some(written) = self.fence_ibs.as_mut().and_then(|ibs| ibs.write(writer, fence, value)) {
+            return Ok(Some(written));
+        }
+        // Runs on other engines can retire before the oldest one does.
+        self.take_back_slots(true);
+        Ok(self.fence_ibs.as_mut().and_then(|ibs| ibs.write(writer, fence, value)))
+    }
+
+    /// Frees the slot of a fence writer whose run won't be sent.
+    pub fn drop_fence_writer(&mut self, slot: usize) {
+        if let Some(ibs) = &mut self.fence_ibs {
+            ibs.give_back(slot);
+        }
+    }
+
+    /// Sends command buffers already mapped here to run in order on the engine family `ip_type`,
+    /// and doesn't wait for them. The last is the fence writer in `slot`, which writes `fence`.
+    pub fn send(&mut self, ip_type: u32, ibs: &[Ib], slot: usize, fence: GuestFence) -> io::Result<()> {
+        let Some(fence_ibs) = &self.fence_ibs else {
+            return Err(io::Error::other("no fence writers were made here"));
+        };
+        // As in `run`: nothing more is sent to a space whose work has faulted.
+        if let Some(fault) = self.faults.look(&self.file) {
+            return Err(io::Error::other(format!(
+                "work here reached {:#x}, where nothing is mapped (fault status {:#x}), so nothing more is sent",
+                fault.address, fault.status
+            )));
+        }
+        let context = context_for(&mut self.contexts, &self.file, ip_type)?;
+        let retired = Syncobj::create(&self.file).map_err(|error| step("making a sync object", error))?;
+        // The guest doesn't say which buffers the work uses, so it may use any mapped here.
+        let mut buffers = self.books.handles();
+        buffers.push(fence_ibs.handle());
+        match submit::submit_all(&self.file, context, ip_type, ibs, &buffers, &retired) {
+            Ok(_) => {
+                self.on_card.push_back(OnCard { slot, retired, fence: Some(fence) });
+                Ok(())
+            }
+            Err(error) => {
+                retired.destroy(&self.file);
+                Err(error)
+            }
+        }
+    }
+
+    /// The fences of the runs the kernel has retired since this was last asked, looking at them all.
+    pub fn take_retired(&mut self) -> Vec<GuestFence> {
+        self.take_back_slots(true);
+        std::mem::take(&mut self.retired)
+    }
+
+    /// Forgets the fences of a queue that has gone.
+    pub fn forget_queue(&mut self, queue: u32) {
+        self.retired.retain(|fence| fence.queue != queue);
+        for run in &mut self.on_card {
+            run.fence = run.fence.filter(|fence| fence.queue != queue);
+        }
+    }
+
+    /// Frees the slots of runs the kernel says have retired: the oldest ones, or with `all` any.
+    fn take_back_slots(&mut self, all: bool) {
+        let Some(fence_ibs) = &mut self.fence_ibs else { return };
+        let mut still_on_card = VecDeque::new();
+        while let Some(run) = self.on_card.pop_front() {
+            // A sync object that can't be asked about is one the kernel has no run for.
+            if run.retired.signalled(&self.file).unwrap_or(true) {
+                run.retired.destroy(&self.file);
+                fence_ibs.give_back(run.slot);
+                self.retired.extend(run.fence);
+            } else if all {
+                still_on_card.push_back(run);
+            } else {
+                self.on_card.push_front(run);
+                break;
+            }
+        }
+        still_on_card.append(&mut self.on_card);
+        self.on_card = still_on_card;
     }
 
     /// Maps `length` bytes of `buffer`, a handle on `device`, from `offset`, at `address`.
@@ -284,6 +403,20 @@ impl SpaceVm {
         }
         addresses
     }
+}
+
+/// The space's context for an engine family, made on first use.
+fn context_for<'a>(
+    contexts: &'a mut HashMap<u32, Context>,
+    file: &File,
+    ip_type: u32,
+) -> io::Result<&'a Context> {
+    Ok(match contexts.entry(ip_type) {
+        Entry::Occupied(slot) => slot.into_mut(),
+        Entry::Vacant(slot) => {
+            slot.insert(Context::create(file).map_err(|error| step("making a context", error))?)
+        }
+    })
 }
 
 /// `error`, saying which step it came from.

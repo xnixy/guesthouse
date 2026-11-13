@@ -1,7 +1,7 @@
 //! A backend that answers vendor questions from the recording.
 
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, COPY_PIXEL_BYTES, DriverSurvey, GpuRange,
+    AdapterFacts, AllocationShape, Backend, BackendError, COPY_PIXEL_BYTES, Doorbell, DriverSurvey, GpuRange,
     GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
     RegistryValue, Setup, SpaceId, StagingCopy, StagingStart, Status, SurfaceShape, UnmapRequest,
     VendorQuery, Work, WorkStart,
@@ -285,8 +285,8 @@ impl Backend for RecordedAnswers {
         }
     }
 
-    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<(), BackendError> {
-        Ok(())
+    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<Doorbell, BackendError> {
+        Ok(Doorbell::Rung)
     }
 
     fn close_queue(&mut self, _queue: u32) {}

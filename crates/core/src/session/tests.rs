@@ -1775,6 +1775,24 @@ mod queues {
     }
 
     #[test]
+    fn a_doorbell_refused_for_now_is_rung_again_before_later_work() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        session.backend_mut().refused_rings = 2;
+        let context = create_context(&mut session, 0);
+        let (queue, _, fence) = create_queue(&mut session, context);
+        submit(&mut session, queue, 1);
+        submit(&mut session, queue, 2);
+        assert!(session.backend().doorbells.is_empty());
+        let _ = session.poll(Instant::now());
+        let _ = session.poll(Instant::now());
+        assert_eq!(session.backend().doorbells, [(queue, 1), (queue, 2)]);
+        assert!(!session.queues[&queue].failed);
+        assert_eq!(session.memory().read_u64(fence).unwrap(), 0, "the GPU writes the fence, not the host");
+        assert!(session.gates.is_empty());
+    }
+
+    #[test]
     fn a_gate_holds_doorbells_until_its_fence_moves() {
         let mut session = session();
         session.backend_mut().run_work = true;
@@ -2458,6 +2476,32 @@ mod address_reuse {
         destroy(&mut session, resource, &[]);
         let (_, again) = allocate(&mut session, private(0x1000));
         assert_eq!(map_within(&mut session, again, 0x800_0000, 0x900_0000), (address, SUCCESS));
+    }
+
+    #[test]
+    fn a_placed_map_avoids_an_address_whose_free_is_waiting_for_the_gpu() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        let context = create_context(&mut session, 0);
+        let (queue, _, fence) = create_queue(&mut session, context);
+        let (_, ahead) = allocate(&mut session, private(0x1000));
+        assert_eq!(map_within(&mut session, ahead, 0x2_0000_0000, 0x3_0000_0000), (0x2_0000_0000, SUCCESS));
+        let (resource, old) = allocate(&mut session, private(0x1000));
+        let (first, status) = map_within(&mut session, old, 0x800_0000, 0x900_0000);
+        assert_eq!(status, SUCCESS);
+        submit(&mut session, queue, 1);
+        destroy(&mut session, resource, &[]);
+        assert_eq!(session.deferred.len(), 1, "the free waits for the GPU");
+        // Still mapped in the backend, so the new map must go somewhere else and succeed.
+        let (_, new) = allocate(&mut session, private(0x1000));
+        let (second, status) = map_within(&mut session, new, 0x800_0000, 0x900_0000);
+        assert_eq!(status, SUCCESS);
+        assert_ne!(second, first);
+        session.memory_mut().write_u64(fence, 1).unwrap();
+        submit(&mut session, queue, 2);
+        assert!(session.deferred.is_empty());
+        let (_, again) = allocate(&mut session, private(0x1000));
+        assert_eq!(map_within(&mut session, again, 0x800_0000, 0x900_0000), (first, SUCCESS));
     }
 
     #[test]

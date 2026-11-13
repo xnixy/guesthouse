@@ -34,6 +34,7 @@ const DRM_PRIME_HANDLE_TO_FD: u64 = 0x2D;
 const DRM_PRIME_FD_TO_HANDLE: u64 = 0x2E;
 const DRM_SYNCOBJ_CREATE: u64 = 0xBF;
 const DRM_SYNCOBJ_DESTROY: u64 = 0xC0;
+const DRM_SYNCOBJ_WAIT: u64 = 0xC3;
 const DRM_SYNCOBJ_EVENTFD: u64 = 0xCF;
 
 // amdgpu's own ioctls, at DRM_COMMAND_BASE plus the driver's command number.
@@ -92,6 +93,9 @@ pub mod call {
     }
     pub fn syncobj_destroy() -> u64 {
         number(IOCTL_READ_WRITE, DRM_SYNCOBJ_DESTROY, 8)
+    }
+    pub fn syncobj_wait() -> u64 {
+        number(IOCTL_READ_WRITE, DRM_SYNCOBJ_WAIT, 32)
     }
     pub fn syncobj_eventfd() -> u64 {
         number(IOCTL_READ_WRITE, DRM_SYNCOBJ_EVENTFD, 24)
@@ -199,6 +203,7 @@ fn what(ioctl: u64) -> String {
         (call::prime_fd_to_handle(), "a buffer import"),
         (call::syncobj_create(), "a new sync object"),
         (call::syncobj_destroy(), "a sync object's close"),
+        (call::syncobj_wait(), "a look at a sync object"),
         (call::syncobj_eventfd(), "a sync object's eventfd"),
     ];
     match names.iter().find(|(number, _)| *number == ioctl) {
@@ -318,6 +323,7 @@ mod tests {
         assert_eq!(call::gem_close(), 0x4008_6409);
         assert_eq!(call::prime_handle_to_fd(), 0xC00C_642D);
         assert_eq!(call::syncobj_create(), 0xC008_64BF);
+        assert_eq!(call::syncobj_wait(), 0xC020_64C3);
         assert_eq!(call::syncobj_eventfd(), 0xC018_64CF);
     }
 

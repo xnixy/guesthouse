@@ -11,15 +11,16 @@
 //! it out. It is plain byte work, tested without a guest.
 //!
 //! Where the backend trait is shaped for NVIDIA and does not fit amdgpu, the mismatch is called out
-//! at the method. The chief one is submission: amdgpu's `DRM_AMDGPU_CS` is a blocking ioctl whose
-//! completion arrives on an event source, not a doorbell the trait rings. The real submission path
-//! lives in [`submit`] and is proven by the `amd-probe` binary, not by [`Backend::start_work`],
-//! which only checks the guest's private data for now.
+//! at the method. The chief one is submission: amdgpu has no doorbell, only the `DRM_AMDGPU_CS`
+//! call. So [`Backend::start_work`] gets a run ready, with a command buffer of the daemon's last
+//! that has the card write the queue's fence, and [`Backend::ring_doorbell`] makes the call. The
+//! guest's fence then moves when the card is through, as the core expects of a GPU.
 
 mod channel_order;
 mod copy_ib;
 mod device;
 mod fault;
+mod fence_ib;
 mod guest_dma;
 mod info;
 mod ioctl;
@@ -34,6 +35,7 @@ mod space_vm;
 mod submit;
 
 pub use device::{Device, Mapping};
+pub use fence_ib::{Writer as FenceWriter, words as fence_words, writer_for as fence_writer_for};
 pub use info::{
     CardDetails, DeviceInfo, EngineSet, Firmware, HW_IP_DMA, HW_IP_GFX, read_device_info, read_gpu_clock,
 };
@@ -55,8 +57,8 @@ use channel_order::WrittenRows;
 use copy_ib::CopyIb;
 use guest_dma::Reach;
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, DriverFound, DriverSurvey, GpuRange,
-    GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
+    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, Doorbell, DriverFound, DriverSurvey,
+    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
     RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status,
     SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
 };
@@ -64,11 +66,11 @@ use nodes::nodes;
 use run_wait::Patience;
 use screen_copy::{CopyPlan, PIXEL_BYTES};
 use sdma_copy::{LinearCopy, TiledCopy};
-use space_vm::{Origin, Ran, SpaceVm};
+use space_vm::{GuestFence, Origin, Ran, SpaceVm};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::os::fd::OwnedFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use submit::Ib;
 
 /// How this backend names the host driver's branch. There is no Windows-style branch here: the host
@@ -107,6 +109,57 @@ pub struct AmdBackend {
     copy_ib: Option<CopyIb>,
     /// How long the next run is waited for, which is less after one that hung.
     patience: Patience,
+    /// Runs the core has had prepared and not yet let go, by the doorbell that sends each.
+    prepared: HashMap<u64, PreparedRun>,
+    /// When the runs on the card were last looked at.
+    looked_at_runs: Option<Instant>,
+}
+
+/// A run ready to send: its command buffers, the fence writer in `slot` last.
+#[derive(Debug)]
+struct PreparedRun {
+    space: SpaceId,
+    ip_type: u32,
+    ibs: Vec<Ib>,
+    slot: usize,
+    fence: GuestFence,
+}
+
+/// The bytes of a fence the card writes.
+const FENCE_BYTES: u64 = size_of::<u64>() as u64;
+
+/// Sends a prepared run, if its command buffers are still mapped.
+fn send(vm: &mut SpaceVm, run: &PreparedRun) -> io::Result<()> {
+    let (_, guests) = run.ibs.split_last().expect("the fence writer is always there");
+    if let Some(ib) = vm.first_unmapped(guests) {
+        return Err(io::Error::other(format!(
+            "{:#x} for {:#x} bytes is no longer mapped",
+            ib.address, ib.bytes
+        )));
+    }
+    vm.send(run.ip_type, &run.ibs, run.slot, run.fence)
+}
+
+/// How often runs on the card are looked at for ones the kernel ended early.
+const LOOK_AT_RUNS_EVERY: Duration = Duration::from_millis(50);
+
+/// Stands in at the fence of each run the kernel retired before the card wrote it: one it reset,
+/// or cancelled after a reset. A run that went through wrote its fence before the kernel saw it end.
+fn stand_in_for_lost_runs(host: &mut dyn HostServices, retired: Vec<GuestFence>) {
+    for fence in retired {
+        let Ok(reached) = host.fence_value(fence.address) else { continue };
+        if reached >= fence.value {
+            continue;
+        }
+        log::warn!(
+            "queue {:#x}: the kernel ended a run before it wrote fence value {:#x}, so the host writes it",
+            fence.queue,
+            fence.value
+        );
+        if let Err(error) = host.write_u64(fence.address, fence.value) {
+            log::warn!("standing in for a lost run: {error}");
+        }
+    }
 }
 
 impl std::fmt::Debug for AmdBackend {
@@ -131,6 +184,8 @@ impl AmdBackend {
             cpu_views: HashMap::new(),
             copy_ib: None,
             patience: Patience::RUN,
+            prepared: HashMap::new(),
+            looked_at_runs: None,
         })
     }
 
@@ -143,7 +198,8 @@ impl AmdBackend {
         &self.device
     }
 
-    /// Copies a frame with the CPU. The work that drew it has retired, as a submission is waited for.
+    /// Copies a frame with the CPU. The core starts a copy once the queue that drew the frame has
+    /// reached its fence, so the work has retired.
     fn copy_with_cpu(&mut self, copy: &StagingCopy) -> Result<(), String> {
         let plan = CopyPlan::of(copy).ok_or("a tiled surface, or a rectangle past a surface")?;
         let source = self.cpu_address(copy.own_space, copy.source_address, plan.source_end())?;
@@ -255,7 +311,7 @@ impl AmdBackend {
     }
 
     /// Copies what `from` holds into `to`, a window at a time, by the DMA engine. The work that wrote
-    /// it has retired, as every submission is waited for.
+    /// it has retired, as the core waits for the queues that could before it moves an allocation.
     fn move_with_dma(&mut self, space: SpaceId, from: Bo, to: Bo, size: u64) -> Result<(), String> {
         let flags =
             MapFlags { readable: true, writable: true, executable: false, memory_type: MemoryType::Uncached };
@@ -566,6 +622,7 @@ impl Backend for AmdBackend {
     fn destroy_address_space(&mut self, space: SpaceId) {
         // Closing the space's open takes its VM, and all that was mapped in it, with it.
         self.spaces.remove(&space);
+        self.prepared.retain(|_, run| run.space != space);
         log::debug!("address space {space:?} closed");
     }
 
@@ -755,7 +812,7 @@ impl Backend for AmdBackend {
             log::warn!("work for node {}, which this card hasn't got", work.node);
             return WorkStart::QueueFailed;
         };
-        let ibs: Vec<Ib> = protocol::command_data::command_buffers(work.private)
+        let mut ibs: Vec<Ib> = protocol::command_data::command_buffers(work.private)
             .into_iter()
             .map(|buffer| Ib { address: buffer.address, bytes: buffer.bytes })
             .collect();
@@ -790,8 +847,31 @@ impl Backend for AmdBackend {
             return WorkStart::QueueFailed;
         }
         log::debug!("run on engine family {} in space {:?}: {:x?}", node.ip_type, work.space, ibs);
-        // The run is waited for here, so the core then completes the fence itself. A
-        // completion that arrives on its own, as amdgpu's eventfd allows, would free this thread.
+        let card = self.device.info();
+        let writer = fence_ib::writer_for(node.ip_type, card.details.gfx_version.0)
+            .filter(|_| space.vm.holds(work.fence_gpu_address, FENCE_BYTES));
+        if let Some(writer) = writer {
+            // The card writes the fence itself when the run is through, so nothing waits here.
+            let written =
+                space.vm.fence_writer(card.va_alignment, writer, work.fence_gpu_address, work.fence_value);
+            return match written {
+                Ok(Some((slot, last))) => {
+                    ibs.push(last);
+                    let doorbell = self.new_id();
+                    let fence =
+                        GuestFence { queue: work.queue, address: work.fence, value: work.fence_value };
+                    let (space, ip_type) = (work.space, node.ip_type);
+                    self.prepared.insert(doorbell, PreparedRun { space, ip_type, ibs, slot, fence });
+                    WorkStart::Started { doorbell, work: 1 }
+                }
+                Ok(None) => WorkStart::Busy,
+                Err(error) => {
+                    log::warn!("work on engine family {} not run: {error}", node.ip_type);
+                    WorkStart::QueueFailed
+                }
+            };
+        }
+        // An engine with no fence writer is waited for here, and the core then completes the fence.
         let ran = space.vm.run(node.ip_type, &ibs, self.patience);
         self.note_how_it_ran(&ran);
         match ran {
@@ -825,12 +905,61 @@ impl Backend for AmdBackend {
         }
     }
 
-    /// Where the command submission will go: amdgpu's CS call is the doorbell, and it can fail.
-    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<(), BackendError> {
-        Ok(())
+    /// amdgpu's CS call is the doorbell, and it can fail.
+    fn ring_doorbell(&mut self, _queue: u32, doorbell: u64) -> Result<Doorbell, BackendError> {
+        let Some(run) = self.prepared.remove(&doorbell) else {
+            return Err(BackendError::new("no run was prepared for this doorbell"));
+        };
+        let Some(space) = self.spaces.get_mut(&run.space) else {
+            return Err(BackendError::new("the run's address space has closed"));
+        };
+        match send(&mut space.vm, &run) {
+            Ok(()) => Ok(Doorbell::Rung),
+            // amdgpu refuses a submission while pages it lists are moving, and takes it later.
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                self.prepared.insert(doorbell, run);
+                Ok(Doorbell::NotYet)
+            }
+            Err(error) => {
+                space.vm.drop_fence_writer(run.slot);
+                Err(BackendError::new(format!("engine family {}: {error}", run.ip_type)))
+            }
+        }
     }
 
-    fn close_queue(&mut self, _queue: u32) {}
+    fn close_queue(&mut self, queue: u32) {
+        for space in self.spaces.values_mut() {
+            space.vm.forget_queue(queue);
+        }
+        let unsent: Vec<u64> = self
+            .prepared
+            .iter()
+            .filter(|(_, run)| run.fence.queue == queue)
+            .map(|(&doorbell, _)| doorbell)
+            .collect();
+        for doorbell in unsent {
+            if let Some(run) = self.prepared.remove(&doorbell)
+                && let Some(space) = self.spaces.get_mut(&run.space)
+            {
+                space.vm.drop_fence_writer(run.slot);
+            }
+        }
+    }
+
+    fn poll_work(&mut self, host: &mut dyn HostServices, now: Instant) {
+        if self.looked_at_runs.is_some_and(|last| now.saturating_duration_since(last) < LOOK_AT_RUNS_EVERY) {
+            return;
+        }
+        self.looked_at_runs = Some(now);
+        for space in self.spaces.values_mut() {
+            stand_in_for_lost_runs(host, space.vm.take_retired());
+        }
+    }
+
+    /// A run can take seconds on a small card, and several can be waiting on it.
+    fn work_patience(&self) -> Option<std::time::Duration> {
+        Some(Patience::RUN.hung)
+    }
 
     fn start_staging_copy(&mut self, _host: &mut dyn HostServices, copy: &StagingCopy) -> StagingStart {
         StagingStart::Finished(match self.copy_staging(copy) {
@@ -874,7 +1003,72 @@ impl Backend for AmdBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use guesthouse_backend::{CardLabel, DriverVersion, StartDecision, decide_start};
+    use guesthouse_backend::{
+        CardLabel, DriverVersion, GuestSpan, MemoryError, SharedSpan, StartDecision, decide_start,
+    };
+
+    /// Guest memory that holds only fences, by guest physical address.
+    #[derive(Default)]
+    struct Fences(HashMap<u64, u64>);
+
+    impl HostServices for Fences {
+        fn take_gpu_addresses(&mut self, _size: u64, _align: u64) -> Result<u64, BackendError> {
+            unreachable!()
+        }
+        fn read_at_gpu_address(&self, _space: SpaceId, _address: u64, _out: &mut [u8]) -> Option<usize> {
+            unreachable!()
+        }
+        fn shared_span(&self, _space: SpaceId, _address: u64) -> Option<SharedSpan> {
+            unreachable!()
+        }
+        fn guest_span(&self, _space: SpaceId, _address: u64) -> Option<GuestSpan> {
+            unreachable!()
+        }
+        fn read_guest_span(&self, _space: SpaceId, _address: u64, _out: &mut [u8]) -> Option<usize> {
+            unreachable!()
+        }
+        fn write_guest_span(&mut self, _space: SpaceId, _address: u64, _value: u32) -> bool {
+            unreachable!()
+        }
+        fn write_u32(&mut self, _address: u64, _value: u32) -> Result<(), MemoryError> {
+            unreachable!()
+        }
+        fn write_u64(&mut self, address: u64, value: u64) -> Result<(), MemoryError> {
+            self.0.insert(address, value);
+            Ok(())
+        }
+        fn read_guest(&self, _address: u64, _out: &mut [u8]) -> usize {
+            unreachable!()
+        }
+        fn fence_value(&self, fence: u64) -> Result<u64, MemoryError> {
+            Ok(self.0.get(&fence).copied().unwrap_or(0))
+        }
+    }
+
+    #[test]
+    fn a_run_that_ended_before_writing_its_fence_gets_it_written_by_the_host() {
+        const WRITTEN: u64 = 0x1000;
+        const LOST: u64 = 0x2000;
+        let mut host = Fences::default();
+        host.0.insert(WRITTEN, 7);
+        host.0.insert(LOST, 3);
+        let retired = vec![
+            GuestFence { queue: 1, address: WRITTEN, value: 7 },
+            GuestFence { queue: 2, address: LOST, value: 4 },
+        ];
+        stand_in_for_lost_runs(&mut host, retired);
+        assert_eq!(host.0[&WRITTEN], 7);
+        assert_eq!(host.0[&LOST], 4);
+    }
+
+    #[test]
+    fn a_fence_already_past_a_lost_run_is_left_alone() {
+        const FENCE: u64 = 0x1000;
+        let mut host = Fences::default();
+        host.0.insert(FENCE, 9);
+        stand_in_for_lost_runs(&mut host, vec![GuestFence { queue: 1, address: FENCE, value: 8 }]);
+        assert_eq!(host.0[&FENCE], 9);
+    }
 
     fn setup_for(version: &str) -> Setup {
         Setup {

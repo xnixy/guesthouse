@@ -8,7 +8,7 @@ use guesthouse_backend::SpaceId;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// How long the GPU gets before the host stops waiting for a queue.
+/// How long the GPU gets before the host stops waiting for a queue, unless the backend says.
 pub const QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a queue may wait behind a fence before going on regardless.
 pub const GATE_TIMEOUT: Duration = Duration::from_secs(10);

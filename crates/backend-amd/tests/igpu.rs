@@ -7,7 +7,7 @@
 use guesthouse_backend::Backend;
 use guesthouse_backend::{GpuRange, MapRequest, MemoryKind};
 use guesthouse_backend_amd::{
-    AmdBackend, Context, CpuAccess, DOMAIN_GTT, Device, HW_IP_DMA, MapFlags, MemoryType, Syncobj,
+    AmdBackend, Context, CpuAccess, DOMAIN_GTT, Device, HW_IP_DMA, HW_IP_GFX, MapFlags, MemoryType, Syncobj,
 };
 
 const MAGIC: u32 = 0x5EED_1234;
@@ -59,6 +59,58 @@ fn a_submission_writes_and_completes_on_an_eventfd() {
     guesthouse_backend_amd::close_buffer(&device, ib);
     guesthouse_backend_amd::close_buffer(&device, result);
     context.destroy(&device);
+}
+
+/// What a guest's run ends with: the card itself stores the queue's new fence value, all 64 bits.
+#[test]
+fn the_card_writes_a_fence_from_each_engine_that_has_a_writer() {
+    const FENCE_AT: usize = 8;
+    const VALUE: u64 = 0x0000_0001_0000_0002;
+    let Some(device) = card() else {
+        eprintln!("no AMD render node; skipping the fence proof");
+        return;
+    };
+    let info = device.info().clone();
+    let align = info.va_alignment.max(PAGE);
+    let rwx =
+        MapFlags { readable: true, writable: true, executable: true, memory_type: MemoryType::Uncached };
+    for (engine, ip_type) in [(0, HW_IP_GFX), (1, HW_IP_DMA)] {
+        let Some(writer) = guesthouse_backend_amd::fence_writer_for(ip_type, info.details.gfx_version.0)
+        else {
+            eprintln!("no fence writer for engine family {ip_type} on this card; skipping it");
+            continue;
+        };
+        let make =
+            || guesthouse_backend_amd::create_buffer(&device, PAGE, align, DOMAIN_GTT, CpuAccess::Required);
+        let (ib, fence) = (make().unwrap(), make().unwrap());
+        let ib_va = info.va_start + 0x300_000 + engine * 0x200_000;
+        let fence_va = ib_va + 0x100_000;
+        guesthouse_backend_amd::map_buffer(&device, ib, ib_va, 0, PAGE, rwx).unwrap();
+        guesthouse_backend_amd::map_buffer(&device, fence, fence_va, 0, PAGE, rwx).unwrap();
+        let mut ib_cpu = device.map_cpu(ib, PAGE as usize).unwrap();
+        let mut fence_cpu = device.map_cpu(fence, PAGE as usize).unwrap();
+        let words = guesthouse_backend_amd::fence_words(writer, fence_va + FENCE_AT as u64, VALUE);
+        ib_cpu.write_dwords(&words);
+        fence_cpu.write_dwords(&[0; 4]);
+
+        let context = Context::create(&device).unwrap();
+        let syncobj = Syncobj::create(&device).unwrap();
+        guesthouse_backend_amd::submit(&device, &context, ip_type, ib_va, (words.len() * 4) as u32, &syncobj)
+            .unwrap();
+        let event = syncobj.arm_eventfd(&device).unwrap();
+        assert!(guesthouse_backend_amd::wait_eventfd(&event, 2000).unwrap(), "did not complete");
+        assert!(syncobj.signalled(&device).unwrap(), "a retired run's sync object is signalled");
+        let wrote = [fence_cpu.read_u32(FENCE_AT), fence_cpu.read_u32(FENCE_AT + 4)];
+        assert_eq!(wrote, [VALUE as u32, (VALUE >> 32) as u32], "engine family {ip_type}");
+        assert_eq!([fence_cpu.read_u32(0), fence_cpu.read_u32(FENCE_AT + 8)], [0, 0], "and nothing else");
+
+        syncobj.destroy(&device);
+        for (buffer, va) in [(ib, ib_va), (fence, fence_va)] {
+            guesthouse_backend_amd::unmap_buffer(&device, buffer, va, PAGE).unwrap();
+            guesthouse_backend_amd::close_buffer(&device, buffer);
+        }
+        context.destroy(&device);
+    }
 }
 
 #[test]

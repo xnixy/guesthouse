@@ -21,7 +21,7 @@ Direct3D 12, Direct3D 11, Vulkan and OpenGL all run on the real card, along with
 
 Once work reaches the card it runs at full speed. Getting it there costs a few µs more than on the host. The prototype took 240 µs for that round trip.
 
-**How fast is a real program?** Superposition at 1080p Extreme in Direct3D 11 scores about **21,850** in Windows on 0.4.0, over five runs with no viewer open. The Windows build through Proton on the same PC's Linux host gets 24,606, so that's about 89%. The card is 98% busy, and I don't know yet where the rest goes ([#124](https://github.com/xnixy/guesthouse/issues/124)). OpenGL is further behind, about 12,400 against 22,810 on the host, so about 54% ([#122](https://github.com/xnixy/guesthouse/issues/122)).
+**How fast is a real program?** Superposition at 1080p Extreme in Direct3D 11 scores about **21,850** in Windows on 0.4.0, over five runs with no viewer open. The Windows build through Proton on the same PC's Linux host gets 24,606, so that's about 89%. The card is 98% busy, and I have no lead on the rest, so I take it as about what running through a VM costs. OpenGL is further behind, about 12,400 against 22,810 on the host, so about 54% ([#122](https://github.com/xnixy/guesthouse/issues/122)).
 
 I used to compare with the lowest 5090 on Unigine's leaderboard, around 31,000, and call it two thirds. That was other people's cards on native Windows, so it wasn't a fair comparison.
 
@@ -31,7 +31,7 @@ I used to compare with the lowest 5090 on Unigine's leaderboard, around 31,000, 
 
 *Dumps of the guest's real screen from an earlier version, shrunk for this page. The running shot is from an earlier run at the same settings. The result screen says "GPU: NVIDIA" because the launcher can't read the card's name yet, and its RAM line is wrong: the VM had 16 GB.*
 
-A heavy Godot test scene at 1280x720 does about 690 fps natively. In the VM the prototype does about 196 on Vulkan and 158–186 on Direct3D 12, and the Rust daemon about 240 and 333. GPU time per frame is the same as native, about 1.2 ms, so that gap isn't the GPU either.
+A heavy Godot test scene at 1280x720 does about 690 fps natively. In the VM the prototype does about 196 on Vulkan and 158–186 on Direct3D 12, and the Rust daemon about 240 and 333. GPU time per frame is the same as native, about 1.2 ms, so that gap isn't the GPU either. In Direct3D 12 it's the program's queues waiting on each other ([#175](https://github.com/xnixy/guesthouse/issues/175)).
 
 **For the best speed, run games fullscreen, and pick Direct3D 12 where a game offers it.** In a window, Direct3D 11 and OpenGL games, and Vulkan with vsync off, present through a copy the CPU has to wait on. That can cost up to half the frame rate. Fullscreen Direct3D 11 and Direct3D 12 don't, and neither does Vulkan with vsync on. [#123](https://github.com/xnixy/guesthouse/issues/123) tracks a proper fix.
 

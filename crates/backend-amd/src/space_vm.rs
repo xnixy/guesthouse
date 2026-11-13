@@ -4,7 +4,8 @@
 //! processes often place them at the same addresses, so each space opens the node again and gets a
 //! VM of its own. Memory is made on the backend's first open and taken into a space's open with a
 //! dma-buf before it is mapped there. amdgpu won't hand out adopted host pages that way, so a space
-//! adopts those pages itself. A buffer taken in is kept while any of its mappings in the space
+//! adopts those pages itself, unless they reached the first open as a dma-buf of the guest's memory
+//! file: see [`crate::udmabuf`]. A buffer taken in is kept while any of its mappings in the space
 //! are, and let go after the last.
 
 use crate::device::Device;
@@ -123,8 +124,9 @@ impl Books {
 pub enum Origin {
     /// Made on the card, and handed over as a dma-buf.
     Made,
-    /// Host pages adopted at this address, of this size, which a space adopts again.
-    HostPages { address: u64, size: u64 },
+    /// Host pages at this address, of this size. A space adopts them again by the address, or takes
+    /// them in as it does memory made on the card when the first open has them as a dma-buf.
+    HostPages { address: u64, size: u64, as_dma_buf: bool },
 }
 
 /// One space's open of the render node, and what it holds.
@@ -361,12 +363,12 @@ impl SpaceVm {
         let fresh = self.books.handle_of(buffer).is_none();
         let handle = match (self.books.handle_of(buffer), origin) {
             (Some(handle), _) => handle,
-            (None, Origin::Made) => {
+            (None, Origin::Made | Origin::HostPages { as_dma_buf: true, .. }) => {
                 let shared =
                     memory::export(device, buffer).map_err(|error| step("handing the buffer over", error))?;
                 memory::import(&self.file, &shared).map_err(|error| step("taking the buffer in", error))?
             }
-            (None, Origin::HostPages { address, size }) => {
+            (None, Origin::HostPages { address, size, as_dma_buf: false }) => {
                 memory::adopt_userptr(&self.file, address, size, false)
                     .map_err(|error| step("adopting the pages", error))?
             }

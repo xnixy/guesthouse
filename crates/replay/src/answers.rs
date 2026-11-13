@@ -1,10 +1,10 @@
 //! A backend that answers vendor questions from the recording.
 
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, COPY_PIXEL_BYTES, Doorbell, DriverSurvey, GpuRange,
-    GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
-    RegistryValue, Setup, SpaceId, StagingCopy, StagingStart, Status, SurfaceShape, UnmapRequest,
-    VendorQuery, Work, WorkStart,
+    AdapterFacts, AllocationShape, Backend, BackendError, COPY_PIXEL_BYTES, Doorbell, DriverSurvey,
+    FilePages, GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal,
+    RegistryName, RegistryValue, Setup, SpaceId, StagingCopy, StagingStart, Status, SurfaceShape,
+    UnmapRequest, VendorQuery, Work, WorkStart,
 };
 use guesthouse_backend_standin::StandIn;
 use guesthouse_messages::adapter::AdapterQuery;
@@ -151,6 +151,15 @@ impl Backend for RecordedAnswers {
 
     fn adopt_host_pages(&mut self, host_address: u64, size: u64) -> Result<MemoryId, BackendError> {
         self.inner.adopt_host_pages(host_address, size)
+    }
+
+    fn adopt_file_pages(
+        &mut self,
+        host_address: u64,
+        size: u64,
+        pages: &FilePages<'_>,
+    ) -> Result<MemoryId, BackendError> {
+        self.inner.adopt_file_pages(host_address, size, pages)
     }
 
     fn release_memory(&mut self, memory: MemoryId) {

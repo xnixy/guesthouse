@@ -21,8 +21,8 @@ pub use guesthouse_messages::Status;
 pub use guesthouse_messages::registry::RegistryName;
 pub use guesthouse_messages::standard::StandardSurface;
 pub use memory::{
-    GuestMemory, HostBuffer, MemoryError, PagesView, WINDOW_BASE, WINDOW_SIZE, in_window, window_base,
-    window_base_for,
+    FilePages, FileRange, GuestMemory, HostBuffer, MemoryError, PagesView, WINDOW_BASE, WINDOW_SIZE,
+    in_window, window_base, window_base_for,
 };
 pub use pci_address::PciAddress;
 pub use types::*;
@@ -59,6 +59,17 @@ pub trait Backend: Sized {
 
     /// Lets the GPU reach host memory that is already mapped in this process.
     fn adopt_host_pages(&mut self, host_address: u64, size: u64) -> Result<MemoryId, BackendError>;
+
+    /// The same, for host memory that is also `pages` of a file. A backend whose driver can take
+    /// the file's pages themselves does, and any other adopts the mapping as before.
+    fn adopt_file_pages(
+        &mut self,
+        host_address: u64,
+        size: u64,
+        _pages: &FilePages<'_>,
+    ) -> Result<MemoryId, BackendError> {
+        self.adopt_host_pages(host_address, size)
+    }
 
     fn release_memory(&mut self, memory: MemoryId);
 

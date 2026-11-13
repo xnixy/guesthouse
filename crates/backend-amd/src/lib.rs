@@ -33,6 +33,7 @@ mod screen_copy;
 mod sdma_copy;
 mod space_vm;
 mod submit;
+mod udmabuf;
 
 pub use device::{Device, Mapping};
 pub use fence_ib::{Writer as FenceWriter, words as fence_words, writer_for as fence_writer_for};
@@ -44,13 +45,14 @@ pub use memory::{
     CpuAccess, DOMAIN_GTT, DOMAIN_VRAM, GemHandle, MapFlags, MemoryType, set_tiling as set_buffer_tiling,
     tiling as buffer_tiling,
 };
-pub use submit::{Context, Syncobj, sdma_write_ib, submit, wait_eventfd};
+pub use submit::{Context, Ib, Syncobj, sdma_write_ib, submit, submit_all, wait_eventfd};
+pub use udmabuf::Udmabuf;
 
 // The buffer calls under harness-facing names, so a proof binary can drive the card without the
 // trait. They are the same functions the trait methods use.
 pub use memory::{
     adopt_userptr as adopt_buffer, close as close_buffer, create as create_buffer, export as export_buffer,
-    map as map_buffer, unmap as unmap_buffer,
+    import as import_buffer, map as map_buffer, unmap as unmap_buffer,
 };
 
 use channel_order::WrittenRows;
@@ -58,9 +60,9 @@ use copy_ib::CopyIb;
 use guest_dma::Reach;
 use guesthouse_backend::{
     AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, Doorbell, DriverFound, DriverSurvey,
-    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
-    RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status,
-    SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
+    FilePages, GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal,
+    RegistryName, RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface,
+    Status, SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
 };
 use nodes::nodes;
 use run_wait::Patience;
@@ -71,7 +73,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::os::fd::OwnedFd;
 use std::time::{Duration, Instant};
-use submit::Ib;
 
 /// How this backend names the host driver's branch. There is no Windows-style branch here: the host
 /// side is the Linux kernel's amdgpu.
@@ -113,6 +114,8 @@ pub struct AmdBackend {
     prepared: HashMap<u64, PreparedRun>,
     /// When the runs on the card were last looked at.
     looked_at_runs: Option<Instant>,
+    /// Makes dma-bufs of guest memory, where this user may.
+    udmabuf: Udmabuf,
 }
 
 /// A run ready to send: its command buffers, the fence writer in `slot` last.
@@ -186,6 +189,7 @@ impl AmdBackend {
             patience: Patience::RUN,
             prepared: HashMap::new(),
             looked_at_runs: None,
+            udmabuf: Udmabuf::open(),
         })
     }
 
@@ -395,7 +399,7 @@ impl AmdBackend {
         bytes: u64,
     ) -> Result<*mut u8, String> {
         let end = offset.checked_add(bytes).ok_or("too long")?;
-        if let Origin::HostPages { address: host, size } = origin {
+        if let Origin::HostPages { address: host, size, .. } = origin {
             if end > size {
                 return Err(format!("{bytes:#x} bytes at {offset:#x} run past the pages"));
             }
@@ -411,6 +415,18 @@ impl AmdBackend {
         }
         // SAFETY: the view covers `length` bytes, which is past `offset`.
         Ok(unsafe { self.cpu_views[&buffer].as_ptr().add(offset as usize) })
+    }
+
+    /// A buffer on the first open that is these pages of a file, when the kernel makes a dma-buf of
+    /// them and amdgpu takes it in.
+    fn file_pages_buffer(&mut self, size: u64, pages: &FilePages<'_>) -> Option<GemHandle> {
+        if pages.size() != size {
+            return None;
+        }
+        let shared = self.udmabuf.wrap(pages)?;
+        memory::import(&self.device, &shared)
+            .inspect_err(|error| log::debug!("amdgpu did not take in a dma-buf of guest memory: {error}"))
+            .ok()
     }
 
     fn new_id(&mut self) -> u64 {
@@ -430,7 +446,7 @@ fn ranges_fit(ranges: &[GpuRange], start: u64, end: u64) -> bool {
 fn guest_commands(memory: &HashMap<MemoryId, Bo>, space: &SpaceVm, ib: &Ib) -> Option<Vec<u32>> {
     let (buffer, offset) = space.locate(ib.address)?;
     let bo = memory.values().find(|bo| bo.handle == buffer)?;
-    let Origin::HostPages { address, size } = bo.origin else {
+    let Origin::HostPages { address, size, .. } = bo.origin else {
         return None;
     };
     if offset.checked_add(u64::from(ib.bytes))? > size {
@@ -538,7 +554,25 @@ impl Backend for AmdBackend {
         let handle = memory::adopt_userptr(&self.device, host_address, size, false)
             .map_err(|error| BackendError::new(format!("GEM_USERPTR: {error}")))?;
         let id = MemoryId(self.new_id());
-        self.memory.insert(id, Bo { handle, origin: Origin::HostPages { address: host_address, size } });
+        self.memory.insert(
+            id,
+            Bo { handle, origin: Origin::HostPages { address: host_address, size, as_dma_buf: false } },
+        );
+        Ok(id)
+    }
+
+    fn adopt_file_pages(
+        &mut self,
+        host_address: u64,
+        size: u64,
+        pages: &FilePages<'_>,
+    ) -> Result<MemoryId, BackendError> {
+        let Some(handle) = self.file_pages_buffer(size, pages) else {
+            return self.adopt_host_pages(host_address, size);
+        };
+        let id = MemoryId(self.new_id());
+        let origin = Origin::HostPages { address: host_address, size, as_dma_buf: true };
+        self.memory.insert(id, Bo { handle, origin });
         Ok(id)
     }
 

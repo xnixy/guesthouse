@@ -4,7 +4,7 @@ use crate::BackendError;
 use std::fmt;
 use std::io;
 use std::ops::Range;
-use std::os::fd::OwnedFd;
+use std::os::fd::{BorrowedFd, OwnedFd};
 
 /// Where QEMU places the shared window in guest physical memory, on a host that can address it.
 pub const WINDOW_BASE: u64 = 1 << 40;
@@ -76,6 +76,27 @@ pub struct PagesView {
     pub size: u64,
 }
 
+/// Some bytes of a file, by where they start in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileRange {
+    pub offset: u64,
+    pub length: u64,
+}
+
+/// The file behind host memory, and the parts of it that memory shows, in the order it shows them.
+#[derive(Debug, Clone)]
+pub struct FilePages<'a> {
+    pub file: BorrowedFd<'a>,
+    pub ranges: Vec<FileRange>,
+}
+
+impl FilePages<'_> {
+    /// How many bytes the ranges cover together.
+    pub fn size(&self) -> u64 {
+        self.ranges.iter().map(|range| range.length).sum()
+    }
+}
+
 /// Whether all of `length` bytes at `address` are in `window`.
 pub fn in_window(window: &Range<u64>, address: u64, length: u64) -> bool {
     address >= window.start && address.checked_add(length).is_some_and(|end| end <= window.end)
@@ -110,6 +131,13 @@ pub trait GuestMemory {
     fn map_pages(&mut self, pages: &[u64]) -> io::Result<PagesView>;
 
     fn unmap_pages(&mut self, view: PagesView);
+
+    /// The file behind `size` bytes of host memory this gave out, from [`Self::host_address`] or
+    /// [`Self::map_pages`], when it knows one. A GPU driver may take pages from the file more
+    /// cheaply than from the mapping.
+    fn file_pages(&self, _host_address: u64, _size: u64) -> Option<FilePages<'_>> {
+        None
+    }
 
     /// Copies bytes out of a view, as far as `out` goes or the view does. Returns how many.
     fn read_view(&self, view: PagesView, offset: u64, out: &mut [u8]) -> usize;

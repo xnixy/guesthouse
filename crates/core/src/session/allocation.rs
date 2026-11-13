@@ -6,7 +6,8 @@ use crate::gpu_addresses::ADDRESSES_END;
 use crate::pending::QueueAction;
 use crate::tables::{Allocation, Queue};
 use guesthouse_backend::{
-    AllocationShape, Backend, GuestMemory, MapRequest, MemoryKind, SurfaceShape, UnmapRequest,
+    AllocationShape, Backend, BackendError, GuestMemory, MapRequest, MemoryId, MemoryKind, SurfaceShape,
+    UnmapRequest,
 };
 use guesthouse_messages::address::PAGE_SIZE;
 use guesthouse_messages::allocation::{
@@ -50,6 +51,14 @@ fn standard_shape(record: &StandardRecord) -> AllocationShape {
 }
 
 impl<B: Backend, M: GuestMemory> Session<B, M> {
+    /// Lets the GPU reach guest memory mapped in this process, by its file where the memory has one.
+    fn adopt_guest_pages(&mut self, host_address: u64, size: u64) -> Result<MemoryId, BackendError> {
+        match self.memory.file_pages(host_address, size) {
+            Some(pages) => self.backend.adopt_file_pages(host_address, size, &pages),
+            None => self.backend.adopt_host_pages(host_address, size),
+        }
+    }
+
     fn shape_of(&mut self, private: &[u8]) -> AllocationShape {
         match self.standard_shape_of(private) {
             Some(shape) => shape,
@@ -375,7 +384,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
         let pages_size = align_up(size, PAGE_SIZE);
         let host_address = self.memory.host_address(address, pages_size)?;
-        let shared = self.backend.adopt_host_pages(host_address, pages_size)?;
+        let shared = self.adopt_guest_pages(host_address, pages_size)?;
         let has_mappings = !self.allocations[&handle].mappings.is_empty();
         let own = if has_mappings { Some(self.own_space()?) } else { None };
         if let (true, Some(own)) = (preserve, own) {
@@ -439,11 +448,13 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let pages: Vec<u64> = pending.iter().flatten().copied().collect();
         let allocation = self.allocations.get_mut(&request.allocation).expect("found above");
         allocation.pending_pages = None;
-        let view = self.memory.map_pages(&pages).map_err(|error| {
-            guesthouse_backend::BackendError::new(format!("mapping guest pages: {error}"))
-        })?;
+        let view = self
+            .memory
+            .map_pages(&pages)
+            .map_err(|error| BackendError::new(format!("mapping guest pages: {error}")))?;
         allocation.view = Some(view);
-        allocation.memory = Some(self.backend.adopt_host_pages(view.host_address, view.size)?);
+        let memory = self.adopt_guest_pages(view.host_address, view.size)?;
+        self.allocations.get_mut(&request.allocation).expect("found above").memory = Some(memory);
         Ok(())
     }
 }

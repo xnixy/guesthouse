@@ -4,13 +4,14 @@
 use crate::handover::Part;
 use crate::memory_files::MemoryFiles;
 use crate::slot::Slot;
-use guesthouse_backend::{GuestMemory, HostBuffer, MemoryError, PagesView, in_window};
+use guesthouse_backend::{FilePages, FileRange, GuestMemory, HostBuffer, MemoryError, PagesView, in_window};
 pub use guesthouse_backend::{WINDOW_BASE, WINDOW_SIZE, window_base};
 use guesthouse_frame_socket::sized_buffer;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::ops::Range;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::ptr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -61,7 +62,11 @@ pub struct SharedMemory {
     /// Where QEMU put it in guest physical memory: see [`window_base`].
     base: u64,
     window_size: u64,
+    /// The window's file, for a GPU driver that takes pages from the file itself.
+    window_file: File,
     ram: File,
+    /// Which parts of the RAM file each view from `map_pages` shows, by the view's address.
+    views: HashMap<u64, Vec<FileRange>>,
 }
 
 impl SharedMemory {
@@ -91,7 +96,14 @@ impl SharedMemory {
         let window = unsafe {
             libc::mmap(ptr::null_mut(), window_size as usize, flags, libc::MAP_SHARED, file.as_raw_fd(), 0)
         };
-        Ok(Self { window: check(window)?.cast(), base: window_base(), window_size, ram })
+        Ok(Self {
+            window: check(window)?.cast(),
+            base: window_base(),
+            window_size,
+            window_file: file.try_clone()?,
+            ram,
+            views: HashMap::new(),
+        })
     }
 
     fn window_range(&self) -> Range<u64> {
@@ -179,25 +191,40 @@ impl GuestMemory for SharedMemory {
         let base =
             check(unsafe { libc::mmap(ptr::null_mut(), size as usize, libc::PROT_NONE, reserve, -1, 0) })?;
         let view = PagesView { host_address: base as u64, size };
+        let mut shown = Vec::new();
         let mut index = 0;
         while index < pages.len() {
             let run = 1 + pages[index..]
                 .windows(2)
                 .take_while(|pair| pair[0].checked_add(1) == Some(pair[1]))
                 .count();
-            let result = map_run(base, index, run, fd, pages[index]);
-            if let Err(error) = result {
-                self.unmap_pages(view);
-                return Err(error);
+            match map_run(base, index, run, fd, pages[index]) {
+                Ok(range) => shown.push(range),
+                Err(error) => {
+                    self.unmap_pages(view);
+                    return Err(error);
+                }
             }
             index += run;
         }
+        self.views.insert(view.host_address, shown);
         Ok(view)
     }
 
     fn unmap_pages(&mut self, view: PagesView) {
+        self.views.remove(&view.host_address);
         // SAFETY: the view came from `map_pages`, and the caller has stopped using it.
         unsafe { libc::munmap(view.host_address as *mut libc::c_void, view.size as usize) };
+    }
+
+    fn file_pages(&self, host_address: u64, size: u64) -> Option<FilePages<'_>> {
+        let window = self.window as u64;
+        if in_window(&(window..window + self.window_size), host_address, size) {
+            let range = FileRange { offset: host_address - window, length: size };
+            return Some(FilePages { file: self.window_file.as_fd(), ranges: vec![range] });
+        }
+        let pages = FilePages { file: self.ram.as_fd(), ranges: self.views.get(&host_address)?.clone() };
+        (pages.size() == size).then_some(pages)
     }
 
     fn read_view(&self, view: PagesView, offset: u64, out: &mut [u8]) -> usize {
@@ -226,17 +253,18 @@ impl GuestMemory for SharedMemory {
     }
 }
 
-/// Maps `run` consecutive guest pages over part of a reservation.
-fn map_run(base: *mut libc::c_void, index: usize, run: usize, fd: i32, page: u64) -> io::Result<()> {
+/// Maps `run` consecutive guest pages over part of a reservation. Returns where they are in the file.
+fn map_run(base: *mut libc::c_void, index: usize, run: usize, fd: i32, page: u64) -> io::Result<FileRange> {
     let offset = page.checked_mul(PAGE_SIZE).and_then(ram_offset);
     let offset = offset
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("page {page:#x} is not RAM")))?;
     let at = base.wrapping_byte_add(index * PAGE_SIZE as usize);
     let protection = libc::PROT_READ | libc::PROT_WRITE;
     let flags = libc::MAP_SHARED | libc::MAP_FIXED;
+    let length = run * PAGE_SIZE as usize;
     // SAFETY: `at` lies inside the reservation made by `map_pages`, which nothing else uses.
-    let done = unsafe { libc::mmap(at, run * PAGE_SIZE as usize, protection, flags, fd, offset as i64) };
-    check(done).map(|_| ())
+    let done = unsafe { libc::mmap(at, length, protection, flags, fd, offset as i64) };
+    check(done).map(|_| FileRange { offset, length: length as u64 })
 }
 
 #[cfg(test)]
@@ -363,6 +391,40 @@ mod tests {
         assert_eq!(memory.read_view(view, 2 * PAGE_SIZE - 2, &mut out), 2);
         assert_eq!(memory.read_view(view, 3 * PAGE_SIZE, &mut out), 0);
         memory.unmap_pages(view);
+        fs::remove_file(window).unwrap();
+        fs::remove_file(ram).unwrap();
+    }
+
+    #[test]
+    fn window_memory_is_one_range_of_the_window_file() {
+        let window = temporary_file("file-pages-window", &[0; 0x3000]);
+        let memory = window_only(&window);
+        let host = memory.host_address(window_base() + 0x1000, 0x2000).unwrap();
+        let pages = memory.file_pages(host, 0x2000).unwrap();
+        assert_eq!(pages.ranges, [FileRange { offset: 0x1000, length: 0x2000 }]);
+        assert_eq!(pages.file.as_raw_fd(), memory.window_file.as_raw_fd());
+        assert!(memory.file_pages(host, 0x2001).is_none(), "past the end of the window");
+        assert!(memory.file_pages(0x1000, 0x1000).is_none(), "memory this never gave out");
+        fs::remove_file(window).unwrap();
+    }
+
+    #[test]
+    fn a_view_is_the_runs_of_the_ram_file_it_shows_in_its_own_order() {
+        let window = temporary_file("file-pages-view-window", &[0; 8]);
+        let ram = temporary_file("file-pages-view-ram", &vec![0; 6 * PAGE_SIZE as usize]);
+        let mut memory = SharedMemory::new(&open(&window), open(&ram)).unwrap();
+        let view = memory.map_pages(&[4, 5, 1]).unwrap();
+        let pages = memory.file_pages(view.host_address, view.size).unwrap();
+        let expected = [
+            FileRange { offset: 4 * PAGE_SIZE, length: 2 * PAGE_SIZE },
+            FileRange { offset: PAGE_SIZE, length: PAGE_SIZE },
+        ];
+        assert_eq!(pages.ranges, expected);
+        assert_eq!(pages.file.as_raw_fd(), memory.ram.as_raw_fd());
+        assert!(memory.file_pages(view.host_address, PAGE_SIZE).is_none(), "only a whole view");
+        assert!(memory.file_pages(view.host_address + PAGE_SIZE, PAGE_SIZE).is_none());
+        memory.unmap_pages(view);
+        assert!(memory.file_pages(view.host_address, view.size).is_none(), "the view is gone");
         fs::remove_file(window).unwrap();
         fs::remove_file(ram).unwrap();
     }

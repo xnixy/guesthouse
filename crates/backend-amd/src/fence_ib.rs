@@ -42,23 +42,28 @@ const GCR_GL2_WB: u32 = 1 << 21;
 const GCR_SEQ: u32 = 1 << 22;
 const CACHE_POLICY_BYPASS: u32 = 3 << 25;
 const FLUSH_CACHES: u32 = GCR_SEQ | GCR_GL2_WB | GCR_GLM_INV | GCR_GLM_WB | CACHE_POLICY_BYPASS;
+/// GFX 12's fence leaves out the two GLM actions and keeps the rest.
+const FLUSH_CACHES_GFX12: u32 = FLUSH_CACHES & !(GCR_GLM_INV | GCR_GLM_WB);
 const DATA_64_BIT: u32 = 2 << 29;
 const SEND_DATA_AFTER_WRITE_CONFIRM: u32 = 3 << 24;
 
 /// How an engine is told to store a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Writer {
-    /// The graphics and compute engines, at end of pipe.
+    /// The graphics and compute engines of GFX 10 and 11, at end of pipe.
     EndOfPipe,
+    /// The same packet for GFX 12, whose own fence has no GLM cache actions.
+    EndOfPipeGfx12,
     /// The DMA engine's write packet.
     Dma,
 }
 
 /// How this engine writes a fence, or `None` if this card's way isn't known here. The end-of-pipe
-/// packet is the one for GFX 10 and 11.
+/// packet is the one for GFX 10 to 12.
 pub fn writer_for(ip_type: u32, gfx_major: u32) -> Option<Writer> {
     match ip_type {
         HW_IP_GFX | HW_IP_COMPUTE if matches!(gfx_major, 10 | 11) => Some(Writer::EndOfPipe),
+        HW_IP_GFX | HW_IP_COMPUTE if gfx_major == 12 => Some(Writer::EndOfPipeGfx12),
         HW_IP_DMA => Some(Writer::Dma),
         _ => None,
     }
@@ -68,9 +73,13 @@ pub fn writer_for(ip_type: u32, gfx_major: u32) -> Option<Writer> {
 pub fn words(writer: Writer, fence: u64, value: u64) -> [u32; SLOT_WORDS] {
     let (low, high) = (value as u32, (value >> 32) as u32);
     match writer {
-        Writer::EndOfPipe => [
+        Writer::EndOfPipe | Writer::EndOfPipeGfx12 => [
             PACKET3 | (RELEASE_MEM_WORDS - 1) << PACKET3_COUNT_SHIFT | RELEASE_MEM << PACKET3_OPCODE_SHIFT,
-            FLUSH_CACHES | EVENT_CACHE_FLUSH_AND_INV_TS | EVENT_INDEX_TS,
+            match writer {
+                Writer::EndOfPipeGfx12 => FLUSH_CACHES_GFX12,
+                _ => FLUSH_CACHES,
+            } | EVENT_CACHE_FLUSH_AND_INV_TS
+                | EVENT_INDEX_TS,
             DATA_64_BIT | SEND_DATA_AFTER_WRITE_CONFIRM,
             fence as u32,
             (fence >> 32) as u32,
@@ -171,6 +180,17 @@ mod tests {
     }
 
     #[test]
+    fn the_gfx12_writer_is_the_same_packet_without_the_two_glm_cache_actions() {
+        let (before, after) =
+            (words(Writer::EndOfPipe, FENCE, VALUE), words(Writer::EndOfPipeGfx12, FENCE, VALUE));
+        assert_eq!(before[1] & !after[1], GCR_GLM_INV | GCR_GLM_WB);
+        assert_eq!(before[1] & after[1], after[1]);
+        assert_eq!(before[1] & !(1 << 12 | 1 << 13), after[1]);
+        assert_eq!(before[0], after[0]);
+        assert_eq!(before[2..], after[2..]);
+    }
+
+    #[test]
     fn the_dma_writer_stores_both_halves_and_fills_the_slot() {
         let words = words(Writer::Dma, FENCE, VALUE);
         assert_eq!(words[1..3], [0x3456_7008, 0x12]);
@@ -184,7 +204,10 @@ mod tests {
         assert_eq!(writer_for(HW_IP_GFX, 10), Some(Writer::EndOfPipe));
         assert_eq!(writer_for(HW_IP_COMPUTE, 11), Some(Writer::EndOfPipe));
         assert_eq!(writer_for(HW_IP_GFX, 9), None);
-        assert_eq!(writer_for(HW_IP_GFX, 12), None);
+        assert_eq!(writer_for(HW_IP_GFX, 12), Some(Writer::EndOfPipeGfx12));
+        assert_eq!(writer_for(HW_IP_COMPUTE, 12), Some(Writer::EndOfPipeGfx12));
+        assert_eq!(writer_for(HW_IP_GFX, 13), None);
+        assert_eq!(writer_for(HW_IP_COMPUTE, 13), None);
         assert_eq!(writer_for(HW_IP_DMA, 12), Some(Writer::Dma));
     }
 

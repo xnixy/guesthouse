@@ -4,7 +4,8 @@
 //! A guest's OpenGL window draws into a tiled surface and presents it as a copy to a linear one.
 //! The CPU can't read a tiled layout in order, but the DMA engine's sub-window copy can: given the
 //! surface's swizzle mode it walks the tiles itself. The packet is the open one that Mesa's RADV
-//! sends on SDMA 5 and 6 (GFX10 to GFX11), with the engine's default cache policy.
+//! sends on SDMA 5 and 6 (GFX10 to GFX11), with the engine's default cache policy. GFX12's engine
+//! (SDMA 7) takes the same packet with a different info dword and a cache policy in the last one.
 
 use crate::protocol::tiling::{GfxVersion, Layout};
 use crate::screen_copy::{CopyPlan, PIXEL_BYTES};
@@ -30,11 +31,23 @@ const ELEMENT_SIZE_LOG2: u32 = PIXEL_BYTES.trailing_zeros();
 const MAX_SIDE: u32 = 1 << 14;
 /// Swizzle modes 1 to 27 are the tiled ones on GFX10 and GFX11. 0 is linear.
 const LAST_SWIZZLE_MODE: u32 = 27;
+/// GFX12's tiled modes that are copied: the 2D ones, 1 to 4. 5 to 7 are 3D, and 0 is linear.
+const LAST_SWIZZLE_MODE_GFX12: u32 = 4;
 
 /// The side of a swizzle mode's block, in 4-byte pixels, for a 2D surface. Blocks are square at this
-/// pixel size: 256 bytes are 8 by 8, 4 KiB 32 by 32, and 64 KiB 128 by 128. Modes 12 to 15 are the
-/// variable-size ones GFX10 and GFX11 don't have.
-fn block_side(swizzle_mode: u32) -> Option<u64> {
+/// pixel size. On GFX10 and GFX11 256 bytes are 8 by 8, 4 KiB 32 by 32, and 64 KiB 128 by 128; modes
+/// 12 to 15 are the variable-size ones they don't have. GFX12 has 256 bytes, 4 KiB, 64 KiB and
+/// 256 KiB, which are 8, 32, 128 and 256 pixels a side.
+fn block_side(swizzle_mode: u32, gfx: GfxVersion) -> Option<u64> {
+    if gfx.0 >= 12 {
+        return match swizzle_mode {
+            1 => Some(8),
+            2 => Some(32),
+            3 => Some(128),
+            4 => Some(256),
+            _ => None,
+        };
+    }
     match swizzle_mode {
         1..=3 => Some(8),
         4..=7 | 20..=23 => Some(32),
@@ -44,8 +57,8 @@ fn block_side(swizzle_mode: u32) -> Option<u64> {
 }
 
 /// The bytes a tiled surface fills: whole blocks across its rows and down its height.
-pub fn surface_bytes(pitch_bytes: u32, height: u32, swizzle_mode: u32) -> Option<u64> {
-    let side = block_side(swizzle_mode)?;
+pub fn surface_bytes(pitch_bytes: u32, height: u32, swizzle_mode: u32, gfx: GfxVersion) -> Option<u64> {
+    let side = block_side(swizzle_mode, gfx)?;
     let across = (u64::from(pitch_bytes) / PIXEL_BYTES).div_ceil(side);
     let down = u64::from(height).div_ceil(side);
     Some(across * down * side * side * PIXEL_BYTES)
@@ -111,6 +124,21 @@ fn pad(commands: &mut Vec<u32>) {
     }
 }
 
+/// Which engine's form of the tiled packet to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TiledForm {
+    /// SDMA 5 and 6, GFX10 and GFX11.
+    Sdma5,
+    /// SDMA 7, GFX12: no resource dimension in the info dword, and a cache policy in the last.
+    Sdma7,
+}
+
+/// The memory cache policy field for non-temporal, as the last dword of an SDMA 7 packet has it for
+/// each side.
+const POLICY_NON_TEMPORAL: u32 = 1;
+const TILED_POLICY_SHIFT: u32 = 28;
+const LINEAR_POLICY_SHIFT: u32 = 20;
+
 /// A copy of a rectangle from a tiled surface to a linear one, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TiledCopy {
@@ -118,6 +146,7 @@ pub struct TiledCopy {
     pub tiled_width: u32,
     pub tiled_height: u32,
     pub swizzle_mode: u32,
+    pub form: TiledForm,
     pub linear_address: u64,
     /// The linear surface's row length and height, in pixels.
     pub linear_pitch: u32,
@@ -139,7 +168,12 @@ impl TiledCopy {
     /// the engine reads the tiles the way the GPU wrote them only from there.
     pub fn of(copy: &StagingCopy, gfx: GfxVersion) -> Option<Self> {
         let layout = Layout::of(copy.source.tiling?);
-        let swizzle_mode = Some(layout.swizzle_mode).filter(|mode| (1..=LAST_SWIZZLE_MODE).contains(mode))?;
+        let (form, last_mode) = if gfx.0 >= 12 {
+            (TiledForm::Sdma7, LAST_SWIZZLE_MODE_GFX12)
+        } else {
+            (TiledForm::Sdma5, LAST_SWIZZLE_MODE)
+        };
+        let swizzle_mode = Some(layout.swizzle_mode).filter(|mode| (1..=last_mode).contains(mode))?;
         if copy.target.tiling.is_some() {
             return None;
         }
@@ -165,6 +199,7 @@ impl TiledCopy {
             tiled_width: copy.source.width,
             tiled_height: copy.source.height,
             swizzle_mode,
+            form,
             linear_address: copy.target_address,
             linear_pitch: u32::try_from(pitch_bytes / PIXEL_BYTES).ok().filter(|&pitch| pitch <= MAX_SIDE)?,
             linear_height: copy.target.height,
@@ -178,7 +213,15 @@ impl TiledCopy {
     /// The command buffer, padded to the engine's alignment.
     pub fn commands(&self) -> Vec<u32> {
         let header = OPCODE_COPY | SUB_OPCODE_TILED_SUB_WINDOW << SUB_OPCODE_SHIFT | DETILE;
-        let info = ELEMENT_SIZE_LOG2 | self.swizzle_mode << SWIZZLE_SHIFT | RESOURCE_2D << DIMENSION_SHIFT;
+        let mut info = ELEMENT_SIZE_LOG2 | self.swizzle_mode << SWIZZLE_SHIFT;
+        // The depth of the copy, less one, and on SDMA 7 the cache policy of each side.
+        let mut last = 0;
+        match self.form {
+            TiledForm::Sdma5 => info |= RESOURCE_2D << DIMENSION_SHIFT,
+            TiledForm::Sdma7 => {
+                last = POLICY_NON_TEMPORAL << TILED_POLICY_SHIFT | POLICY_NON_TEMPORAL << LINEAR_POLICY_SHIFT;
+            }
+        }
         let linear_slice = self.linear_pitch * self.linear_height;
         let mut commands = vec![
             header,
@@ -197,8 +240,7 @@ impl TiledCopy {
             halves(0, self.linear_pitch - 1),
             linear_slice - 1,
             halves(self.width - 1, self.height - 1),
-            // The depth of the copy, less one.
-            0,
+            last,
         ];
         pad(&mut commands);
         commands
@@ -211,6 +253,7 @@ mod tests {
     use guesthouse_backend::SpaceId;
 
     const RDNA2: GfxVersion = (10, 3);
+    const RDNA4: GfxVersion = (12, 0);
 
     fn shape(width: u32, height: u32, tiling: Option<u32>) -> SurfaceShape {
         let format = 21;
@@ -302,10 +345,42 @@ mod tests {
 
     #[test]
     fn a_tiled_surface_fills_whole_blocks() {
-        assert_eq!(surface_bytes(640 * 4, 400, 27), Some(5 * 4 * 0x10000));
-        assert_eq!(surface_bytes(64 * 4, 32, 7), Some(2 * 0x1000));
-        assert_eq!(surface_bytes(8 * 4, 9, 1), Some(2 * 0x100));
-        assert_eq!(surface_bytes(640 * 4, 400, 13), None);
+        assert_eq!(surface_bytes(640 * 4, 400, 27, RDNA2), Some(5 * 4 * 0x10000));
+        assert_eq!(surface_bytes(64 * 4, 32, 7, RDNA2), Some(2 * 0x1000));
+        assert_eq!(surface_bytes(8 * 4, 9, 1, RDNA2), Some(2 * 0x100));
+        assert_eq!(surface_bytes(640 * 4, 400, 13, RDNA2), None);
+    }
+
+    #[test]
+    fn a_gfx12_surface_fills_whole_blocks_of_its_own_sizes() {
+        assert_eq!(surface_bytes(8 * 4, 9, 1, RDNA4), Some(2 * 0x100));
+        assert_eq!(surface_bytes(64 * 4, 32, 2, RDNA4), Some(2 * 0x1000));
+        assert_eq!(surface_bytes(640 * 4, 400, 3, RDNA4), Some(5 * 4 * 0x10000));
+        assert_eq!(surface_bytes(640 * 4, 400, 4, RDNA4), Some(3 * 2 * 0x40000));
+        assert_eq!(surface_bytes(640 * 4, 400, 5, RDNA4), None);
+        assert_eq!(surface_bytes(640 * 4, 400, 27, RDNA4), None);
+    }
+
+    #[test]
+    fn gfx12_copies_only_its_2d_modes() {
+        let to_rows = shape(640, 400, None);
+        assert!(TiledCopy::of(&copy(shape(640, 400, Some(4)), to_rows), RDNA4).is_some());
+        assert!(TiledCopy::of(&copy(shape(640, 400, Some(5)), to_rows), RDNA4).is_none());
+        assert!(TiledCopy::of(&copy(shape(640, 400, Some(27)), to_rows), RDNA4).is_none());
+    }
+
+    #[test]
+    fn gfx12_has_no_dimension_and_a_cache_policy() {
+        let planned = TiledCopy::of(&copy(shape(640, 400, Some(3)), shape(640, 400, None)), RDNA4).unwrap();
+        let commands = planned.commands();
+        assert_eq!(commands.len(), 16);
+        assert_eq!(commands[0], 0x8000_0501);
+        assert_eq!(commands[1..3], [0x2345_0000, 0x1]);
+        assert_eq!(commands[6], 2 | 3 << 3);
+        assert_eq!(commands[7..9], [0, 0x2]);
+        assert_eq!(commands[12], 639 | 399 << 16);
+        assert_eq!(commands[13], 0x1010_0000);
+        assert!(commands[14..].iter().all(|&word| word == OPCODE_NOP));
     }
 
     #[test]

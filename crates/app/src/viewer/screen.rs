@@ -57,7 +57,7 @@ pub(super) struct Inner {
     pub(super) input_socket: RefCell<PathBuf>,
     pub(super) guest: RefCell<Option<Guest>>,
     pub(super) latest: RefCell<Option<gdk::Texture>>,
-    /// A frame was handed to GTK and hasn't reached the screen yet.
+    /// A frame was handed to GTK and hasn't been drawn yet.
     pub(super) waiting: Cell<bool>,
     pub(super) frames: Cell<u64>,
     pub(super) keys_down: RefCell<BTreeSet<u32>>,
@@ -213,6 +213,8 @@ impl Screen {
 
     fn on_realize(&self) {
         if let Some(clock) = self.0.root.frame_clock() {
+            let fresh = self.clone();
+            clock.connect_before_paint(move |_| fresh.freshen());
             let waiting = self.clone();
             clock.connect_after_paint(move |_| waiting.0.waiting.set(false));
         }
@@ -250,6 +252,17 @@ impl Screen {
         if self.0.followed_at.get().elapsed() >= FOLLOW_GUEST {
             self.follow_guest();
             self.0.followed_at.set(Instant::now());
+        }
+    }
+
+    /// GTK is about to draw, which can be a whole refresh after it was handed its frame: it draws when
+    /// the compositor asks, and no sooner. A frame that came since is the one to draw, or everything
+    /// on screen is a refresh older than it has to be.
+    fn freshen(&self) {
+        if self.0.waiting.get()
+            && let Some(texture) = self.next_texture()
+        {
+            self.show(texture);
         }
     }
 
@@ -323,8 +336,10 @@ impl Screen {
         self.0.picture.set_paintable(Some(&texture));
         self.0.aspect.set_ratio(texture.width() as f32 / texture.height() as f32);
         self.0.spinner.set_visible(false);
-        self.0.waiting.set(true);
-        self.0.frames.set(self.0.frames.get() + 1);
+        // One that takes the place of a frame still waiting to be drawn isn't one more on screen.
+        if !self.0.waiting.replace(true) {
+            self.0.frames.set(self.0.frames.get() + 1);
+        }
         *self.0.latest.borrow_mut() = Some(texture);
     }
 

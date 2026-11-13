@@ -531,17 +531,26 @@ impl<R: Rm> NvidiaBackend<R> {
         });
         // The doorbell for the new ring can come before the GPU has moved, and the GPU takes a
         // position below its own as the ring wrapping. What it would run past the move is the old
-        // ring's stale entries, so those go, all but the ones a submission can still be waiting on.
+        // ring's stale entries, so those go. What stays is what can still be unfinished: all of this
+        // submission's entries, however many it has, and the limit's worth of earlier ones, since
+        // the guest holds its next submission back once more than that is unfinished.
         // Holding the new ring's put until the move retires should stop that doorbell. This stays
         // as a second guard in case one gets through early.
         let old_entries = channel.ring_entries();
-        let stale = old_entries.saturating_sub(UNFINISHED_ENTRIES_LIMIT as u32);
+        let stale = Self::stale_entries(old_entries, entries);
         Self::clear_entries(host, work.space, old_ring, old_entries, end, stale);
         log::info!(
             "queue {:#x} moves to ring {ring_address:#x} of {ring_entries:#x} entries after {entries} entries ending at {end:#x}",
             work.queue
         );
         Ok(())
+    }
+
+    /// How many entries of a ring of `ring_entries` are stale when a submission of `entries` entries
+    /// ends it. The submission's own entries and the `UNFINISHED_ENTRIES_LIMIT` before them can still
+    /// be unfinished, and only what is older than those is stale.
+    fn stale_entries(ring_entries: u32, entries: u32) -> u32 {
+        ring_entries.saturating_sub(entries).saturating_sub(UNFINISHED_ENTRIES_LIMIT as u32)
     }
 
     /// Zeroes `count` entries of a ring from `from`, which makes them do nothing.
@@ -1151,6 +1160,27 @@ mod tests {
             let private = submission(NEW_RING, 3, 6, MOVE);
             let started = backend.start_work(&mut host, &ring_work(space, &private, MOVED));
             assert_eq!(started, WorkStart::QueueFailed);
+        }
+
+        #[test]
+        fn a_short_submission_leaves_the_rest_of_the_ring_stale() {
+            let kept = |entries: u32| 8192 - entries - UNFINISHED_ENTRIES_LIMIT as u32;
+            assert_eq!(NvidiaBackend::<FakeRm>::stale_entries(8192, 3), kept(3));
+            assert_eq!(NvidiaBackend::<FakeRm>::stale_entries(8192, 100), kept(100));
+        }
+
+        #[test]
+        fn a_submission_longer_than_what_is_left_leaves_nothing_stale() {
+            assert_eq!(NvidiaBackend::<FakeRm>::stale_entries(8192, 8043), 0);
+            assert_eq!(NvidiaBackend::<FakeRm>::stale_entries(8192, 4192), 0);
+            assert_eq!(NvidiaBackend::<FakeRm>::stale_entries(8192, 4191), 1);
+        }
+
+        #[test]
+        fn the_stale_count_never_underflows() {
+            assert_eq!(NvidiaBackend::<FakeRm>::stale_entries(8192, 9000), 0);
+            assert_eq!(NvidiaBackend::<FakeRm>::stale_entries(512, 3), 0);
+            assert_eq!(NvidiaBackend::<FakeRm>::stale_entries(0, 0), 0);
         }
 
         #[test]

@@ -237,6 +237,34 @@ fn a_guest_with_no_gpu_fails_the_start_says_so_and_turns_off() {
     assert_eq!(host.said(), ["start gpu", "stop 30"]);
 }
 
+/// What a start says when the daemon's output file holds `log` and the guest has no GPU.
+fn failure_with_daemon_saying(log: &str) -> String {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let vm = guest_saying(&mut context, "gpu working 0\n");
+    fs::write(context.run_folder(None).join(crate::daemon::OUTPUT_FILE), log).unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", vm);
+    boot(&mut task).unwrap_err().0
+}
+
+#[test]
+fn a_verbose_daemon_error_gives_the_same_reason_as_a_plain_one() {
+    let plain = failure_with_daemon_saying("ERROR /dev/shm/window: No such file\n");
+    let verbose = failure_with_daemon_saying(
+        "DEBUG [    4.999] Vgpu: Reset\nERROR [    5.010] /dev/shm/window: No such file\n",
+    );
+    assert_eq!(verbose, plain);
+}
+
+#[test]
+fn a_daemon_error_that_starts_with_a_bracket_but_no_time_is_kept() {
+    let said = failure_with_daemon_saying("ERROR [card 0] no memory\nERROR [12] no time\n");
+    assert!(said.contains("[12] no time"), "{said}");
+    let said = failure_with_daemon_saying("ERROR [card 0] no memory\n");
+    assert!(said.contains("[card 0] no memory"), "{said}");
+}
+
 #[test]
 fn a_guest_that_will_not_say_counts_as_having_no_gpu() {
     let scratch = Scratch::new();

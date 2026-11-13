@@ -442,6 +442,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     /// Adds to a queue's backlog, and holds the reply if too much of it is unfinished.
     ///
+    /// The reply is held while the unfinished work is over the limit or over this submission's own
+    /// work, whichever is more. The GPU may not finish a submission until the guest sends its next
+    /// one, so a submission bigger than the limit must not wait for itself. It waits only for what
+    /// was ahead of it.
+    ///
     /// A guest that fills its ring loses its device. Its thread waits for this reply, so holding it
     /// stops the ring filling. Only that thread waits, and other queues go on.
     pub(super) fn hold_if_ring_is_full(&mut self, handle: u32, value: u64, work: u32) {
@@ -450,10 +455,33 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         queue.backlog.push_back((value, work));
         queue.unfinished += u64::from(work);
         let fence = queue.fence;
-        if let Some(ticket) = self.ticket
-            && self.unfinished_work(handle) > limit
-        {
-            self.pending.push(Pending::RingRoom { queue: handle, fence, ticket, started: Instant::now() });
+        if u64::from(work) > limit {
+            log::debug!(
+                "queue {handle:#x} was given {work:#x} of work at once, over the limit of {limit:#x}"
+            );
+        }
+        if let Some(ticket) = self.ticket {
+            let unfinished = self.unfinished_work(handle);
+            let allowed = limit.max(u64::from(work));
+            if unfinished <= allowed {
+                return;
+            }
+            if u64::from(work) > limit {
+                log::debug!(
+                    "queue {handle:#x} holds its reply with {unfinished:#x} unfinished, over its own {work:#x} of work"
+                );
+            } else {
+                log::debug!(
+                    "queue {handle:#x} holds its reply with {unfinished:#x} unfinished, over the limit of {limit:#x}"
+                );
+            }
+            self.pending.push(Pending::RingRoom {
+                queue: handle,
+                fence,
+                work,
+                ticket,
+                started: Instant::now(),
+            });
             self.hold_reply();
         }
     }
@@ -546,13 +574,22 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 }
                 None
             }
-            Pending::RingRoom { queue, fence, ticket, started } => {
+            Pending::RingRoom { queue, fence, work, ticket, started } => {
                 let limit = self.backend.unfinished_work_limit().unwrap_or(u64::MAX);
-                if self.unfinished_work(queue) <= limit || now.duration_since(started) > RING_ROOM_TIMEOUT {
+                let room = self.unfinished_work(queue) <= limit.max(u64::from(work));
+                let held = now.duration_since(started);
+                if room || held > RING_ROOM_TIMEOUT {
+                    if room {
+                        log::debug!("queue {queue:#x} was held for {held:?} until the gpu caught up");
+                    } else {
+                        log::warn!(
+                            "queue {queue:#x} was held for {held:?}, and let go at the timeout with the gpu behind"
+                        );
+                    }
                     self.release_reply(ticket, started);
                     None
                 } else {
-                    Some(Pending::RingRoom { queue, fence, ticket, started })
+                    Some(Pending::RingRoom { queue, fence, work, ticket, started })
                 }
             }
             Pending::Watch { queue, fence, value, rung } => {

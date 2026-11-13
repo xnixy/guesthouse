@@ -477,8 +477,17 @@ firmware_present() {
     grep -qs '"x86_64"' "$FIRMWARE_DESCRIPTORS"/*.json
 }
 
+# The app takes any of these to make a disc. openSUSE and Arch have no genisoimage.
+iso_maker_present() {
+    for maker in genisoimage mkisofs xorrisofs; do
+        ! command -v "$maker" >/dev/null 2>&1 || return 0
+    done
+    return 1
+}
+
 need_present() {
     case $1 in
+        genisoimage) iso_maker_present ;;
         gtk) [ -n "$(library_path libgtk-4.so.1)" ] ;;
         adwaita) [ -n "$(library_path libadwaita-1.so.0)" ] ;;
         pipewire) [ -n "$(library_path libpipewire-0.3.so.0)" ] ;;
@@ -489,8 +498,8 @@ need_present() {
     esac
 }
 
-# Debian's and Arch's come from their package indexes, and Fedora's from a real system. openSUSE's are
-# from memory: it's best effort until someone tries them.
+# Debian's and Arch's come from their package indexes, and Fedora's from a real system. openSUSE's
+# disc tools are Tumbleweed's, and the rest are from memory: best effort until someone tries them.
 package_for() {
     case $FAMILY:$1 in
         fedora:gtk) say gtk4 ;;
@@ -542,7 +551,7 @@ package_for() {
         suse:qemu-img) say qemu-img ;;
         suse:firmware) say qemu-ovmf-x86_64 ;;
         suse:7z) say 7zip ;;
-        suse:genisoimage | suse:isoinfo) say genisoimage ;;
+        suse:genisoimage | suse:isoinfo) say mkisofs ;;
         suse:swtpm) say swtpm ;;
         suse:openssl) say openssl ;;
         suse:ssh-keygen) say openssh-clients ;;

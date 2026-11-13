@@ -39,6 +39,23 @@ t_gpu_machines_bring_their_tools() {
     check_said "edk2-ovmf libcap-ng 7zip genisoimage swtpm swtpm-tools openssl openssh bubblewrap gcc && "
 }
 
+t_opensuse_gets_its_own_disc_maker() {
+    release 1.0 "windows linux"
+    fake_os opensuse-tumbleweed "opensuse suse"
+    no_terminal "$SHELL_UNDER_TEST" "$(script_for 1.0)" --dry-run
+    check_exit 0
+    check_said " 7zip mkisofs swtpm "
+    check_not_said "genisoimage"
+}
+
+t_another_disc_maker_is_enough() {
+    release 1.0 "windows linux"
+    give_tools mkisofs isoinfo
+    no_terminal "$SHELL_UNDER_TEST" "$(script_for 1.0)" --dry-run
+    check_exit 0
+    check_not_said "genisoimage"
+}
+
 t_root_runs_once_and_exactly_what_was_shown() {
     release 1.0
     install_version 1.0

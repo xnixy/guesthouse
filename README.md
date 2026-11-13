@@ -6,7 +6,7 @@
 
 That's Godot on Vulkan, in Windows, in a VM on Fedora. Nothing is passed through. The host keeps the card, and my desktop keeps running on it.
 
-> **Status:** early. 0.5.1 is out. It runs well on my RTX 5090, and testers have run Windows on NVIDIA and AMD cards of their own, [listed below](#cards). AMD is newer and experimental. What works and what's next is in the [roadmap](https://github.com/xnixy/guesthouse/issues/2).
+> **Status:** early. 0.5.1 is out. It runs well on my RTX 5090, and testers have run Windows on NVIDIA and AMD cards of their own, [listed below](#cards). AMD is newer and experimental.
 
 ## Install
 
@@ -107,7 +107,7 @@ Programs in a VM get their own GPU page tables, and can't read each other's memo
 
 ## What doesn't work yet
 
-Quite a lot, and I'd rather you hear it from me. The list lives in the [roadmap](https://github.com/xnixy/guesthouse/issues/2), so it stays current. The biggest gap is how few cards have run this. If you'd like to help, run it on your card and open an issue with how it went.
+Quite a lot, and I'd rather you hear it from me. The [open issues](https://github.com/xnixy/guesthouse/issues) are the list. The biggest gap is how few cards have run this. If you'd like to help, run it on your card and open an issue with how it went.
 
 Some of the bugs on the way were good ones. [Here are my favourites](docs/bugs.md).
 

@@ -33,7 +33,7 @@ I used to compare with the lowest 5090 on Unigine's leaderboard, around 31,000, 
 
 A heavy Godot test scene at 1280x720 does about 690 fps natively. In the VM the prototype does about 196 on Vulkan and 158–186 on Direct3D 12, and the Rust daemon about 240 and 333. GPU time per frame is the same as native, about 1.2 ms, so that gap isn't the GPU either.
 
-**For the best speed, run games fullscreen, and pick Direct3D 12 where a game offers it.** In a window, Direct3D 11 and OpenGL games, and Vulkan with vsync off, present through a copy the CPU has to wait on. That can cost up to half the frame rate. Fullscreen Direct3D 11 and Direct3D 12 don't, and neither does Vulkan with vsync on. A proper fix is on the [roadmap](https://github.com/xnixy/guesthouse/issues/2).
+**For the best speed, run games fullscreen, and pick Direct3D 12 where a game offers it.** In a window, Direct3D 11 and OpenGL games, and Vulkan with vsync off, present through a copy the CPU has to wait on. That can cost up to half the frame rate. Fullscreen Direct3D 11 and Direct3D 12 don't, and neither does Vulkan with vsync on. [#123](https://github.com/xnixy/guesthouse/issues/123) tracks a proper fix.
 
 **Is the picture right?** I don't judge that by eye. These tests compare exact values, and the Vulkan and OpenGL ones check the final screen pixel by pixel:
 

@@ -2,7 +2,7 @@
 
 The Windows numbers here are from the Python prototype unless I say otherwise. The Linux numbers are from the device in this repo.
 
-The NVIDIA numbers were all measured on one machine: Ryzen 9 9950X3D, RTX 5090, Fedora 45, NVIDIA 615.78.08 on the host and 617.42 in Windows.
+The NVIDIA numbers were all measured on one machine: Ryzen 9 9950X3D, RTX 5090, Fedora 45, NVIDIA 615.78.08 on the host and 617.42 in Windows. Host driver 620 works for Windows guests too, and Linux guests still need 615.
 
 ### Windows guests
 
@@ -33,7 +33,7 @@ I used to compare with the lowest 5090 on Unigine's leaderboard, around 31,000, 
 
 A heavy Godot test scene at 1280x720 does about 690 fps natively. In the VM the prototype does about 196 on Vulkan and 158–186 on Direct3D 12, and the Rust daemon about 240 and 333. GPU time per frame is the same as native, about 1.2 ms, so that gap isn't the GPU either.
 
-**For the best speed, run games fullscreen, and pick Direct3D 12 where a game offers it.** In a window, Direct3D 11 games present through a copy the CPU has to wait on, and Vulkan always does. That can cost up to half the frame rate. Fullscreen Direct3D 11 and Direct3D 12 don't take that path. Vulkan stays on it for now. A proper fix is on the [roadmap](https://github.com/xnixy/guesthouse/issues/2).
+**For the best speed, run games fullscreen, and pick Direct3D 12 where a game offers it.** In a window, Direct3D 11 and OpenGL games, and Vulkan with vsync off, present through a copy the CPU has to wait on. That can cost up to half the frame rate. Fullscreen Direct3D 11 and Direct3D 12 don't, and neither does Vulkan with vsync on. A proper fix is on the [roadmap](https://github.com/xnixy/guesthouse/issues/2).
 
 **Is the picture right?** I don't judge that by eye. These tests compare exact values, and the Vulkan and OpenGL ones check the final screen pixel by pixel:
 
@@ -49,7 +49,7 @@ Encoding through ffmpeg comes out clean too: 300 frames each of H.264, HEVC and 
 
 ### Windows on AMD
 
-This is experimental, and so far it's only run on the integrated RDNA2 Radeon in the same Ryzen, with AMD's driver 32.0.21045.20006 in Windows. The same pixel tests pass there: the Direct3D 11 triangle matches WARP exactly, and Vulkan and OpenGL windows come out with 0 wrong pixels. My present test does about 63 fps on Vulkan and 35 on OpenGL, where each frame still waits on its copy to the screen. There's no hardware video decode yet. More in [AMD](amd.md).
+This is experimental. These numbers are from the integrated RDNA2 Radeon in the same Ryzen, with AMD's driver 32.0.21045.20006 in Windows. The same pixel tests pass there: the Direct3D 11 triangle matches WARP exactly, and Vulkan and OpenGL windows come out with 0 wrong pixels. My present test does about 63 fps on Vulkan and 35 on OpenGL, where each frame still waits on its copy to the screen. There's no hardware video decode yet. On a tester's RX 9070 XT, Superposition at 720p Low reaches 65% of the same card on the host, and 4K Optimized 72%. That's on main, in the next release. More in [AMD](amd.md).
 
 ### Linux guests
 

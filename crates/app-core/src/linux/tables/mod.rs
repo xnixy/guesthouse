@@ -6,6 +6,7 @@ mod calls;
 mod classes;
 mod controls;
 
+use super::driver_versions::branch;
 use crate::failure::{Failure, Result};
 use crate::machine::sorted_names;
 use std::fs;
@@ -14,10 +15,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const TABLE_FILES: [&str; 3] = ["nv_tables.h", "uvm_tables.h", "class_tables.h"];
-/// What the device in `qemu/` was built with: sha256 of the tables' entries. A guest's tables come from
-/// the driver the host has now, but the device's were fixed when QEMU was built. If a driver moves a
-/// field the device checks, the two would disagree on what a call holds.
-const DEVICE_TABLES: &str = "172f2e3f2db3880316b53bd69822ee6764deadc006357ffc35a13db1ed080c5a";
+/// What the device in `qemu/` was built with, for each driver branch it knows. A guest's tables come
+/// from the driver the host has now, but the device's were fixed when QEMU was built. If a driver moves
+/// a field the device checks, the two would disagree on what a call holds.
+const DEVICE_TABLES: [DeviceTables; 2] = [
+    DeviceTables {
+        branch: "615",
+        digest: "172f2e3f2db3880316b53bd69822ee6764deadc006357ffc35a13db1ed080c5a",
+    },
+    DeviceTables {
+        branch: "620",
+        digest: "940408edfc954e40060c5a49466c4ae5dbc2254f84e4e4fd29dc8ed3d1a0c5ac",
+    },
+];
 const ENTRY_START: &str = "{";
 const COMMENT_START: &str = "/*";
 const SDK: &str = "src/common/sdk/nvidia/inc";
@@ -53,11 +63,23 @@ fn sha256(text: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&said.stdout).split_whitespace().next().unwrap_or_default().to_owned())
 }
 
-/// Whether the tables in `folder` say the same as the ones the device was built with.
-pub fn match_the_device(folder: &Path) -> Result<bool> {
+/// The device's tables for one driver branch. Only the class sizes differ between branches, so the
+/// device keeps one class table for each, and shares the other two.
+struct DeviceTables {
+    branch: &'static str,
+    /// sha256 of the tables' entries.
+    digest: &'static str,
+}
+
+/// Whether the tables in `folder`, made for driver `loaded`, say the same as the ones the device was
+/// built with for that driver's branch.
+pub fn match_the_device(folder: &Path, loaded: &str) -> Result<bool> {
+    let Some(device) = DEVICE_TABLES.iter().find(|device| device.branch == branch(loaded)) else {
+        return Ok(false);
+    };
     let read = |name: &&str| read_text(&folder.join(name));
     let tables = TABLE_FILES.iter().map(read).collect::<Result<Vec<String>>>()?;
-    Ok(sha256(&entries(&tables))? == DEVICE_TABLES)
+    Ok(sha256(&entries(&tables))? == device.digest)
 }
 
 fn sdk(tree: &Path) -> PathBuf {
@@ -121,26 +143,43 @@ mod tests {
         added.map(|line| format!("{}\n", &line[1..])).collect()
     }
 
-    fn device_tables() -> Vec<String> {
+    /// What the device calls its class table for each branch in `DEVICE_TABLES`, in the same order.
+    const DEVICE_CLASS_TABLES: [&str; 2] = ["class_tables.h", "class_tables_620.h"];
+
+    fn device_tables(index: usize) -> Vec<String> {
         let patch = fs::read_to_string(PATCH).unwrap();
-        TABLE_FILES.iter().map(|name| table_in_patch(&patch, name)).collect()
+        let names = [TABLE_FILES[0], TABLE_FILES[1], DEVICE_CLASS_TABLES[index]];
+        names.iter().map(|name| table_in_patch(&patch, name)).collect()
     }
 
     #[test]
-    fn the_digest_is_of_the_tables_in_the_device() {
-        assert_eq!(sha256(&entries(&device_tables())).unwrap(), DEVICE_TABLES);
+    fn each_digest_is_of_the_tables_in_the_device() {
+        for (index, device) in DEVICE_TABLES.iter().enumerate() {
+            assert_eq!(sha256(&entries(&device_tables(index))).unwrap(), device.digest, "{}", device.branch);
+        }
     }
 
     #[test]
     fn a_comment_changes_nothing_and_a_size_does() {
         let scratch = Scratch::new();
-        let mut tables = device_tables();
+        let mut tables = device_tables(0);
         for (name, table) in TABLE_FILES.iter().zip(&tables) {
             scratch.write(name, format!("/* another header */\n{table}"));
         }
-        assert!(match_the_device(&scratch.path("")).unwrap());
+        assert!(match_the_device(&scratch.path(""), "615.78.08").unwrap());
         tables[2] = tables[2].replacen("{ 0x0, 4 }", "{ 0x0, 8 }", 1);
         scratch.write(TABLE_FILES[2], &tables[2]);
-        assert!(!match_the_device(&scratch.path("")).unwrap());
+        assert!(!match_the_device(&scratch.path(""), "615.78.08").unwrap());
+    }
+
+    #[test]
+    fn tables_are_held_to_their_own_branch() {
+        let scratch = Scratch::new();
+        for (name, table) in TABLE_FILES.iter().zip(device_tables(1)) {
+            scratch.write(name, table);
+        }
+        assert!(match_the_device(&scratch.path(""), "620.70.06").unwrap());
+        assert!(!match_the_device(&scratch.path(""), "615.78.08").unwrap());
+        assert!(!match_the_device(&scratch.path(""), "625.10").unwrap());
     }
 }

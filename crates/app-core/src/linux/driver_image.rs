@@ -205,7 +205,7 @@ fn build(
     let tables = staging.join("tables");
     fs::create_dir_all(&tables)?;
     write_tables(tree, &tables)?;
-    if !match_the_device(&tables)? {
+    if !match_the_device(&tables, loaded)? {
         let detail = format!(
             "Driver {loaded} changes calls that the nvfwd device checks, so this QEMU can't forward them \
              safely. It needs a Guesthouse that knows this driver."

@@ -2479,6 +2479,32 @@ mod address_reuse {
     }
 
     #[test]
+    fn a_placed_map_avoids_an_address_whose_free_is_waiting_for_the_gpu() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        let context = create_context(&mut session, 0);
+        let (queue, _, fence) = create_queue(&mut session, context);
+        let (_, ahead) = allocate(&mut session, private(0x1000));
+        assert_eq!(map_within(&mut session, ahead, 0x2_0000_0000, 0x3_0000_0000), (0x2_0000_0000, SUCCESS));
+        let (resource, old) = allocate(&mut session, private(0x1000));
+        let (first, status) = map_within(&mut session, old, 0x800_0000, 0x900_0000);
+        assert_eq!(status, SUCCESS);
+        submit(&mut session, queue, 1);
+        destroy(&mut session, resource, &[]);
+        assert_eq!(session.deferred.len(), 1, "the free waits for the GPU");
+        // Still mapped in the backend, so the new map must go somewhere else and succeed.
+        let (_, new) = allocate(&mut session, private(0x1000));
+        let (second, status) = map_within(&mut session, new, 0x800_0000, 0x900_0000);
+        assert_eq!(status, SUCCESS);
+        assert_ne!(second, first);
+        session.memory_mut().write_u64(fence, 1).unwrap();
+        submit(&mut session, queue, 2);
+        assert!(session.deferred.is_empty());
+        let (_, again) = allocate(&mut session, private(0x1000));
+        assert_eq!(map_within(&mut session, again, 0x800_0000, 0x900_0000), (first, SUCCESS));
+    }
+
+    #[test]
     fn a_window_with_no_room_fails_the_map() {
         let mut session = session();
         let (_, handle) = allocate(&mut session, private(0x20000));

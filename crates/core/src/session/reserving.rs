@@ -27,11 +27,18 @@ fn in_one_range(base: u64, size: u64) -> bool {
 }
 
 impl<B: Backend, M: GuestMemory> Session<B, M> {
-    /// What the guest or the host already has in this space, as (start, end).
+    /// What the guest or the host already has in this space, as (start, end). That includes the
+    /// mappings of an allocation the guest has freed but whose unmap is still waiting for the GPU:
+    /// they stay mapped in the backend until then.
     pub(super) fn taken_in(&self, space: SpaceId) -> Vec<(u64, u64)> {
         let reserved = self.reserved_addresses.iter().filter(|range| range.space == space);
-        let mappings = self.allocations.values().flat_map(|allocation| &allocation.mappings);
-        let mapped = mappings.filter(|mapping| mapping.space == space);
+        let live = self.allocations.values().flat_map(|allocation| &allocation.mappings);
+        let freed = self.deferred.iter().filter_map(|item| match &item.action {
+            DeferredAction::FreeAllocation(freed) => Some(freed),
+            _ => None,
+        });
+        let waiting = freed.flat_map(|freed| &freed.mappings);
+        let mapped = live.chain(waiting).filter(|mapping| mapping.space == space);
         reserved
             .map(|range| (range.address, range.address + range.size))
             .chain(mapped.map(|mapping| (mapping.address, mapping.address + mapping.length)))

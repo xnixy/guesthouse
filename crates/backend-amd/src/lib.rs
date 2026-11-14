@@ -65,7 +65,7 @@ use guesthouse_backend::{
 use nodes::nodes;
 use run_wait::Patience;
 use screen_copy::{CopyPlan, PIXEL_BYTES};
-use sdma_copy::{LinearCopy, TiledCopy};
+use sdma_copy::{EngineForm, LinearCopy, TiledCopy};
 use space_vm::{GuestFence, Origin, Ran, SpaceVm};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -142,6 +142,8 @@ fn send(vm: &mut SpaceVm, run: &PreparedRun) -> io::Result<()> {
 
 /// How often runs on the card are looked at for ones the kernel ended early.
 const LOOK_AT_RUNS_EVERY: Duration = Duration::from_millis(50);
+/// What a copy by the DMA engine fails with on a card whose packets aren't written here.
+const DMA_NOT_WRITTEN: &str = "the DMA copy is written for GFX10 to GFX12";
 
 /// Stands in at the fence of each run the kernel retired before the card wrote it: one it reset,
 /// or cancelled after a reset. A run that went through wrote its fence before the kernel saw it end.
@@ -217,33 +219,23 @@ impl AmdBackend {
         let target_bytes =
             (u64::from(plan.height - 1) * u64::from(plan.linear_pitch) + u64::from(plan.width)) * PIXEL_BYTES;
         let reaches = [(plan.tiled_address, PIXEL_BYTES), (plan.linear_address + target_start, target_bytes)];
-        if !self.tiled_dma_known() {
-            return Err("the DMA copy is written for GFX10 to GFX12".into());
+        if self.dma_form().is_none() {
+            return Err(DMA_NOT_WRITTEN.into());
         }
         self.run_dma(space, &reaches, &plan.commands())
     }
 
-    /// Whether the DMA engine's plain copies here are written for this card.
-    fn dma_known(&self) -> bool {
-        matches!(self.device.info().details.gfx_version.0, 10 | 11)
+    /// The form of the DMA engine's packets this card takes, or `None` for a card they aren't
+    /// written for here.
+    fn dma_form(&self) -> Option<EngineForm> {
+        EngineForm::of(self.device.info().details.gfx_version)
     }
 
-    /// Whether the DMA engine's tiled copies here are written for this card, which GFX12 is as well.
-    fn tiled_dma_known(&self) -> bool {
-        matches!(self.device.info().details.gfx_version.0, 10..=12)
-    }
-
-    /// Runs a plain copy on the DMA engine, which is only written for GFX10 and GFX11.
-    fn run_linear_dma(
-        &mut self,
-        space: SpaceId,
-        reaches: &[(u64, u64)],
-        commands: &[u32],
-    ) -> Result<(), String> {
-        if !self.dma_known() {
-            return Err("the DMA copy is written for GFX10 and GFX11".into());
-        }
-        self.run_dma(space, reaches, commands)
+    /// Runs a plain copy on the DMA engine, and waits for it.
+    fn run_linear_dma(&mut self, space: SpaceId, copy: &LinearCopy) -> Result<(), String> {
+        let form = self.dma_form().ok_or(DMA_NOT_WRITTEN)?;
+        let reaches = [(copy.source_address, copy.bytes), (copy.target_address, copy.bytes)];
+        self.run_dma(space, &reaches, &copy.commands(form))
     }
 
     /// Runs commands on the DMA engine in the daemon's space, and waits for them. `reaches` are the
@@ -306,8 +298,7 @@ impl AmdBackend {
         let linear = CopyPlan::of(staging)
             .and_then(|plan| LinearCopy::of(&plan, staging.source_address, staging.target_address));
         let Some(linear) = linear else { return self.copy_staging(staging) };
-        let reaches = [(linear.source_address, linear.bytes), (linear.target_address, linear.bytes)];
-        self.run_linear_dma(staging.own_space, &reaches, &linear.commands())
+        self.run_linear_dma(staging.own_space, &linear)
     }
 
     /// Copies what `from` holds into `to`, a window at a time, by the DMA engine. The work that wrote
@@ -327,8 +318,7 @@ impl AmdBackend {
                 .and_then(|()| {
                     let copy =
                         LinearCopy { source_address: source, target_address: target, bytes: piece.bytes };
-                    let reaches = [(source, piece.bytes), (target, piece.bytes)];
-                    self.run_linear_dma(space, &reaches, &copy.commands())
+                    self.run_linear_dma(space, &copy)
                 });
             // The windows are one place each, so a mapping left in one would stop every later move.
             let space_vm = &mut self.spaces.get_mut(&space).ok_or("no such space")?.vm;
@@ -567,7 +557,7 @@ impl Backend for AmdBackend {
         let (from, to) = (buffer(from)?, buffer(to)?);
         // Once the daemon's own space has faulted nothing more is run there, so the CPU moves it.
         let dma_stopped = self.spaces.get(&own_space).is_some_and(|space| space.vm.faulted().is_some());
-        let moved = if self.dma_known() && !dma_stopped {
+        let moved = if self.dma_form().is_some() && !dma_stopped {
             // A lock that fails is worse for the guest than a slow one, so the CPU has a go when the
             // engine refuses.
             self.move_with_dma(own_space, from, to, size).or_else(|reason| {
@@ -987,9 +977,7 @@ impl Backend for AmdBackend {
 
     /// A tiled surface is copied by the DMA engine, which takes any start inside it.
     fn tiled_bytes(&self, surface: &SurfaceShape, _x: u64, _y: u64) -> Option<u64> {
-        if !self.tiled_dma_known() {
-            return None;
-        }
+        self.dma_form()?;
         let layout = protocol::tiling::Layout::of(surface.tiling?);
         let gfx = self.device.info().details.gfx_version;
         sdma_copy::surface_bytes(surface.pitch, surface.height, layout.swizzle_mode, gfx)

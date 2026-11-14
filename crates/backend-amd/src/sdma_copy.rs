@@ -6,6 +6,10 @@
 //! surface's swizzle mode it walks the tiles itself. The packet is the open one that Mesa's RADV
 //! sends on SDMA 5 and 6 (GFX10 to GFX11), with the engine's default cache policy. GFX12's engine
 //! (SDMA 7) takes the same packet with a different info dword and a cache policy in the last one.
+//!
+//! A plain copy moves bytes in order between two addresses: a frame into a slot, or a buffer's
+//! contents into new memory. It is the packet the kernel's amdgpu sends to move buffers, which on
+//! SDMA 7 is one dword longer.
 
 use crate::protocol::tiling::{GfxVersion, Layout};
 use crate::screen_copy::{CopyPlan, PIXEL_BYTES};
@@ -66,6 +70,9 @@ pub fn surface_bytes(pitch_bytes: u32, height: u32, swizzle_mode: u32, gfx: GfxV
 
 /// A plain copy's sub-opcode: bytes in order, from one address to another.
 const SUB_OPCODE_LINEAR: u32 = 0x0;
+/// Set in an SDMA 7 plain copy's header: one more dword follows the addresses. amdgpu always sets
+/// it, and leaves that dword zero for memory that isn't compressed, which nothing copied here is.
+const LINEAR_HAS_LAST_DWORD: u32 = 1 << 19;
 /// The most one plain copy moves. The engine's count field is 22 bits on the oldest of these
 /// engines, so each packet stays under 4 MiB, kept to whole 256-byte blocks.
 const MOST_LINEAR_BYTES: u64 = 0x3f_ff00;
@@ -93,9 +100,13 @@ impl LinearCopy {
         })
     }
 
-    /// The command buffer: one plain copy for each piece, padded to the engine's alignment.
-    pub fn commands(&self) -> Vec<u32> {
-        let header = OPCODE_COPY | SUB_OPCODE_LINEAR << SUB_OPCODE_SHIFT;
+    /// The command buffer for one engine: one plain copy for each piece, padded to the engine's
+    /// alignment.
+    pub fn commands(&self, form: EngineForm) -> Vec<u32> {
+        let mut header = OPCODE_COPY | SUB_OPCODE_LINEAR << SUB_OPCODE_SHIFT;
+        if form == EngineForm::Sdma7 {
+            header |= LINEAR_HAS_LAST_DWORD;
+        }
         let mut commands = Vec::new();
         let mut done = 0;
         while done < self.bytes {
@@ -111,6 +122,9 @@ impl LinearCopy {
                 to as u32,
                 (to >> 32) as u32,
             ]);
+            if form == EngineForm::Sdma7 {
+                commands.push(0);
+            }
             done += piece;
         }
         pad(&mut commands);
@@ -124,13 +138,25 @@ fn pad(commands: &mut Vec<u32>) {
     }
 }
 
-/// Which engine's form of the tiled packet to build.
+/// Which engine's form of a packet to build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TiledForm {
+pub enum EngineForm {
     /// SDMA 5 and 6, GFX10 and GFX11.
     Sdma5,
-    /// SDMA 7, GFX12: no resource dimension in the info dword, and a cache policy in the last.
+    /// SDMA 7, GFX12. A tiled copy has no resource dimension in its info dword and a cache policy
+    /// in its last, and a plain copy has one more dword.
     Sdma7,
+}
+
+impl EngineForm {
+    /// The form a card's engine takes, or `None` for a card whose packets aren't written here.
+    pub fn of(gfx: GfxVersion) -> Option<Self> {
+        match gfx.0 {
+            10 | 11 => Some(Self::Sdma5),
+            12 => Some(Self::Sdma7),
+            _ => None,
+        }
+    }
 }
 
 /// The memory cache policy field for non-temporal, as the last dword of an SDMA 7 packet has it for
@@ -146,7 +172,7 @@ pub struct TiledCopy {
     pub tiled_width: u32,
     pub tiled_height: u32,
     pub swizzle_mode: u32,
-    pub form: TiledForm,
+    pub form: EngineForm,
     pub linear_address: u64,
     /// The linear surface's row length and height, in pixels.
     pub linear_pitch: u32,
@@ -168,10 +194,10 @@ impl TiledCopy {
     /// the engine reads the tiles the way the GPU wrote them only from there.
     pub fn of(copy: &StagingCopy, gfx: GfxVersion) -> Option<Self> {
         let layout = Layout::of(copy.source.tiling?);
-        let (form, last_mode) = if gfx.0 >= 12 {
-            (TiledForm::Sdma7, LAST_SWIZZLE_MODE_GFX12)
-        } else {
-            (TiledForm::Sdma5, LAST_SWIZZLE_MODE)
+        let form = EngineForm::of(gfx)?;
+        let last_mode = match form {
+            EngineForm::Sdma5 => LAST_SWIZZLE_MODE,
+            EngineForm::Sdma7 => LAST_SWIZZLE_MODE_GFX12,
         };
         let swizzle_mode = Some(layout.swizzle_mode).filter(|mode| (1..=last_mode).contains(mode))?;
         if copy.target.tiling.is_some() {
@@ -217,8 +243,8 @@ impl TiledCopy {
         // The depth of the copy, less one, and on SDMA 7 the cache policy of each side.
         let mut last = 0;
         match self.form {
-            TiledForm::Sdma5 => info |= RESOURCE_2D << DIMENSION_SHIFT,
-            TiledForm::Sdma7 => {
+            EngineForm::Sdma5 => info |= RESOURCE_2D << DIMENSION_SHIFT,
+            EngineForm::Sdma7 => {
                 last = POLICY_NON_TEMPORAL << TILED_POLICY_SHIFT | POLICY_NON_TEMPORAL << LINEAR_POLICY_SHIFT;
             }
         }
@@ -328,12 +354,34 @@ mod tests {
             target_address: 0x2_0000_0000,
             bytes: 1920 * 1080 * 4,
         };
-        let commands = linear.commands();
+        let commands = linear.commands(EngineForm::Sdma5);
         assert_eq!(commands[0..7], [0x1, 0x3f_feff, 0, 0, 0x1, 0, 0x2]);
         let rest = 1920 * 1080 * 4 - MOST_LINEAR_BYTES;
         assert_eq!(commands[7..14], [0x1, rest as u32 - 1, 0, 0x3f_ff00, 0x1, 0x3f_ff00, 0x2]);
         assert_eq!(commands.len(), 16);
         assert!(commands[14..].iter().all(|&word| word == OPCODE_NOP));
+    }
+
+    #[test]
+    fn a_gfx12_plain_copy_has_one_more_dword() {
+        let linear = LinearCopy {
+            source_address: 0x1_0000_0000,
+            target_address: 0x2_0000_0000,
+            bytes: MOST_LINEAR_BYTES + 0x100,
+        };
+        let commands = linear.commands(EngineForm::Sdma7);
+        assert_eq!(commands[0..8], [0x8_0001, 0x3f_feff, 0, 0, 0x1, 0, 0x2, 0]);
+        assert_eq!(commands[8..16], [0x8_0001, 0xff, 0, 0x3f_ff00, 0x1, 0x3f_ff00, 0x2, 0]);
+        assert_eq!(commands.len(), 16);
+    }
+
+    #[test]
+    fn each_card_gets_its_engines_form() {
+        assert_eq!(EngineForm::of(RDNA2), Some(EngineForm::Sdma5));
+        assert_eq!(EngineForm::of((11, 5)), Some(EngineForm::Sdma5));
+        assert_eq!(EngineForm::of(RDNA4), Some(EngineForm::Sdma7));
+        assert_eq!(EngineForm::of((9, 0)), None);
+        assert_eq!(EngineForm::of((13, 0)), None);
     }
 
     #[test]

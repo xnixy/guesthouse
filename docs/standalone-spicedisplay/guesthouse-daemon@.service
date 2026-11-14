@@ -1,0 +1,32 @@
+# Started by the libvirt qemu hook before the machine's domain
+# (systemctl start guesthouse-daemon@windows-gpu), stopped by the hook
+# on release. Not enabled - the hook is the lifecycle owner.
+#
+# Install as /etc/systemd/system/guesthouse-daemon@.service, then
+# systemctl daemon-reload.
+
+[Unit]
+Description=Guesthouse GPU-PV daemon for %i
+BindsTo=libvirtd.service
+
+[Service]
+Type=simple
+# the user that owns the store and the run folder. QEMU runs as the
+# same user, through the domain's dac seclabel, so it can open the
+# daemon's 0600 sockets and memory files.
+User=guesthouse
+Group=guesthouse
+SupplementaryGroups=kvm video
+RuntimeDirectory=guesthouse
+RuntimeDirectoryMode=0750
+Environment=HOME=/var/lib/guesthouse
+Environment=GUESTHOUSE_RAM=16G
+Environment=GUESTHOUSE_RAM_FILE=/dev/shm/gpupv-ram.standalone
+Environment=GUESTHOUSE_SLOT=0
+Environment=GUESTHOUSE_STORE=/var/lib/guesthouse
+Environment=GUESTHOUSE_WINDOW_FILE=/dev/shm/gpupv-window.standalone
+# serves the machine's sockets in the run folder; makes the guest's
+# memory files (the RAM file is claimed in full at start)
+ExecStartPre=/usr/bin/mkdir -p /run/guesthouse/run
+ExecStart=/usr/local/libexec/guesthouse/guesthouse-daemon /run/guesthouse
+Restart=no

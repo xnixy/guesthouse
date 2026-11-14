@@ -33,4 +33,8 @@ You'll need QEMU's usual build dependencies. A release comes with QEMU built, so
 
 To run this QEMU yourself, with the daemon beside it, see [standalone](../docs/standalone.md).
 
+## The frame viewer patch
+
+`qemu-spicedisplay.patch` sits on top of this one (`git am` it after), and adds a device, `gh-frames`, in `hw/display/gh-frames.c`. It connects to the daemon's frame socket and shows the GPU's picture as a QEMU graphic console, so a libvirt-run machine has a display: the firmware's boot output (the device registers `etc/ramfb`), the Windows boot manager, and then the desktop, all on one channel. It builds with the flags above, `--disable-spice` included - the device talks to QEMU's console layer, not to spice. See [standalone-spicedisplay](../docs/standalone-spicedisplay.md) for a setup that runs it under libvirt, with systemd units, a hook, and what the display costs.
+
 The patch is GPL-2.0-or-later, apart from the tables in `hw/misc/nvfwd`, which come from NVIDIA's open modules and keep NVIDIA's MIT notice.

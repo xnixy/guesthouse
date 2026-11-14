@@ -1,0 +1,892 @@
+From 54ddad949dec5d464966aa5587d8f1b7ed4c907c Mon Sep 17 00:00:00 2001
+From: Simon Siebert <simon.siebert@a17t.dev>
+Date: Sat, 14 Nov 2026 13:38:54 +0100
+Subject: [PATCH] hw/display: add gh-frames, the guesthouse frame viewer
+ console
+
+The daemon hands the GPU desktop over on its frame socket (GHFR
+protocol version 2, see crates/frame-socket). This device connects
+to it and shows the pictures as a QEMU graphic console, so any
+display backend (spice, vnc, dbus, gtk) streams the shared GPU.
+Without it, standalone and libvirt setups have no picture for a
+Windows machine: the guest drives no emulated GPU, and there is
+nothing to show.
+
+The console is created in realize, not on the first frame. Display
+channels attach once at startup; a console made later never reaches
+a client. It presents at a fixed 60 Hz cadence with newest-frame
+coalescing, and the cursor rides the console cursor channel
+(CursorWanted, CursorShape, CursorMove), so it moves at wire latency
+instead of frame rate.
+
+The device also registers the firmware boot framebuffer (etc/ramfb,
+the same fw_cfg contract as hw/display/ramfb.c). Firmware output
+paints on the same console until the first GPU frame arrives, so the
+boot screen, the firmware setup and the Windows boot manager land on
+the one display without a second console. A guest reset brings it
+back until frames flow again.
+
+No migration: the device does not carry vmstate. View-only: it
+injects no input.
+---
+ hw/display/Kconfig     |   5 +
+ hw/display/gh-frames.c | 818 +++++++++++++++++++++++++++++++++++++++++
+ hw/display/meson.build |   1 +
+ 3 files changed, 824 insertions(+)
+ create mode 100644 hw/display/gh-frames.c
+
+diff --git a/hw/display/Kconfig b/hw/display/Kconfig
+index b3593fe..771418d 100644
+--- a/hw/display/Kconfig
++++ b/hw/display/Kconfig
+@@ -9,6 +9,11 @@ config EDID
+ config FW_CFG_DMA
+     bool
+ 
++config GH_FRAMES
++    bool
++    default y
++    depends on ISA_BUS && FW_CFG_DMA
++
+ config VGA_CIRRUS
+     bool
+     default y if PCI_DEVICES
+diff --git a/hw/display/gh-frames.c b/hw/display/gh-frames.c
+new file mode 100644
+index 0000000..6f1d832
+--- /dev/null
++++ b/hw/display/gh-frames.c
+@@ -0,0 +1,818 @@
++/*
++ * gh-frames: guesthouse frame viewer console.
++ *
++ * Connects to the guesthouse daemon's frame socket (GHFR protocol
++ * version 2, see crates/frame-socket in the guesthouse sources) and
++ * shows the GPU desktop as a QEMU graphic console, so any display
++ * backend (spice, vnc, dbus, gtk) streams the shared GPU's picture.
++ * The console exists from realize on, so display channels attach at
++ * startup; a lazily made console would never reach a client.
++ *
++ * The firmware boot framebuffer ("etc/ramfb", the same fw_cfg contract
++ * as hw/display/ramfb.c) paints on the same console until the first
++ * GPU frame arrives, so firmware output lands on the one display
++ * without a second console.
++ *
++ * View-only: the device injects no input.
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qemu/module.h"
++#include "qemu/thread.h"
++#include "qemu/timer.h"
++#include "qemu/main-loop.h"
++#include "hw/isa/isa.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/nvram/fw_cfg.h"
++#include "ui/console.h"
++#include "ui/qemu-pixman.h"
++#include "ui/surface.h"
++#include "system/physmem.h"
++
++/* ---- the device ---- */
++
++#define TYPE_GH_FRAMES "gh-frames"
++OBJECT_DECLARE_SIMPLE_TYPE(GHFramesState, GH_FRAMES)
++
++/* protocol constants (crates/frame-socket/src/message.rs) */
++#define GH_MAGIC 0x52464847u             /* "GHFR", little endian */
++#define GH_VERSION 2u
++#define GH_KIND_HELLO 1u
++#define GH_KIND_RING 2u
++#define GH_KIND_FRAME 3u
++#define GH_KIND_RELEASE 4u
++#define GH_KIND_LIGHT 5u
++#define GH_KIND_CURSOR_WANTED 6u
++#define GH_KIND_CURSOR_SHAPE 7u
++#define GH_KIND_CURSOR_MOVE 8u
++#define GH_MOST_SLOTS 16u
++#define GH_SDR_FOURCC 0x34325258u        /* DRM_FORMAT_XRGB8888, "XR24" */
++#define GH_MODIFIER_LINEAR 0u
++#define GH_PACKET_MAX 8192
++/* the cadence the console presents at (60 Hz) */
++#define GH_FRAME_INTERVAL_NS 16666667
++
++/* firmware boot framebuffer ("etc/ramfb"): ovmf draws the boot screen
++ * into guest ram, configured through fw_cfg. shown on this console
++ * until the first gpu frame arrives, so the boot output lands on the
++ * one display without a second console. fields are big endian on the
++ * wire, same layout as hw/display/ramfb.c. */
++typedef struct QEMU_PACKED GHRamfbCfg {
++    uint64_t addr;
++    uint32_t fourcc;
++    uint32_t flags;
++    uint32_t width;
++    uint32_t height;
++    uint32_t stride;
++} GHRamfbCfg;
++
++typedef struct GHFramesState GHFramesState;
++
++struct GHFramesState {
++    ISADevice parent_obj;
++
++    QemuConsole *con;
++    char *socket_path;
++    uint32_t width, height;
++
++    /* reader thread state */
++    QemuThread thread;
++    QemuMutex lock;
++    int sock;
++    bool quit;
++
++    /* the frame ring the daemon handed over; guarded by lock */
++    uint8_t *slot_maps[GH_MOST_SLOTS];
++    uint64_t slot_size;
++
++    /* the newest frame, held until the main loop has copied it into
++     * the console surface; guarded by lock. a frame that arrives while
++     * one is pending replaces it: the older one is released so the
++     * daemon can reuse its slot. a display only ever shows the latest
++     * picture, so skipping is what it is for. */
++    bool pending_valid;
++    uint32_t pending_gen, pending_slot;
++    uint64_t frame_offset;
++    uint32_t frame_w, frame_h, frame_stride;
++    bool blit_scheduled;
++
++    /* a display presents at a fixed rate. the blit runs on this
++     * cadence and always shows the newest available frame; frames in
++     * between are dropped, the same way a monitor drops whatever the
++     * gpu flips while it is scanning out. */
++    QEMUTimer *frame_timer;
++    int64_t last_blit_ns;
++
++    /* the cursor rides its own channel: once the viewer sends
++     * CursorWanted, the daemon composites the pictures without it and
++     * delivers shape and position as separate messages. the main loop
++     * pushes them into the console's cursor channel, so spice moves
++     * the cursor without any new frame - a cursor painted into the
++     * picture would only move at frame rate and stutter. */
++    QEMUBH *cursor_bh;
++    QEMUCursor *pending_cursor;
++    bool pending_cursor_pos;
++    int cursor_x, cursor_y;
++    bool cursor_visible;
++    bool cursor_scheduled;
++
++    /* firmware boot framebuffer, guarded by lock. the firmware writes
++     * the mode over fw_cfg; the surface lives until the console takes
++     * it over (set_surface transfers ownership) or a new mode comes. */
++    GHRamfbCfg ramfb_cfg;
++    DisplaySurface *ramfb_ds;
++    bool ramfb_dirty;
++    bool ramfb_was_shown;
++    bool frames_seen;
++};
++
++/* ---- wire helpers -------------------------------------------------- */
++
++static void gh_put_header(uint8_t *buf, size_t *pos, uint16_t kind)
++{
++    memcpy(buf + *pos, "GHFR", 4);
++    *pos += 4;
++    buf[(*pos)++] = GH_VERSION & 0xff;
++    buf[(*pos)++] = (GH_VERSION >> 8) & 0xff;
++    buf[(*pos)++] = kind & 0xff;
++    buf[(*pos)++] = (kind >> 8) & 0xff;
++}
++
++static bool gh_send_hello(int fd)
++{
++    uint8_t buf[32];
++    size_t pos = 0;
++    /* 60 Hz: the daemon feeds this back to the windows display driver,
++     * whose display mode then paces desktop duplication. without it
++     * the guest reports a 0 Hz mode and captures only a few fps. */
++    uint32_t refresh = 60000;
++    gh_put_header(buf, &pos, GH_KIND_HELLO);
++    memcpy(buf + pos, &refresh, 4); pos += 4;
++    memset(buf + pos, 0, 4); pos += 4;          /* peak nits: SDR */
++    buf[pos++] = 1;                             /* one format, count u16 */
++    buf[pos++] = 0;
++    buf[pos++] = GH_SDR_FOURCC & 0xff;
++    buf[pos++] = (GH_SDR_FOURCC >> 8) & 0xff;
++    buf[pos++] = (GH_SDR_FOURCC >> 16) & 0xff;
++    buf[pos++] = (GH_SDR_FOURCC >> 24) & 0xff;
++    memset(buf + pos, 0, 8); pos += 8;          /* modifier = LINEAR */
++    buf[pos++] = 1;                             /* wants_memory */
++    return send(fd, buf, pos, 0) == (ssize_t)pos;
++}
++
++static bool gh_send_release(int fd, uint32_t generation, uint32_t slot)
++{
++    uint8_t buf[16];
++    size_t pos = 0;
++    gh_put_header(buf, &pos, GH_KIND_RELEASE);
++    memcpy(buf + pos, &generation, 4); pos += 4;
++    memcpy(buf + pos, &slot, 4); pos += 4;
++    return send(fd, buf, pos, 0) == (ssize_t)pos;
++}
++
++/* ---- console drawing ---------------------------------------------- */
++
++/* The main loop copies the newest frame straight out of the ring slot
++ * into the console surface and releases the slot afterwards, so the
++ * daemon can reuse it. No intermediate buffer: one copy per frame.
++ * Unless force is set (a fresh client asks for a redraw), the copy
++ * waits for the next frame-interval tick: a producer flipping faster
++ * than the display can show then only costs slot releases, and the
++ * console updates at an even 60 Hz rhythm instead of the producer's
++ * uneven flip times. */
++/* paint the firmware boot framebuffer into the console surface: the
++ * same copy path the gpu frames take. runs under lock. */
++static void gh_blit_ramfb(GHFramesState *s)
++{
++    DisplaySurface *surface;
++    uint8_t *src, *data;
++    int src_stride, ds_stride, w, h, y, copy;
++
++    src = surface_data(s->ramfb_ds);
++    src_stride = surface_stride(s->ramfb_ds);
++    w = surface_width(s->ramfb_ds);
++    h = surface_height(s->ramfb_ds);
++
++    surface = qemu_console_surface(s->con);
++    if (s->ramfb_was_shown || !surface ||
++        surface_width(surface) != w || surface_height(surface) != h) {
++        /* a fresh allocated surface: resize no-ops on equal dims, and
++         * the console may still own the previous ramfb surface */
++        surface = qemu_create_displaysurface(w, h);
++        qemu_console_set_surface(s->con, surface);
++        s->ramfb_was_shown = false;
++        surface = qemu_console_surface(s->con);
++    }
++    if (!surface) {
++        return;
++    }
++    data = surface_data(surface);
++    ds_stride = surface_stride(surface);
++    copy = MIN(ds_stride, src_stride);
++    for (y = 0; y < h; y++) {
++        memcpy(data + y * ds_stride, src + y * src_stride, copy);
++    }
++    qemu_console_update_full(s->con);
++}
++
++static void gh_blit(GHFramesState *s, bool force)
++{
++    DisplaySurface *surface;
++    uint8_t *src, *data;
++    uint32_t gen, slot;
++    int ds_stride, y, copy;
++
++    qemu_mutex_lock(&s->lock);
++    s->blit_scheduled = false;
++    if (!s->pending_valid) {
++        /* no gpu frame yet: repaint the firmware boot framebuffer into
++         * the console surface, the same way frames are painted, and
++         * keep ticking until the gpu takes over - the firmware draws
++         * continuously, and gfx_update only runs while a client is
++         * attached, so the tick is what makes the boot screen live. */
++        if (!s->frames_seen && s->ramfb_ds) {
++            gh_blit_ramfb(s);
++            timer_mod(s->frame_timer,
++                      qemu_clock_get_ns(QEMU_CLOCK_REALTIME) +
++                      GH_FRAME_INTERVAL_NS);
++        }
++        qemu_mutex_unlock(&s->lock);
++        return;
++    }
++    if (!force) {
++        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++        int64_t delta = now - s->last_blit_ns;
++        if (s->last_blit_ns && delta < GH_FRAME_INTERVAL_NS) {
++            /* hold the pending frame until the tick */
++            s->blit_scheduled = true;
++            qemu_mutex_unlock(&s->lock);
++            timer_mod(s->frame_timer, now + (GH_FRAME_INTERVAL_NS - delta));
++            return;
++        }
++    }
++    gen = s->pending_gen;
++    slot = s->pending_slot;
++    src = s->slot_maps[slot] + s->frame_offset;
++    s->pending_valid = false;
++    if (!s->slot_maps[slot]) {
++        qemu_mutex_unlock(&s->lock);
++        if (s->sock >= 0) {
++            gh_send_release(s->sock, gen, slot);
++        }
++        return;
++    }
++    surface = qemu_console_surface(s->con);
++    if (s->ramfb_was_shown ||
++        (surface &&
++         (surface_width(surface) != (int)s->frame_w ||
++          surface_height(surface) != (int)s->frame_h))) {
++        /* always a fresh surface here: resize would no-op on equal
++         * dims, and the console may still own the ramfb surface -
++         * drawing into it would paint into guest ram */
++        surface = qemu_create_displaysurface(s->frame_w, s->frame_h);
++        qemu_console_set_surface(s->con, surface);
++        s->ramfb_was_shown = false;
++        surface = qemu_console_surface(s->con);
++    }
++    if (!surface) {
++        qemu_mutex_unlock(&s->lock);
++        if (s->sock >= 0) {
++            gh_send_release(s->sock, gen, slot);
++        }
++        return;
++    }
++    data = surface_data(surface);
++    ds_stride = surface_stride(surface);
++    copy = MIN(ds_stride, (int)s->frame_stride);
++    for (y = 0; y < (int)s->frame_h; y++) {
++        memcpy(data + y * ds_stride, src + y * s->frame_stride, copy);
++    }
++    s->last_blit_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
++    s->frames_seen = true;
++    qemu_mutex_unlock(&s->lock);
++
++    if (s->sock >= 0) {
++        gh_send_release(s->sock, gen, slot);
++    }
++    qemu_console_update_full(s->con);
++}
++
++static void gh_blit_bh(void *opaque)
++{
++    gh_blit(opaque, false);
++}
++
++/* the console hands the surface back when it outlives it (first gpu
++ * frame, resize, teardown): unmap the guest ram it was built on. */
++static void gh_ramfb_unmap_surface(pixman_image_t *image, void *unused)
++{
++    void *data = pixman_image_get_data(image);
++    uint32_t size = pixman_image_get_stride(image) *
++        pixman_image_get_height(image);
++    physical_memory_unmap(data, size, 0, 0);
++}
++
++/* the firmware wrote "etc/ramfb" (big endian fields): map the
++ * framebuffer and hold a surface for display until gpu frames take
++ * over. ovmf does this on every boot, so a guest reset brings the
++ * boot screen back. */
++static void gh_ramfb_fw_cfg_write(void *opaque, off_t offset, size_t len)
++{
++    GHFramesState *s = opaque;
++    pixman_format_code_t format;
++    DisplaySurface *surface;
++    hwaddr size, mapsize, linesize;
++    void *data;
++    uint64_t addr = be64_to_cpu(s->ramfb_cfg.addr);
++    uint32_t fourcc = be32_to_cpu(s->ramfb_cfg.fourcc);
++    uint32_t width = be32_to_cpu(s->ramfb_cfg.width);
++    uint32_t height = be32_to_cpu(s->ramfb_cfg.height);
++    uint32_t stride = be32_to_cpu(s->ramfb_cfg.stride);
++
++    format = qemu_drm_format_to_pixman(fourcc);
++    if (width < 16 || width > 16384 ||
++        height < 16 || height > 16384 || format == 0) {
++        return;
++    }
++    linesize = width * PIXMAN_FORMAT_BPP(format) / 8;
++    if (stride == 0) {
++        stride = linesize;
++    }
++    mapsize = size = stride * (height - 1) + linesize;
++    data = physical_memory_map(addr, &mapsize, false);
++    if (!data || size != mapsize) {
++        if (data) {
++            physical_memory_unmap(data, mapsize, 0, 0);
++        }
++        return;
++    }
++    surface = qemu_create_displaysurface_from(width, height, format,
++                                              stride, data);
++    if (!surface) {
++        physical_memory_unmap(data, mapsize, 0, 0);
++        return;
++    }
++    pixman_image_set_destroy_function(surface->image,
++                                      gh_ramfb_unmap_surface, NULL);
++
++    qemu_mutex_lock(&s->lock);
++    qemu_free_displaysurface(s->ramfb_ds);
++    s->ramfb_ds = surface;
++    s->ramfb_dirty = true;
++    qemu_mutex_unlock(&s->lock);
++    aio_bh_schedule_oneshot(qemu_get_aio_context(), gh_blit_bh, s);
++}
++
++/* The frame-interval tick: run the pending blit, if one is held. */
++static void gh_frame_timer_cb(void *opaque)
++{
++    aio_bh_schedule_oneshot(qemu_get_aio_context(), gh_blit_bh, opaque);
++}
++
++/* GraphicHwOps: a listener (new spice client) asks for a redraw. QEMU
++ * 11 wants bool: true = handled synchronously. A redraw shows the
++ * newest frame immediately, without waiting for the tick. */
++static bool gh_gfx_update(void *opaque)
++{
++    gh_blit(opaque, true);
++    return true;
++}
++
++static const GraphicHwOps gh_hw_ops = {
++    .gfx_update = gh_gfx_update,
++};
++
++/* The cursor channel: shape and position arrive as their own
++ * messages; the main loop installs them on the console. */
++static void gh_cursor_bh(void *opaque)
++{
++    GHFramesState *s = opaque;
++    QEMUCursor *cur = NULL;
++    bool have_pos = false;
++    int x = 0, y = 0;
++    bool on = false;
++
++    qemu_mutex_lock(&s->lock);
++    s->cursor_scheduled = false;
++    cur = s->pending_cursor;
++    s->pending_cursor = NULL;
++    have_pos = s->pending_cursor_pos;
++    if (have_pos) {
++        s->pending_cursor_pos = false;
++        x = s->cursor_x;
++        y = s->cursor_y;
++        on = s->cursor_visible;
++    }
++    qemu_mutex_unlock(&s->lock);
++
++    if (!s->con) {
++        if (cur) {
++            cursor_unref(cur);
++        }
++        return;
++    }
++    if (cur) {
++        qemu_console_set_cursor(s->con, cur);   /* the console takes a ref */
++        cursor_unref(cur);
++    }
++    if (have_pos) {
++        qemu_console_set_mouse(s->con, x, y, on);
++    }
++}
++
++/* ---- reader thread ------------------------------------------------- */
++
++/* Parses a FRAME and stages it as the newest picture. The copy out of
++ * the slot happens on the main loop; here we only hold the slot. */
++static void gh_stage_frame(GHFramesState *s, const uint8_t *payload,
++                           size_t len, uint32_t generation)
++{
++    uint32_t gen, slot, width, height, stride, fourcc;
++    uint64_t sequence, offset, modifier;
++    size_t pos = 0;
++
++#define GH_TAKE32(v) do { if (pos + 4 > len) return; memcpy(&(v), payload + pos, 4); pos += 4; } while (0)
++#define GH_TAKE64(v) do { if (pos + 8 > len) return; memcpy(&(v), payload + pos, 8); pos += 8; } while (0)
++
++    GH_TAKE32(gen);
++    GH_TAKE32(slot);
++    GH_TAKE64(sequence);
++    (void)sequence;
++    GH_TAKE32(width);
++    GH_TAKE32(height);
++    GH_TAKE32(stride);
++    GH_TAKE64(offset);
++    GH_TAKE32(fourcc);
++    GH_TAKE64(modifier);
++
++#undef GH_TAKE32
++#undef GH_TAKE64
++
++    if (gen != generation || slot >= GH_MOST_SLOTS ||
++        fourcc != GH_SDR_FOURCC || modifier != GH_MODIFIER_LINEAR) {
++        return;
++    }
++
++    qemu_mutex_lock(&s->lock);
++    if (!s->slot_maps[slot] ||
++        stride < width * 4u ||
++        stride * (uint64_t)(height - 1) + (uint64_t)width * 4u > s->slot_size) {
++        qemu_mutex_unlock(&s->lock);
++        return;
++    }
++    if (s->pending_valid) {
++        /* this frame replaces the one still waiting for its blit */
++        uint32_t old_gen = s->pending_gen, old_slot = s->pending_slot;
++        s->pending_valid = false;
++        qemu_mutex_unlock(&s->lock);
++        if (s->sock >= 0) {
++            gh_send_release(s->sock, old_gen, old_slot);
++        }
++        qemu_mutex_lock(&s->lock);
++    }
++    s->pending_gen = gen;
++    s->pending_slot = slot;
++    s->frame_offset = offset;
++    s->frame_w = width;
++    s->frame_h = height;
++    s->frame_stride = stride;
++    s->pending_valid = true;
++    if (!s->blit_scheduled) {
++        s->blit_scheduled = true;
++        qemu_mutex_unlock(&s->lock);
++        aio_bh_schedule_oneshot(qemu_get_aio_context(), gh_blit_bh, s);
++        return;
++    }
++    qemu_mutex_unlock(&s->lock);
++}
++
++static int gh_recv_packet(int fd, uint8_t *buf, size_t buflen,
++                          int *fds, int max_fds, int *nfds)
++{
++    struct msghdr msg = { 0 };
++    struct iovec iov;
++    char control[CMSG_SPACE(sizeof(int) * GH_MOST_SLOTS)];
++    struct cmsghdr *cmsg;
++    ssize_t n;
++
++    iov.iov_base = buf;
++    iov.iov_len = buflen;
++    msg.msg_iov = &iov;
++    msg.msg_iovlen = 1;
++    msg.msg_control = control;
++    msg.msg_controllen = sizeof(control);
++
++    *nfds = 0;
++    do {
++        n = recvmsg(fd, &msg, 0);
++    } while (n < 0 && errno == EINTR);
++    if (n <= 0) {
++        return n < 0 ? -errno : 0;
++    }
++    for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
++        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
++            int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
++            memcpy(fds, CMSG_DATA(cmsg), count * sizeof(int));
++            *nfds = count;
++        }
++    }
++    return n;
++}
++
++static void *gh_reader_thread(void *opaque)
++{
++    GHFramesState *s = opaque;
++    uint8_t packet[GH_PACKET_MAX];
++    int fds[GH_MOST_SLOTS];
++    int nfds = 0;
++    uint32_t generation = 0;
++    int rc, i;
++
++    for (i = 0; i < (int)GH_MOST_SLOTS; i++) {
++        fds[i] = -1;
++    }
++
++    while (!qatomic_read(&s->quit)) {
++        struct sockaddr_un addr = { 0 };
++
++        if (s->sock >= 0) {
++            close(s->sock);
++            s->sock = -1;
++        }
++
++        addr.sun_family = AF_UNIX;
++        strncpy(addr.sun_path, s->socket_path, sizeof(addr.sun_path) - 1);
++        do {
++            s->sock = socket(AF_UNIX, SOCK_SEQPACKET, 0);
++        } while (s->sock < 0 && errno == EINTR);
++        if (s->sock < 0) {
++            goto reconnect;
++        }
++        rc = connect(s->sock, (struct sockaddr *)&addr, sizeof(addr));
++        if (rc < 0) {
++            close(s->sock);
++            s->sock = -1;
++            goto reconnect;
++        }
++
++        if (!gh_send_hello(s->sock)) {
++            goto reconnect;
++        }
++        {
++            /* take over the cursor: it moves without new frames */
++            uint8_t cwk[8];
++            size_t pos = 0;
++            gh_put_header(cwk, &pos, GH_KIND_CURSOR_WANTED);
++            send(s->sock, cwk, pos, 0);
++        }
++        for (i = 0; i < (int)GH_MOST_SLOTS; i++) {
++            fds[i] = -1;
++        }
++
++        /* message loop */
++        for (;;) {
++            rc = gh_recv_packet(s->sock, packet, sizeof(packet), fds,
++                                GH_MOST_SLOTS, &nfds);
++            if (rc <= 0) {
++                break;
++            }
++            if (rc < 8 || memcmp(packet, "GHFR", 4) != 0) {
++                continue;
++            }
++            uint16_t kind = packet[6] | (packet[7] << 8);
++            switch (kind) {
++            case GH_KIND_RING: {
++                uint32_t slots;
++                uint64_t size;
++                memcpy(&generation, packet + 8, 4);
++                memcpy(&slots, packet + 12, 4);
++                memcpy(&size, packet + 16, 8);
++                if (slots == 0 || slots > GH_MOST_SLOTS || nfds != (int)slots) {
++                    break;
++                }
++                qemu_mutex_lock(&s->lock);
++                s->pending_valid = false;   /* the old ring's slots are gone */
++                for (i = 0; i < (int)GH_MOST_SLOTS; i++) {
++                    if (s->slot_maps[i]) {
++                        munmap(s->slot_maps[i], s->slot_size);
++                        s->slot_maps[i] = NULL;
++                    }
++                }
++                for (i = 0; i < (int)slots; i++) {
++                    s->slot_maps[i] = mmap(NULL, size, PROT_READ, MAP_SHARED, fds[i], 0);
++                    if (s->slot_maps[i] == MAP_FAILED) {
++                        s->slot_maps[i] = NULL;
++                    }
++                }
++                s->slot_size = size;
++                qemu_mutex_unlock(&s->lock);
++                break;
++            }
++            case GH_KIND_FRAME:
++                gh_stage_frame(s, packet + 8, rc - 8, generation);
++                break;
++            case GH_KIND_CURSOR_SHAPE: {
++                uint32_t shape, cw, ch, pitch, hot_x, hot_y, size;
++                QEMUCursor *cur;
++                uint8_t *px;
++                ssize_t off = 0;
++
++                if (rc < 8 + 28 || nfds < 1 || fds[0] < 0) {
++                    break;
++                }
++                memcpy(&shape, packet + 8, 4);
++                memcpy(&cw, packet + 12, 4);
++                memcpy(&ch, packet + 16, 4);
++                memcpy(&pitch, packet + 20, 4);
++                memcpy(&hot_x, packet + 24, 4);
++                memcpy(&hot_y, packet + 28, 4);
++                memcpy(&size, packet + 32, 4);
++                (void)shape;
++                if (cw == 0 || ch == 0 || cw > 512 || ch > 512 ||
++                    pitch < cw * 4u || (uint64_t)pitch * ch > size) {
++                    break;
++                }
++                px = g_malloc(size);
++                while (off < (ssize_t)size) {
++                    ssize_t got = pread(fds[0], px + off, size - off, off);
++                    if (got <= 0) {
++                        break;
++                    }
++                    off += got;
++                }
++                if (off < (ssize_t)size) {
++                    g_free(px);
++                    break;
++                }
++                close(fds[0]);
++                fds[0] = -1;
++                /* the daemon sends BGRA with straight alpha; read as a
++                 * little endian word that is exactly qemu's cursor
++                 * format (0xAARRGGBB) */
++                cur = cursor_alloc((uint16_t)cw, (uint16_t)ch);
++                cur->hot_x = (int)hot_x;
++                cur->hot_y = (int)hot_y;
++                for (uint32_t y = 0; y < ch; y++) {
++                    memcpy(cur->data + (size_t)y * cw,
++                           px + (size_t)y * pitch, (size_t)cw * 4);
++                }
++                g_free(px);
++
++                qemu_mutex_lock(&s->lock);
++                if (s->pending_cursor) {
++                    cursor_unref(s->pending_cursor);
++                }
++                s->pending_cursor = cur;
++                if (!s->cursor_scheduled) {
++                    s->cursor_scheduled = true;
++                    qemu_mutex_unlock(&s->lock);
++                    aio_bh_schedule_oneshot(qemu_get_aio_context(),
++                                            gh_cursor_bh, s);
++                    break;
++                }
++                qemu_mutex_unlock(&s->lock);
++                break;
++            }
++            case GH_KIND_CURSOR_MOVE: {
++                int32_t mx, my;
++                bool mvis;
++
++                if (rc < 8 + 13) {
++                    break;
++                }
++                memcpy(&mx, packet + 8, 4);
++                memcpy(&my, packet + 12, 4);
++                mvis = packet[16] != 0;
++                qemu_mutex_lock(&s->lock);
++                s->cursor_x = mx;
++                s->cursor_y = my;
++                s->cursor_visible = mvis;
++                s->pending_cursor_pos = true;
++                if (!s->cursor_scheduled) {
++                    s->cursor_scheduled = true;
++                    qemu_mutex_unlock(&s->lock);
++                    aio_bh_schedule_oneshot(qemu_get_aio_context(),
++                                            gh_cursor_bh, s);
++                    break;
++                }
++                qemu_mutex_unlock(&s->lock);
++                break;
++            }
++            default:
++                /* LIGHT: ignored (SDR only for now) */
++                break;
++            }
++        }
++
++reconnect:
++        for (i = 0; i < (int)GH_MOST_SLOTS; i++) {
++            if (fds[i] >= 0) {
++                close(fds[i]);
++                fds[i] = -1;
++            }
++        }
++        qemu_mutex_lock(&s->lock);
++        s->pending_valid = false;
++        for (i = 0; i < (int)GH_MOST_SLOTS; i++) {
++            if (s->slot_maps[i]) {
++                munmap(s->slot_maps[i], s->slot_size);
++                s->slot_maps[i] = NULL;
++            }
++        }
++        qemu_mutex_unlock(&s->lock);
++        if (s->sock >= 0) {
++            close(s->sock);
++            s->sock = -1;
++        }
++        /* the daemon is (re)started by the libvirt hook; wait for it */
++        for (rc = 0; rc < 20 && !qatomic_read(&s->quit); rc++) {
++            g_usleep(100 * 1000);
++        }
++    }
++    return NULL;
++}
++
++/* ---- device boilerplate -------------------------------------------- */
++
++static void gh_frames_realize(DeviceState *dev, Error **errp)
++{
++    GHFramesState *s = GH_FRAMES(dev);
++    FWCfgState *fw;
++
++    if (!s->socket_path) {
++        error_setg(errp, "the 'socket' property is required");
++        return;
++    }
++    s->sock = -1;
++    qemu_mutex_init(&s->lock);
++    s->frame_timer = aio_timer_new(qemu_get_aio_context(), QEMU_CLOCK_REALTIME,
++                                   SCALE_NS, gh_frame_timer_cb, s);
++    s->cursor_bh = qemu_bh_new(gh_cursor_bh, s);
++
++    /* The graphic console is created here in realize, not lazily on the
++     * first frame: spice attaches its display channels once at startup
++     * (qemu_spice_display_init iterates the consoles), a console
++     * created later would never reach the client. */
++    s->con = qemu_graphic_console_create(dev, 0, &gh_hw_ops, s);
++    qemu_console_resize(s->con, s->width, s->height);
++    qemu_console_update_full(s->con);
++
++    /* register the firmware boot framebuffer: ovmf writes "etc/ramfb"
++     * (addr, mode, stride) over fw_cfg dma and draws the boot screen
++     * there; the console shows it until the first gpu frame lands. */
++    fw = fw_cfg_find();
++    if (fw && fw_cfg_dma_enabled(fw)) {
++        fw_cfg_add_file_callback(fw, "etc/ramfb", NULL,
++                                 gh_ramfb_fw_cfg_write, s,
++                                 &s->ramfb_cfg, sizeof(s->ramfb_cfg), false);
++    }
++
++    qemu_thread_create(&s->thread, "gh-frames", gh_reader_thread, s,
++                       QEMU_THREAD_JOINABLE);
++}
++
++static const Property gh_frames_properties[] = {
++    DEFINE_PROP_STRING("socket", GHFramesState, socket_path),
++    DEFINE_PROP_UINT32("width", GHFramesState, width, 1920),
++    DEFINE_PROP_UINT32("height", GHFramesState, height, 1080),
++};
++
++/* a guest reset stops the gpu frames; the next ovmf boot rewrites
++ * "etc/ramfb" and the boot screen shows again */
++static void gh_frames_reset(DeviceState *dev)
++{
++    GHFramesState *s = GH_FRAMES(dev);
++
++    qemu_mutex_lock(&s->lock);
++    s->frames_seen = false;
++    s->ramfb_was_shown = false;
++    qemu_mutex_unlock(&s->lock);
++}
++
++static void gh_frames_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = gh_frames_realize;
++    device_class_set_legacy_reset(dc, gh_frames_reset);
++    dc->desc = "Guesthouse GPU-PV frame viewer console";
++    device_class_set_props(dc, gh_frames_properties);
++    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
++}
++
++static const TypeInfo gh_frames_info = {
++    .name = TYPE_GH_FRAMES,
++    .parent = TYPE_ISA_DEVICE,
++    .instance_size = sizeof(GHFramesState),
++    .class_init = gh_frames_class_init,
++};
++
++static void gh_frames_register_types(void)
++{
++    type_register_static(&gh_frames_info);
++}
++
++type_init(gh_frames_register_types);
+diff --git a/hw/display/meson.build b/hw/display/meson.build
+index ffecedb..bc946c5 100644
+--- a/hw/display/meson.build
++++ b/hw/display/meson.build
+@@ -6,6 +6,7 @@ system_ss.add(when: 'CONFIG_EDID', if_true: files('edid-generate.c', 'edid-regio
+ system_ss.add(when: 'CONFIG_FW_CFG_DMA', if_true: files('ramfb.c'))
+ stub_ss.add(files('ramfb-stubs.c'))
+ system_ss.add(when: 'CONFIG_FW_CFG_DMA', if_true: files('ramfb-standalone.c'))
++system_ss.add(when: 'CONFIG_GH_FRAMES', if_true: files('gh-frames.c'))
+ 
+ system_ss.add(when: 'CONFIG_VGA_CIRRUS', if_true: files('cirrus_vga.c'))
+ system_ss.add(when: ['CONFIG_VGA_CIRRUS', 'CONFIG_VGA_ISA'], if_true: files('cirrus_vga_isa.c'))
+-- 
+2.56.1
+

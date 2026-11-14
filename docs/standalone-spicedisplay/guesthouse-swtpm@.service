@@ -1,0 +1,22 @@
+# Started by the libvirt qemu hook before the machine's domain;
+# --terminate makes swtpm exit when QEMU drops the connection. Not
+# enabled - the hook is the lifecycle owner.
+#
+# Install as /etc/systemd/system/guesthouse-swtpm@.service, then
+# systemctl daemon-reload.
+
+[Unit]
+Description=swtpm (TPM 2.0) for the Guesthouse VM %i
+
+[Service]
+Type=simple
+User=guesthouse
+Group=guesthouse
+RuntimeDirectory=guesthouse
+RuntimeDirectoryMode=0750
+ExecStartPre=/usr/bin/mkdir -p /run/guesthouse/run
+ExecStart=/usr/bin/swtpm socket --tpm2 \
+    --tpmstate dir=/var/lib/guesthouse/machines/%i/tpm \
+    --ctrl type=unixio,path=/run/guesthouse/run/tpm.sock \
+    --terminate --log file=/run/guesthouse/swtpm.log
+Restart=no

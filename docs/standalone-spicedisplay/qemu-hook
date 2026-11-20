@@ -1,0 +1,46 @@
+#!/bin/bash
+# libvirt qemu hook: starts and stops the guesthouse-daemon@DOMAIN and
+# guesthouse-swtpm@DOMAIN systemd instances around the domain. Runs as
+# root on every domain event; guarded by the domain name. Order
+# matters: the daemon first, QEMU second; on release QEMU is already
+# gone when the hook runs.
+#
+# Install as /etc/libvirt/hooks/qemu, chmod 755. The folder may not
+# exist yet, and an existing file there may belong to other tooling -
+# libvirt runs only one qemu hook, so merge the prepare/release cases
+# in that case.
+
+DOMAIN="$1"
+OPERATION="$2"
+SUB="$3"
+echo "$(date '+%F %T') args: $*" >> /var/log/libvirt/guesthouse-hook.log
+
+[ "$DOMAIN" = "windows-gpu" ] || exit 0
+
+RUN="/run/guesthouse/run"
+
+if [ "$OPERATION" = "prepare" ] && [ "$SUB" = "begin" ]; then
+    # a socket left by an earlier run would pass for a ready daemon
+    rm -f "$RUN/vgpu.sock" "$RUN/global.sock" "$RUN/tpm.sock"
+    systemctl start "guesthouse-swtpm@$DOMAIN.service" || exit 1
+    systemctl start "guesthouse-daemon@$DOMAIN.service" || exit 1
+    # QEMU connects to all three as a client, so they have to exist
+    # before QEMU starts
+    for i in $(seq 1 100); do
+        [ -S "$RUN/vgpu.sock" ] && [ -S "$RUN/global.sock" ] && [ -S "$RUN/tpm.sock" ] && exit 0
+        sleep 0.2
+    done
+    systemctl stop "guesthouse-daemon@$DOMAIN.service" \
+                   "guesthouse-swtpm@$DOMAIN.service"
+    exit 1
+fi
+
+if [ "$OPERATION" = "release" ] && [ "$SUB" = "end" ]; then
+    # QEMU is gone; the daemon holds the memory files until it dies
+    systemctl stop "guesthouse-daemon@$DOMAIN.service" \
+                   "guesthouse-swtpm@$DOMAIN.service"
+    rm -f /dev/shm/gpupv-ram.standalone /dev/shm/gpupv-window.standalone
+    exit 0
+fi
+
+exit 0

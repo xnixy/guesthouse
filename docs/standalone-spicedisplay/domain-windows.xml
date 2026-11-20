@@ -1,0 +1,138 @@
+<!--
+  A Windows machine with the GPU on a libvirt-managed QEMU
+  (Guesthouse GPU-PV, standalone mode). The GPU words follow the
+  order `guesthouse-vm command windows-gpu` prints; Windows was
+  installed with the devices in those places, so keep them.
+
+  Paths assume the store at /var/lib/guesthouse and the run folder
+  at /run/guesthouse, both owned by the `guesthouse` user the daemon
+  and QEMU run as (see guesthouse-daemon@.service and the qemu hook
+  in this folder).
+
+  The GPU picture comes through the gh-frames device: one display
+  channel that shows the firmware boot output, the Windows boot
+  manager and then the desktop. There is no video device - "none"
+  keeps libvirt from auto-adding a fallback vga, which would come
+  back as a second display channel.
+-->
+<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
+  <name>windows-gpu</name>
+  <!-- leave out and libvirt makes one -->
+  <title>Windows with the GPU (Guesthouse GPU-PV)</title>
+  <memory unit="GiB">16</memory>
+  <currentMemory unit="GiB">16</currentMemory>
+  <vcpu placement="static">8</vcpu>
+  <os>
+    <type arch="x86_64" machine="q35">hvm</type>
+    <!-- your patched QEMU. a distro package works with the
+         qemu-spicedisplay patch applied on top of qemu-gpupv.patch -->
+    <loader readonly="yes" secure="yes" type="pflash" format="qcow2">/usr/share/edk2/OvmfX64/OVMF_CODE_4M.secboot.qcow2</loader>
+    <nvram format="qcow2">/var/lib/guesthouse/machines/windows-gpu/vars.fd</nvram>
+  </os>
+  <features>
+    <acpi/>
+    <smm state="on"/>
+    <hyperv mode="custom">
+      <relaxed state="on"/>
+      <vapic state="on"/>
+      <spinlocks state="on" retries="8191"/>
+      <vpindex state="on"/>
+      <runtime state="on"/>
+      <synic state="on"/>
+      <stimer state="on"><direct state="on"/></stimer>
+      <frequencies state="on"/>
+      <reset state="on"/>
+      <ipi state="on"/>
+      <tlbflush state="on"/>
+    </hyperv>
+  </features>
+  <cpu mode="host-passthrough" check="none">
+    <topology sockets="1" dies="1" cores="8" threads="1"/>
+    <!-- with a TPM present, Windows would put its own hypervisor
+         between GPU-PV and QEMU -->
+    <feature policy="disable" name="svm"/>
+    <feature policy="disable" name="vmx"/>
+  </cpu>
+  <clock offset="utc">
+    <timer name="rtc" tickpolicy="catchup"/>
+    <timer name="pit" tickpolicy="discard"/>
+    <timer name="hypervclock" present="yes"/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2" cache="unsafe" discard="unmap"/>
+      <source file="/var/lib/guesthouse/machines/windows-gpu/disk.qcow2"/>
+      <target dev="sda" bus="sata"/>
+      <boot order="1"/>
+    </disk>
+    <disk type="file" device="cdrom">
+      <target dev="sdb" bus="sata"/>
+      <readonly/>
+    </disk>
+    <controller type="sata" index="0"/>
+    <!-- the GPU picture. glz stills, streaming off: see the tuning
+         section in standalone-spicedisplay.md. tunnel the port over
+         ssh: ssh -L 5900:localhost:5900 host -->
+    <graphics type="spice" autoport="yes" listen="127.0.0.1">
+      <listen type="address" address="127.0.0.1"/>
+      <image compression="auto_glz"/>
+      <streaming mode="off"/>
+    </graphics>
+    <!-- no video device: the gh-frames console is the only display -->
+    <video>
+      <model type="none"/>
+    </video>
+    <audio id="1" type="spice"/>
+    <sound model="ich9"><audio id="1"/></sound>
+    <controller type="usb" model="qemu-xhci"/>
+    <redirdev bus="usb" type="spicevmc"/>
+    <redirdev bus="usb" type="spicevmc"/>
+    <input type="tablet" bus="usb"/>
+    <input type="mouse" bus="usb"/>
+    <serial type="file">
+      <source path="/run/guesthouse/run/serial.log"/>
+    </serial>
+    <console type="file">
+      <source path="/run/guesthouse/run/serial.log"/>
+    </console>
+    <memballoon model="none"/>
+  </devices>
+  <!-- run QEMU as the daemon's user: the daemon's sockets and memory
+       files are 0600. put your guesthouse user's uid:gid here -->
+  <seclabel type="static" model="dac" relabel="no">
+    <label>1000:1000</label>
+  </seclabel>
+  <qemu:commandline>
+    <!-- the agent port and rdp, for getting into Windows over the
+         network. the mac: leave out and libvirt makes one -->
+    <qemu:arg value="-netdev"/><qemu:arg value="user,id=net0,hostfwd=tcp:127.0.0.1:18765-:8765,hostfwd=tcp:127.0.0.1:3389-:3389"/>
+    <qemu:arg value="-device"/><qemu:arg value="e1000e,netdev=net0,addr=0x11"/>
+    <qemu:arg value="-D"/><qemu:arg value="/run/guesthouse/run/qemu.log"/>
+    <!-- the GPU words, in the printed order -->
+    <qemu:arg value="-device"/><qemu:arg value="vmbus-bridge,mmio-base=0x10000000000,mmio-size=0x1000000000"/>
+    <qemu:arg value="-device"/><qemu:arg value="hv-timesync"/>
+    <qemu:arg value="-chardev"/><qemu:arg value="socket,id=gpg,path=/run/guesthouse/run/global.sock,reconnect-ms=500"/>
+    <qemu:arg value="-object"/><qemu:arg value="memory-backend-file,id=gpio,size=64G,mem-path=/dev/shm/gpupv-window.standalone,share=on"/>
+    <qemu:arg value="-device"/><qemu:arg value="gpupv-global,chardev=gpg,instanceid=711dad3a-73ce-468b-90a9-ede6906841b2,iomem=gpio,iomem-base=0x10000000000"/>
+    <qemu:arg value="-chardev"/><qemu:arg value="socket,id=gpv,path=/run/guesthouse/run/vgpu.sock,reconnect-ms=500"/>
+    <qemu:arg value="-device"/><qemu:arg value="gpupv-vgpu,chardev=gpv,instanceid=7a1e2f30-4c55-4d6e-9f10-0123456789ab"/>
+    <qemu:arg value="-object"/><qemu:arg value="memory-backend-file,id=ram0,size=16G,mem-path=/dev/shm/gpupv-ram.standalone,share=on"/>
+    <!-- this reliably wins over the RAM object libvirt makes for the
+         machine; the guest's RAM lands in the file, and the GPU works -->
+    <qemu:arg value="-machine"/><qemu:arg value="memory-backend=ram0"/>
+    <!-- vendor-id/device-id: your card's, as guesthouse-vm command prints them -->
+    <qemu:arg value="-device"/><qemu:arg value="gpupv-render,channel=7a1e2f30-4c55-4d6e-9f10-0123456789ab,hostcaps=1,vendor-id=0x10de,device-id=0x2bfe,addr=0x10"/>
+    <!-- the TPM needs swtpm running, which the hook starts. without a
+         TPM, take these three words out -->
+    <qemu:arg value="-chardev"/><qemu:arg value="socket,id=tpm,path=/run/guesthouse/run/tpm.sock"/>
+    <qemu:arg value="-tpmdev"/><qemu:arg value="emulator,id=tpm0,chardev=tpm"/>
+    <qemu:arg value="-device"/><qemu:arg value="tpm-crb,tpmdev=tpm0"/>
+    <!-- the picture: the daemon's frame socket, one display channel,
+         firmware boot output to desktop. width/height: the machine's
+         screen size -->
+    <qemu:arg value="-device"/><qemu:arg value="gh-frames,id=ghf,socket=/run/guesthouse/run/frames.sock,width=1920,height=1080"/>
+  </qemu:commandline>
+</domain>

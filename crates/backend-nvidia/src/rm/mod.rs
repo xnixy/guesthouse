@@ -18,7 +18,7 @@ pub mod linux;
 pub mod listing;
 
 use std::fmt;
-use std::os::fd::OwnedFd;
+use std::os::fd::{OwnedFd, RawFd};
 
 /// An object's name in the RM.
 pub type Handle = u32;
@@ -37,6 +37,10 @@ pub const STATUS_INSUFFICIENT_PERMISSIONS: u32 = 0x1B;
 
 /// The RM's status for an argument that names nothing.
 pub const STATUS_INVALID_ARGUMENT: u32 = 0x1F;
+
+/// The surface's status for a value that has already been reached: the caller skips the wait
+/// rather than arming one.
+pub const STATUS_ALREADY_SIGNALLED: u32 = 0x7B;
 
 /// What went wrong in a call to the RM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,4 +139,36 @@ pub trait Rm {
     /// The GPU's timer in nanoseconds, read from the doorbell's page, so no RM lock is taken. `None`
     /// until [`Rm::map_doorbell`] has run, or if the reading won't hold still.
     fn read_gpu_timer(&self) -> Option<u64>;
+
+    /// Tells the driver to post this client's event wakeups on the descriptor [`Rm::wake_fd`]
+    /// names, so a poll on it returns when the GPU signals a waiter. An RM with no events is the
+    /// default: it has none.
+    fn alloc_os_event(&mut self, device: Handle) -> Result<(), RmError> {
+        let _ = device;
+        Err(RmError::System("this RM has no events".to_owned()))
+    }
+
+    /// Takes the event posting back. Nothing waits on the descriptor after this.
+    fn free_os_event(&mut self, device: Handle) -> Result<(), RmError> {
+        let _ = device;
+        Err(RmError::System("this RM has no events".to_owned()))
+    }
+
+    /// The descriptor a poll sleeps on until the GPU signals a waiter of this client, if it has
+    /// one.
+    fn wake_fd(&self) -> Option<RawFd> {
+        None
+    }
+
+    /// The same, with the kernel allowed to map the pages too, for memory whose consumer maps
+    /// it behind the scenes. The default is the same answer as [`Rm::alloc_host_pages`].
+    fn alloc_host_pages_kernel_mapped(
+        &mut self,
+        device: Handle,
+        handle: Handle,
+        address: u64,
+        size: u64,
+    ) -> Result<(), RmError> {
+        self.alloc_host_pages(device, handle, address, size)
+    }
 }

@@ -39,7 +39,11 @@ const NO_DESCRIPTOR: i32 = -1;
 const CHANNEL_PLACES: usize = 2 * Channel::ALL.len();
 const VIEWER_LISTENER: usize = CHANNEL_PLACES;
 const VIEWER_SOCKET: usize = CHANNEL_PLACES + 1;
-const ALL_PLACES: usize = CHANNEL_PLACES + 2;
+/// The descriptor the GPU's own interrupts post to, when the backend has one. Its readiness needs
+/// no dealing-with: whatever it woke the loop for is re-read by the poll below, as every tick
+/// re-reads it.
+const GPU_WAKE: usize = CHANNEL_PLACES + 2;
+const ALL_PLACES: usize = CHANNEL_PLACES + 3;
 /// QEMU runs as the same user, and nobody else has business with these.
 pub(crate) const OWNER_ONLY: u32 = 0o600;
 
@@ -81,6 +85,8 @@ pub struct Server<B, M> {
     viewers: ViewerPort,
     waiting: Waiting,
     urgent_since: Option<Instant>,
+    /// The descriptor the GPU's interrupts post to, when the backend has one.
+    wake: Option<i32>,
     scratch: Vec<u8>,
     /// QEMU has connected at some point, so a closed channel means something.
     qemu_seen: bool,
@@ -118,6 +124,7 @@ impl<B: Backend, M: GuestMemory> Server<B, M> {
             viewers,
             waiting: Waiting::Nothing,
             urgent_since: None,
+            wake: None,
             scratch: Vec::new(),
             qemu_seen: false,
             all_closed_since: None,
@@ -200,7 +207,13 @@ impl<B: Backend, M: GuestMemory> Server<B, M> {
             }
             Waiting::Urgent => {
                 let since = *self.urgent_since.get_or_insert(now);
-                Some(if now - since < SPIN_LIMIT { Duration::ZERO } else { FENCE_POLL })
+                if now - since < SPIN_LIMIT {
+                    return Some(Duration::ZERO);
+                }
+                // With the GPU's interrupts to wake the loop, a fence is looked for when something
+                // says it may have moved, and at this pace otherwise. Without them, the old tight
+                // cadence stands.
+                Some(if self.wake.is_some() { BACKGROUND_POLL } else { FENCE_POLL })
             }
         }
     }
@@ -216,6 +229,12 @@ impl<B: Backend, M: GuestMemory> Server<B, M> {
         let (listener, viewer, blocked) = self.viewers.wait_on();
         descriptors[VIEWER_LISTENER].fd = listener;
         descriptors[VIEWER_SOCKET].fd = viewer;
+        // The copy channel's surface is made lazily, so the descriptor is asked for every step.
+        self.wake = self.router.session_mut().wake_descriptor();
+        if let Some(fd) = self.wake {
+            descriptors[GPU_WAKE].fd = fd;
+            descriptors[GPU_WAKE].events = libc::POLLIN | libc::POLLPRI;
+        }
         if blocked {
             descriptors[VIEWER_SOCKET].events |= libc::POLLOUT;
         }

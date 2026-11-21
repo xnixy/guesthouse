@@ -33,6 +33,7 @@ pub mod staging;
 mod standard;
 pub mod startup;
 mod tiling;
+pub mod wakes;
 
 use answers::adapter::{AdapterAnswers, Inputs};
 use answers::nodes::{ENGINE_VIDEO_ENCODE, Node, node_list};
@@ -375,6 +376,10 @@ impl<R: Rm + OpenRm> Backend for NvidiaBackend<R> {
             Err(error) => log::info!("no host sensors: {error}"),
         }
         Ok(backend)
+    }
+
+    fn wake_descriptor(&self) -> Option<std::os::fd::RawFd> {
+        self.copier.as_ref().and_then(|copier| copier.channel.signal).map(|(_, _, fd)| fd)
     }
 
     fn facts(&self) -> &AdapterFacts {

@@ -80,7 +80,9 @@ fn copy_side(
 /// The copy channel, and where it lives.
 #[derive(Debug)]
 pub struct Copier {
-    channel: CopyChannel,
+    /// The surface whose waiters the copy's releases wake, if one was made.
+    pub(crate) wakes: Option<crate::wakes::Wakes>,
+    pub(crate) channel: CopyChannel,
     space: SpaceId,
     area: u64,
     /// True while a frame's copy is under way.
@@ -116,7 +118,12 @@ impl Copier {
 }
 
 impl<R: Rm> NvidiaBackend<R> {
-    fn make_copy_channel(&mut self, area: u64, space: SpaceId) -> Result<CopyChannel, RmError> {
+    fn make_copy_channel(
+        &mut self,
+        area: u64,
+        space: SpaceId,
+        host: &mut dyn HostServices,
+    ) -> Result<(CopyChannel, Option<crate::wakes::Wakes>), RmError> {
         let place = ChannelPlace {
             ring_address: area,
             ring_entries: RING_ENTRIES,
@@ -128,8 +135,30 @@ impl<R: Rm> NvidiaBackend<R> {
         };
         let generation = self.generation;
         let sizes = self.host_branch;
-        Channel::new(&mut self.device, generation, sizes, address_space, place, Engine::Copy)
-            .map(CopyChannel::new)
+        let mut channel =
+            Channel::new(&mut self.device, generation, sizes, address_space, place, Engine::Copy)
+                .map(CopyChannel::new)?;
+        // The surface's address comes from the same allocator as the channel's, beside it.
+        let mut wakes = None;
+        if std::env::var("GUESTHOUSE_WAKES").ok().as_deref() != Some("0") {
+            let fd = self.device.rm.wake_fd();
+            let parent = self.device.subdevice;
+            if let (Some(fd), Ok(at)) = (fd, host.take_gpu_addresses(4096, CHANNEL_ADDRESS_ALIGN)) {
+                match crate::wakes::Wakes::new(&mut self.device, address_space, at, parent) {
+                    Ok(mut made) => {
+                        if let Err(error) = made.bind(&mut self.device, channel.channel.handle(), true) {
+                            log::warn!("the copy channel is not bound to the surface: {error}");
+                        }
+                        channel.signal = Some((made.slot_address(0), made.surface_control(), fd));
+                        wakes = Some(made);
+                    }
+                    Err(error) => {
+                        log::warn!("no semaphore surface for the copies, so they are polled: {error}")
+                    }
+                }
+            }
+        }
+        Ok((channel, wakes))
     }
 
     /// The copy channel, made the first time something needs it.
@@ -137,9 +166,16 @@ impl<R: Rm> NvidiaBackend<R> {
         if self.copier.is_none() {
             let size = AREA_SIZE as u64 + COPY_AREA_EXTRA;
             let area = host.take_gpu_addresses(size, CHANNEL_ADDRESS_ALIGN)?;
-            let channel = self.make_copy_channel(area, space).map_err(memory_error)?;
-            self.copier =
-                Some(Copier { channel, space, area, running: false, retried: false, kinds_said: Vec::new() });
+            let (channel, wakes) = self.make_copy_channel(area, space, host).map_err(memory_error)?;
+            self.copier = Some(Copier {
+                wakes,
+                channel,
+                space,
+                area,
+                running: false,
+                retried: false,
+                kinds_said: Vec::new(),
+            });
         }
         Ok(self.copier.as_mut().expect("made just above"))
     }
@@ -281,7 +317,7 @@ impl<R: Rm> NvidiaBackend<R> {
     }
 
     /// Replaces a dead channel, and runs its last batch again on the new one.
-    fn retry_copy(&mut self) -> Result<(), RmError> {
+    fn retry_copy(&mut self, host: &mut dyn HostServices) -> Result<(), RmError> {
         let mut copier = self.copier.take().expect("a copy is running");
         let mut words = std::mem::take(&mut copier.channel.last_words);
         if let Some(space) = self.spaces.get(&copier.space)
@@ -289,14 +325,20 @@ impl<R: Rm> NvidiaBackend<R> {
         {
             log::warn!("closing the old copy channel: {error}");
         }
-        let mut channel = self.make_copy_channel(copier.area, copier.space)?;
+        // The old surface has died with the channel it was bound to, so a new one comes with the
+        // new channel, from the same allocator.
+        if let Some(mut old) = copier.wakes.take() {
+            let _ = old.close(&mut self.device);
+        }
+        let (mut channel, wakes) = self.make_copy_channel(copier.area, copier.space, host)?;
+        copier.wakes = wakes;
         channel.renumber(&mut words);
         channel.start(&mut self.device, words);
         self.copier = Some(Copier { channel, retried: true, running: true, ..copier });
         Ok(())
     }
 
-    pub(crate) fn poll_copy(&mut self, _host: &mut dyn HostServices, now: Instant) -> Option<Status> {
+    pub(crate) fn poll_copy(&mut self, host: &mut dyn HostServices, now: Instant) -> Option<Status> {
         let copier = self.copier.as_mut()?;
         if copier.channel.is_finished() {
             copier.running = false;
@@ -312,7 +354,7 @@ impl<R: Rm> NvidiaBackend<R> {
             return Some(Status::UNSUCCESSFUL);
         }
         log::warn!("the copy channel stopped answering, so it is being replaced");
-        match self.retry_copy() {
+        match self.retry_copy(host) {
             Ok(()) => {
                 let channel = &self.copier.as_ref().expect("made just above").channel;
                 log::warn!("the copy runs again on a new channel: {}", channel.state());

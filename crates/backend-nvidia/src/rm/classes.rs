@@ -5,6 +5,9 @@ pub const ROOT_CLIENT: u32 = 0x41;
 pub const DEVICE: u32 = 0x80;
 pub const SUBDEVICE: u32 = 0x2080;
 pub const MEMORY_LOCAL_USER: u32 = 0x40;
+/// Plain system memory the RM itself allocates, which the kernel can map to the CPU: what a
+/// semaphore surface's slots must live in.
+pub const MEMORY_SYSTEM: u32 = 0x3E;
 pub const VIRTUAL_ADDRESS_SPACE: u32 = 0x90F1;
 pub const MEMORY_VIRTUAL: u32 = 0x50A0;
 pub const CHANNEL_GROUP: u32 = 0xA06C;
@@ -27,6 +30,19 @@ pub const CONTROL_GET_ATTACHED_IDS: u32 = 0x0000_0201;
 pub const CONTROL_GET_GPU_ID_INFO: u32 = 0x0000_0205;
 pub const CONTROL_GET_GPU_PCI_INFO: u32 = 0x0000_021B;
 pub const CONTROL_EXPORT_OBJECT_TO_FD: u32 = 0x0000_3D05;
+
+/// The semaphore surface: the RM's monitored-fence object, whose waiters the kernel can post to a
+/// file descriptor when a bound engine raises its non-stall interrupt.
+pub const SEMAPHORE_SURFACE: u32 = 0xDA;
+pub const SURFACE_BIND_CHANNEL: u32 = 0x00DA_0002;
+pub const SURFACE_REGISTER_WAITER: u32 = 0x00DA_0003;
+pub const SURFACE_UNREGISTER_WAITER: u32 = 0x00DA_0005;
+pub const SURFACE_UNBIND_CHANNEL: u32 = 0x00DA_0006;
+/// The RM's notifier indices a surface can be bound by. Copy is the one the daemon's own copies run
+/// on; graphics and the FIFO round out the set a session would want.
+pub const NOTIFY_GRAPHICS: u32 = 12;
+pub const NOTIFY_COPY: u32 = 23;
+pub const NOTIFY_FIFO_METHODS: u32 = 35;
 
 /// The RM's engine numbers for the two engines channels run on here.
 pub const ENGINE_GRAPHICS: u32 = 1;

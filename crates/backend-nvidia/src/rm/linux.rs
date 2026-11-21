@@ -12,7 +12,7 @@ use guesthouse_backend::PciAddress;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
 
 const CONTROL_DEVICE: &str = "/dev/nvidiactl";
@@ -32,6 +32,8 @@ const ESCAPE_MAP_MEMORY_DMA: u64 = 0x57;
 const ESCAPE_UNMAP_MEMORY_DMA: u64 = 0x58;
 const ESCAPE_REGISTER_FD: u64 = 200 + 1;
 const ESCAPE_CHECK_VERSION: u64 = 200 + 10;
+const ESCAPE_ALLOC_OS_EVENT: u64 = 200 + 6;
+const ESCAPE_FREE_OS_EVENT: u64 = 200 + 7;
 
 const VERSION_REQUEST_SIZE: usize = 72;
 const VERSION_STRING_AT: usize = 8;
@@ -218,6 +220,28 @@ impl LinuxRm {
         ioctl(file, ESCAPE_REGISTER_FD, &mut request)
     }
 
+    fn alloc_host_pages_flags(
+        &mut self,
+        device: Handle,
+        handle: Handle,
+        address: u64,
+        size: u64,
+        flags: u32,
+    ) -> Result<(), RmError> {
+        let sizes = self.sizes;
+        let mut request = vec![0; sizes.alloc_memory_request];
+        put32(&mut request, 0, self.client);
+        put32(&mut request, 4, device);
+        put32(&mut request, 8, handle);
+        put32(&mut request, 12, MEMORY_OS_DESCRIPTOR);
+        put32(&mut request, 16, flags);
+        put64(&mut request, 24, address);
+        put64(&mut request, 32, size - 1);
+        put32(&mut request, sizes.alloc_memory_request_fd, u32::MAX);
+        ioctl(&self.gpu_file, ESCAPE_ALLOC_MEMORY, &mut request)?;
+        let status = get32(&request, sizes.alloc_memory_request_status);
+        RmError::check(|| format!("host pages at {address:#x}"), status)
+    }
     fn open_render_node(&mut self) -> Result<&File, RmError> {
         if self.render_node.is_none() {
             let no_node = || RmError::System("this card has no render node".to_owned());
@@ -303,19 +327,19 @@ impl Rm for LinuxRm {
         address: u64,
         size: u64,
     ) -> Result<(), RmError> {
-        let sizes = self.sizes;
-        let mut request = vec![0; sizes.alloc_memory_request];
-        put32(&mut request, 0, self.client);
-        put32(&mut request, 4, device);
-        put32(&mut request, 8, handle);
-        put32(&mut request, 12, MEMORY_OS_DESCRIPTOR);
-        put32(&mut request, 16, OS_DESCRIPTOR_FLAGS);
-        put64(&mut request, 24, address);
-        put64(&mut request, 32, size - 1);
-        put32(&mut request, sizes.alloc_memory_request_fd, u32::MAX);
-        ioctl(&self.gpu_file, ESCAPE_ALLOC_MEMORY, &mut request)?;
-        let status = get32(&request, sizes.alloc_memory_request_status);
-        RmError::check(|| format!("host pages at {address:#x}"), status)
+        self.alloc_host_pages_flags(device, handle, address, size, OS_DESCRIPTOR_FLAGS)
+    }
+
+    /// The same, with the kernel allowed to map the pages too: what a semaphore surface's
+    /// constructor does behind the scenes, and the no-kernel-mapping flag would stop it.
+    fn alloc_host_pages_kernel_mapped(
+        &mut self,
+        device: Handle,
+        handle: Handle,
+        address: u64,
+        size: u64,
+    ) -> Result<(), RmError> {
+        self.alloc_host_pages_flags(device, handle, address, size, OS_DESCRIPTOR_FLAGS & !0x4000_0000)
     }
 
     fn map_dma(&mut self, map: &DmaMap) -> Result<(), RmError> {
@@ -405,6 +429,26 @@ impl Rm for LinuxRm {
         assert!(!self.doorbell.is_null(), "the doorbell page is not mapped yet");
         // SAFETY: the page is mapped for the life of the process, and the register is inside it.
         unsafe { ptr::write_volatile(self.doorbell.add(DOORBELL_REGISTER).cast::<u32>(), token) };
+    }
+
+    fn alloc_os_event(&mut self, device: Handle) -> Result<(), RmError> {
+        let mut request = [0; 16];
+        put32(&mut request, 0, self.client);
+        put32(&mut request, 4, device);
+        put32(&mut request, 8, self.control_file.as_raw_fd() as u32);
+        ioctl(&self.control_file, ESCAPE_ALLOC_OS_EVENT, &mut request)
+    }
+
+    fn free_os_event(&mut self, device: Handle) -> Result<(), RmError> {
+        let mut request = [0; 16];
+        put32(&mut request, 0, self.client);
+        put32(&mut request, 4, device);
+        put32(&mut request, 8, self.control_file.as_raw_fd() as u32);
+        ioctl(&self.control_file, ESCAPE_FREE_OS_EVENT, &mut request)
+    }
+
+    fn wake_fd(&self) -> Option<RawFd> {
+        Some(self.control_file.as_raw_fd())
     }
 
     fn read_gpu_timer(&self) -> Option<u64> {

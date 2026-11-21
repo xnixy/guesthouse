@@ -52,6 +52,12 @@ pub trait Backend: Sized {
     /// What the card and its driver turned out to be.
     fn facts(&self) -> &AdapterFacts;
 
+    /// The descriptor the GPU's own interrupts post to, for a backend whose waits can sleep on
+    /// them. `None`, as it stays, when there is nothing to be woken by.
+    fn wake_descriptor(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
+
     /// Makes video memory of at least `size` bytes, laid out as `kind` says. Returns it and the
     /// size it really has.
     fn allocate_video_memory(&mut self, size: u64, kind: MemoryKind)

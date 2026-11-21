@@ -1,8 +1,8 @@
 //! The objects this backend keeps in the RM: one client, one device, and what hangs from them.
 
 use super::classes::{
-    CONTROL_GET_GPU_ID, CONTROL_GET_TIME, DEVICE, MEMORY_LOCAL_USER, MEMORY_VIRTUAL, SUBDEVICE,
-    VIRTUAL_ADDRESS_SPACE,
+    CONTROL_GET_GPU_ID, CONTROL_GET_TIME, DEVICE, MEMORY_LOCAL_USER, MEMORY_SYSTEM, MEMORY_VIRTUAL,
+    SUBDEVICE, VIRTUAL_ADDRESS_SPACE,
 };
 use super::instance::device_instance_at;
 use super::listing::CardPlace;
@@ -33,6 +33,8 @@ const MEMORY_PARAM_SIZE: usize = 0x40;
 const MEMORY_PARAM_OFFSET: usize = 0x50;
 const MEMORY_PARAM_ADDRESS_SPACE: usize = 0x6C;
 const MEMORY_FLAG_HANDLE_PROVIDED: u32 = 0x4000;
+/// `NVOS32_ATTR_LOCATION_PCI`, which system memory asks for by name.
+const MEMORY_ATTR_LOCATION_PCI: u32 = 1 << 25;
 /// Memory for a depth surface, which the RM gives the depth kind its attributes' packing calls for.
 const MEMORY_TYPE_DEPTH: u32 = 1;
 /// Virtual, at a fixed address, with the handle provided, and lazily. Without lazily the page tables
@@ -209,6 +211,17 @@ impl<R: Rm> Device<R> {
         let handle = self.alloc(self.device, MEMORY_LOCAL_USER, &mut params)?;
         let given = params[MEMORY_PARAM_SIZE..MEMORY_PARAM_SIZE + 8].try_into().expect("eight bytes");
         Ok((handle, u64::from_le_bytes(given)))
+    }
+
+    /// Makes system memory the RM owns, which the kernel can map to the CPU. A semaphore
+    /// surface's slots must live in memory of exactly this kind.
+    pub fn alloc_sysmem(&mut self, size: u64) -> Result<Handle, RmError> {
+        let mut params = vec![0; self.sizes.memory_params];
+        put_u32(&mut params, MEMORY_PARAM_OWNER, MEMORY_OWNER);
+        put_u32(&mut params, MEMORY_PARAM_FLAGS, MEMORY_FLAG_HANDLE_PROVIDED);
+        put_u32(&mut params, MEMORY_PARAM_ATTRIBUTES, MEMORY_ATTR_LOCATION_PCI);
+        put_u64(&mut params, MEMORY_PARAM_SIZE, size);
+        self.alloc(self.device, MEMORY_SYSTEM, &mut params)
     }
 
     pub fn alloc_host_pages(&mut self, address: u64, size: u64) -> Result<Handle, RmError> {

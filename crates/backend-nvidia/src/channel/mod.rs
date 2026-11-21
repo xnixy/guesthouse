@@ -418,6 +418,11 @@ impl Channel {
         self.area.load(CONTROL_BLOCK + GP_GET)
     }
 
+    /// The channel's own handle, for anything that binds to the channel.
+    pub fn handle(&self) -> Handle {
+        self.channel
+    }
+
     /// The ring entry that runs the prelude, in the same form as the guest's entries.
     pub fn prelude_entry(&self) -> u64 {
         ring_entry(self.area_address + PRELUDE as u64, self.prelude_words)

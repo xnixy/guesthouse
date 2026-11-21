@@ -222,6 +222,11 @@ pub struct Session<B, M> {
 }
 
 impl<B: Backend, M: GuestMemory> Session<B, M> {
+    /// The descriptor the GPU's interrupts post to, so the daemon's loop can sleep on them.
+    pub fn wake_descriptor(&self) -> Option<std::os::fd::RawFd> {
+        self.backend.wake_descriptor()
+    }
+
     pub fn new(backend: B, memory: M, config: Config) -> Self {
         let gpu_addresses = GpuAddresses::keeping_clear(backend.kept_gpu_ranges())
             .with_guest_only(backend.guest_placed_gpu_ranges());

@@ -1,13 +1,20 @@
 //! One log line for each exchange with the guest's driver, in a fixed form a tester's log can be
 //! searched by: `amd <kind> name=value ...`.
 //!
-//! The kinds are `escape`, `query`, `registry`, `submit`, `context` and `queue`. All of the lines are
-//! at debug, so they are in the log only with `GUESTHOUSE_VERBOSE`, and nothing is read for them
-//! without it. A line names only what the protocol modules read; the rest of a buffer is in its
-//! `amd dump` line, whole up to 4 KiB. A submission has no dump, as a busy guest makes thousands a
-//! second. A registry lookup left to the core has neither line: a guest makes them by the hundred
-//! thousand as it starts, and the core logs each name it finds no value for. A value this backend
-//! gives has a `registry` line with its name.
+//! The kinds are `escape`, `query`, `registry`, `submit`, `context`, `queue`, `video` and `session`.
+//! All of the lines are at debug, so they are in the log only with `GUESTHOUSE_VERBOSE`, and nothing is
+//! read for them without it. A line names only what the protocol modules read; the rest of a buffer
+//! is in its `amd dump` line, whole up to 4 KiB. A submission has no dump, as a busy guest makes
+//! thousands a second. A registry lookup left to the core has neither line: a guest makes them by
+//! the hundred thousand as it starts, and the core logs each name it finds no value for. A value
+//! this backend gives has a `registry` line with its name.
+//!
+//! Work for the video ring has its `submit` line like any other, then a dump of each command
+//! buffer as the daemon copied it, and once it has been waited for a `video` line that says how it
+//! ended. There are a few dozen of those a second at most, and the commands are what a person
+//! needs when the card's video engine didn't take them. An escape of a video session has a
+//! `session` line with what the books made of it, ahead of its `escape` line, which shows what was
+//! sent.
 //!
 //! Nothing here writes to a buffer of the guest's or decides an answer: every function takes what
 //! it logs by shared reference, after the answer is made or, for an escape, before and after.
@@ -16,11 +23,17 @@ use crate::protocol::command_data::Submission;
 use crate::protocol::context::{self, Context};
 use crate::protocol::escape::{self, Answered, Count, Framing};
 use crate::protocol::hw_queue;
+use crate::protocol::video_escape::{Asked, Change};
+use crate::space_vm::Ran;
 use crate::submit::Ib;
+use crate::video::Outcome;
+use crate::video_ib::Copied;
 use crate::watch::{Hex, HexNumber, Kept, OrDash, PREFIX, Spaced, bit, dump, dwords, watching};
 use guesthouse_backend::{RegistryName, RegistryValue, Status, VendorQuery, Work, WorkSource};
 use guesthouse_messages::adapter::AdapterQuery;
 use std::fmt;
+use std::io;
+use std::time::Duration;
 
 /// How many bytes of an escape's payload a line shows.
 const ESCAPE_BYTES_SHOWN: usize = 32;
@@ -334,6 +347,110 @@ impl fmt::Display for ContextLine<'_> {
     }
 }
 
+/// Dumps the command buffers of work for the video ring, as they were copied out of the guest's
+/// pages. Called before the copy is run, so the log has them if the run never comes back.
+pub fn video_commands(work: &Work<'_>, copied: &Copied) {
+    if !watching() {
+        return;
+    }
+    for (index, buffer) in copied.buffers().enumerate() {
+        let bytes: Vec<u8> = buffer.iter().flat_map(|dword| dword.to_le_bytes()).collect();
+        let (queue, fence_value) = (work.queue, work.fence_value);
+        dump(format_args!("video queue={queue:#x} fence_value={fence_value} buffer={index}"), &bytes);
+    }
+}
+
+/// Logs how a run on the video ring ended, after `took` of waiting for it.
+pub fn video_ran(work: &Work<'_>, copied: &Copied, took: Duration, ran: &io::Result<Ran>) {
+    log::debug!("{}", VideoLine { work, buffers: copied.runs(), took, ran });
+}
+
+/// A video run's line. The buffers are where the daemon's copies were run from, which is the same
+/// place for every run, so their lengths are what tells runs apart.
+struct VideoLine<'a> {
+    work: &'a Work<'a>,
+    buffers: &'a [Ib],
+    took: Duration,
+    ran: &'a io::Result<Ran>,
+}
+
+impl fmt::Display for VideoLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { work, buffers, took, ran } = self;
+        write!(
+            f,
+            "{PREFIX} video queue={:#x} fence_value={} space={} buffers=[{}] took_us={} {}",
+            work.queue,
+            work.fence_value,
+            work.space.0,
+            Spaced(buffers.iter().map(BufferText)),
+            took.as_micros(),
+            RanText(ran)
+        )
+    }
+}
+
+/// How a run that was waited for ended, as `ran=`, with where for one that faulted and why for one
+/// that wasn't run.
+pub struct RanText<'a>(pub &'a io::Result<Ran>);
+
+impl fmt::Display for RanText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Ok(Ran::Retired) => f.write_str("ran=retired"),
+            Ok(Ran::Refused) => f.write_str("ran=refused"),
+            Ok(Ran::Hung) => f.write_str("ran=hung"),
+            Ok(Ran::Faulted(fault)) => {
+                write!(f, "ran=faulted address={:#x} status={:#x}", fault.address, fault.status)
+            }
+            Err(error) => write!(f, "ran=not-run why=\"{error}\""),
+        }
+    }
+}
+
+/// Logs what the books made of one of a video session's escapes: what was asked, what the guest
+/// reads back, and how many sessions are open after it.
+pub fn session(process: u32, asked: Asked, outcome: Outcome, open: usize) {
+    log::debug!("{}", SessionLine { process, asked, outcome, open });
+}
+
+struct SessionLine {
+    process: u32,
+    asked: Asked,
+    outcome: Outcome,
+    open: usize,
+}
+
+impl fmt::Display for SessionLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { process, asked, outcome, open } = self;
+        write!(f, "{PREFIX} session process={process:#x} ")?;
+        match asked {
+            Asked::Start => f.write_str("asked=start")?,
+            Asked::End { session } => write!(f, "asked=end session={session}")?,
+            Asked::Throughput { session, engine, change } => {
+                let what = match change {
+                    Change::Book(_) => "book",
+                    Change::Release => "release",
+                    Change::Ask => "ask",
+                };
+                write!(f, "asked={what} session={session} engine={engine}")?;
+                if let Change::Book(demand) = change {
+                    write!(f, " demand={demand}")?;
+                }
+            }
+        }
+        match outcome {
+            Outcome::Started { session } => write!(f, " answer=done gave={session}")?,
+            Outcome::Full => f.write_str(" answer=failed why=\"no more sessions may be open\"")?,
+            Outcome::Ended => f.write_str(" answer=done")?,
+            Outcome::NoSuchSession => f.write_str(" answer=failed why=\"no such session is open\"")?,
+            Outcome::Throughput { booked, most } => write!(f, " answer=done booked={booked} most={most}")?,
+        }
+        write!(f, " open={open}")
+    }
+}
+
 /// Logs a new hardware queue's private data and what the check made of it, and dumps the data.
 /// `private` is the guest's data and the padding after it, as the core passes it on.
 pub fn queue(queue: u32, serial: u32, private: &[u8], checked: Result<(), hw_queue::Refused>) {
@@ -496,6 +613,109 @@ mod tests {
         assert_eq!(debug.len(), 2);
     }
 
+    /// One of a video session's escapes as the guest's user-mode driver sends it: its header, then
+    /// the payload, which has no counts.
+    fn video_escape((code, payload): (escape::EscapeCode, Vec<u8>)) -> Vec<u8> {
+        let mut data = vec![0u8; HEADER_SIZE];
+        put_dword(&mut data, 0, HEADER_SIZE as u32);
+        put_dword(&mut data, HEADER_VERSION_AT, HEADER_VERSION);
+        put_dword(&mut data, CODE_AT, code.service << 24 | code.subfunction << 8 | code.client);
+        data.extend_from_slice(&payload);
+        data
+    }
+
+    /// The escapes of one video session, in the order a guest's driver sends them.
+    fn a_video_session(session: u32) -> [Vec<u8>; 5] {
+        use crate::protocol::video_escape::tests::{end, start, throughput};
+        [
+            video_escape(throughput(0, Change::Ask)),
+            video_escape(start()),
+            wrapped(&video_escape(throughput(session, Change::Book(209_635)))),
+            video_escape(throughput(session, Change::Release)),
+            video_escape(end(session)),
+        ]
+    }
+
+    #[test]
+    fn a_video_sessions_escapes_fail_as_they_did_when_no_video_is_offered() {
+        for sent in a_video_session(1) {
+            let mut data = sent.clone();
+            let lines = lines::logged(|| crate::answer_escape(PROCESS, &mut data, None));
+            let inner = if escape::framing(&sent).wrapped { WRAPPER_SIZE } else { 0 };
+            assert_eq!(
+                data[inner + HEADER_SIZE..],
+                sent[inner + HEADER_SIZE..],
+                "the payload was written to"
+            );
+            let debug = lines::at(Level::Debug, &lines);
+            assert_eq!(debug.len(), 2, "{lines:?}");
+            assert!(debug[1].contains(" service=3 ") && debug[1].contains(" answer=failed "), "{}", debug[1]);
+        }
+    }
+
+    #[test]
+    fn a_video_sessions_escapes_are_answered_from_the_books_when_video_is_offered() {
+        use crate::protocol::video_escape::tests::{answered, session_given};
+        const MOST: u32 = 2_937_600;
+        let mut books = crate::video::Sessions::new(MOST);
+        let [mut ask, mut start, mut book, mut release, mut end] = a_video_session(1);
+        let mut lines = Vec::new();
+        for data in [&mut ask, &mut start, &mut book, &mut release, &mut end] {
+            lines.extend(lines::logged(|| crate::answer_escape(PROCESS, data, Some(&mut books))));
+        }
+        assert_eq!(answered(&ask[HEADER_SIZE..]), (0, MOST));
+        assert_eq!(session_given(&start[HEADER_SIZE..]), 1);
+        assert_eq!(answered(&book[WRAPPER_SIZE + HEADER_SIZE..]), (209_635, MOST), "inside its wrapper");
+        assert_eq!(answered(&release[HEADER_SIZE..]), (0, MOST));
+        // Each has its dump, its session line and its escape line, and nothing above debug.
+        let debug = lines::at(Level::Debug, &lines);
+        assert_eq!((debug.len(), lines.len()), (15, 15), "{lines:?}");
+        let escapes = debug.iter().skip(2).step_by(3);
+        assert!(escapes.clone().all(|line| line.starts_with("amd escape ")), "{lines:?}");
+        assert!(escapes.clone().all(|line| line.contains(" service=3 ")), "{lines:?}");
+        assert!(escapes.clone().all(|line| line.contains(" answer=done ")), "{lines:?}");
+        let sessions: Vec<&str> = debug.iter().skip(1).step_by(3).copied().collect();
+        assert_eq!(
+            sessions,
+            [
+                "amd session process=0x40000002 asked=ask session=0 engine=41 answer=done booked=0 \
+                 most=2937600 open=0",
+                "amd session process=0x40000002 asked=start answer=done gave=1 open=1",
+                "amd session process=0x40000002 asked=book session=1 engine=41 demand=209635 answer=done \
+                 booked=209635 most=2937600 open=1",
+                "amd session process=0x40000002 asked=release session=1 engine=41 answer=done booked=0 \
+                 most=2937600 open=1",
+                "amd session process=0x40000002 asked=end session=1 answer=done open=0",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_video_escape_the_books_cannot_do_is_failed_and_its_session_line_says_why() {
+        let mut books = crate::video::Sessions::new(1);
+        // A guest that was never given an ID sends zero for it.
+        let [_, _, mut book, _, mut end] = a_video_session(0);
+        let before = (book.clone(), end.clone());
+        let lines = lines::logged(|| {
+            crate::answer_escape(PROCESS, &mut book, Some(&mut books));
+            crate::answer_escape(PROCESS, &mut end, Some(&mut books));
+        });
+        let debug = lines::at(Level::Debug, &lines);
+        assert_eq!((debug.len(), lines.len()), (6, 6), "{lines:?}");
+        assert!(debug[2].contains(" answer=failed ") && debug[5].contains(" answer=failed "), "{lines:?}");
+        assert_eq!(
+            [debug[1], debug[4]],
+            [
+                "amd session process=0x40000002 asked=book session=0 engine=41 demand=209635 answer=failed \
+                 why=\"no such session is open\" open=0",
+                "amd session process=0x40000002 asked=end session=0 answer=failed why=\"no such session is \
+                 open\" open=0",
+            ]
+        );
+        assert_eq!(book[WRAPPER_SIZE + HEADER_SIZE..], before.0[WRAPPER_SIZE + HEADER_SIZE..]);
+        assert_eq!(end[HEADER_SIZE..], before.1[HEADER_SIZE..]);
+    }
+
     /// What the backend's own handler leaves in the buffer and the log, for each way an escape can
     /// be answered: `(escape, warnings, info lines)`.
     fn every_kind_of_escape() -> Vec<(Vec<u8>, usize, usize)> {
@@ -521,11 +741,11 @@ mod tests {
             let _ = escape::answer(&mut alone);
 
             let mut quiet = sent.clone();
-            crate::answer_escape(PROCESS, &mut quiet);
+            crate::answer_escape(PROCESS, &mut quiet, None);
             assert_eq!(quiet, alone, "with debug lines off");
 
             let mut watched = sent.clone();
-            let lines = lines::logged(|| crate::answer_escape(PROCESS, &mut watched));
+            let lines = lines::logged(|| crate::answer_escape(PROCESS, &mut watched, None));
             assert_eq!(watched, alone, "with debug lines on");
 
             // The dump is first and holds what was sent, and the line is last.
@@ -545,13 +765,13 @@ mod tests {
     fn the_lines_the_log_had_before_are_worded_as_they_were() {
         let mut misshaped = escape_of(0x0300_5D03, 0x20, 0x60);
         misshaped.pop();
-        let lines = lines::logged(|| crate::answer_escape(7, &mut misshaped));
+        let lines = lines::logged(|| crate::answer_escape(7, &mut misshaped, None));
         assert_eq!(
             lines::at(Level::Warn, &lines),
             ["escape from 7: service 3 subfunction 0x5d, not shaped as the guest's driver sends it, \
               answered as failed; the guest can't go on without it"]
         );
-        let lines = lines::logged(|| crate::answer_escape(7, &mut [0xEE; 6]));
+        let lines = lines::logged(|| crate::answer_escape(7, &mut [0xEE; 6], None));
         assert_eq!(
             lines::at(Level::Info, &lines),
             ["an escape from 7 is shorter than its header (6 bytes, starting 0xeeeeeeee, 0xeeee)"]
@@ -746,9 +966,60 @@ mod tests {
         assert!(lines::logged(|| {}).is_empty(), "a line from before was kept");
     }
 
+    /// Two command buffers as the daemon lays them out for the video ring.
+    fn copied_video_work() -> Copied {
+        let mut copied = Copied::default();
+        copied.place(8, 256).unwrap().copy_from_slice(&[0x10, 0x3000_0001]);
+        copied.place(4, 256).unwrap().copy_from_slice(&[0xAABB_CCDD]);
+        copied
+    }
+
+    #[test]
+    fn a_video_run_says_how_it_ended_and_how_long_it_took() {
+        let data = submission_data();
+        let (work, copied) = (work_with(&data), copied_video_work());
+        let line = |ran: &io::Result<Ran>| {
+            VideoLine { work: &work, buffers: copied.runs(), took: Duration::from_micros(1900), ran }
+                .to_string()
+        };
+        assert_eq!(
+            line(&Ok(Ran::Retired)),
+            "amd video queue=0x40000010 fence_value=12 space=3 buffers=[0x100080000:0x8 0x100080100:0x4] \
+             took_us=1900 ran=retired"
+        );
+        assert!(line(&Ok(Ran::Refused)).ends_with(" ran=refused"));
+        assert!(line(&Ok(Ran::Hung)).ends_with(" ran=hung"));
+        let fault = crate::fault::Fault { address: 0x3000, status: 0x40_0c30 };
+        assert!(line(&Ok(Ran::Faulted(fault))).ends_with(" ran=faulted address=0x3000 status=0x400c30"));
+        let error = Err(io::Error::other("its commands are too long"));
+        assert!(line(&error).ends_with(" ran=not-run why=\"its commands are too long\""));
+    }
+
+    #[test]
+    fn a_video_run_has_a_dump_for_each_buffer_and_a_line_and_nothing_with_debug_lines_off() {
+        let data = submission_data();
+        let (work, copied) = (work_with(&data), copied_video_work());
+        let both = || {
+            video_commands(&work, &copied);
+            video_ran(&work, &copied, Duration::ZERO, &Ok(Ran::Retired));
+        };
+        both();
+        let lines = lines::logged(both);
+        assert_eq!(
+            lines::at(Level::Debug, &lines),
+            [
+                "amd dump video queue=0x40000010 fence_value=12 buffer=0 length=8 bytes=1000000001000030",
+                "amd dump video queue=0x40000010 fence_value=12 buffer=1 length=4 bytes=ddccbbaa",
+                "amd video queue=0x40000010 fence_value=12 space=3 buffers=[0x100080000:0x8 0x100080100:0x4] \
+                 took_us=0 ran=retired",
+            ]
+        );
+        assert!(lines::logged(|| {}).is_empty(), "a line from before was kept");
+    }
+
     /// A card with all three engine families, so the guest's nodes are graphics, compute and DMA.
     fn full_card() -> crate::DeviceInfo {
-        let engines = crate::EngineSet { graphics: true, compute: true, dma: true };
+        let engines = crate::EngineSet { graphics: true, compute: true, dma: true, video: false };
         crate::DeviceInfo { engines, ..Default::default() }
     }
 
@@ -1057,6 +1328,46 @@ mod tests {
         }
     }
 
+    // The books answer the same whether or not their lines are kept, so two sets of them stay in
+    // step however a guest spoils what it sends.
+    #[test]
+    fn a_video_sessions_escapes_of_any_shape_are_answered_the_same_with_the_lines_on_and_off() {
+        const ROUNDS: usize = 4000;
+        const SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+        let shapes: Vec<Shape> = (0..3)
+            .flat_map(a_video_session)
+            .map(|whole| {
+                let front = if escape::framing(&whole).wrapped { WRAPPER_SIZE } else { 0 };
+                Shape { whole, counts: vec![front + HEADER_SIZE] }
+            })
+            .collect();
+        let mut quiet_books = crate::video::Sessions::new(7);
+        let mut watched_books = crate::video::Sessions::new(7);
+        let mut random = Scattered(SEED);
+        let (mut done, mut failed) = (0, 0);
+        for round in 0..ROUNDS {
+            // Most are sent as a driver sends them, so that sessions are open when a spoiled one comes.
+            let shape = &shapes[random.below(shapes.len())];
+            let sent = if round % 3 == 0 { random.spoiled(shape) } else { shape.whole.clone() };
+            let mut quiet = sent.clone();
+            crate::answer_escape(PROCESS, &mut quiet, Some(&mut quiet_books));
+            let mut watched = sent.clone();
+            let lines =
+                lines::logged(|| crate::answer_escape(PROCESS, &mut watched, Some(&mut watched_books)));
+            assert_eq!(watched, quiet, "escape {sent:02x?}");
+            let debug = lines::at(Level::Debug, &lines);
+            assert!((2..=3).contains(&debug.len()), "escape {sent:02x?} {lines:?}");
+            let answered_done = debug.iter().any(|line| line.contains(" answer=done "));
+            done += usize::from(answered_done);
+            failed += usize::from(!answered_done);
+            if round % 500 == 499 {
+                quiet_books.process_gone(PROCESS);
+                watched_books.process_gone(PROCESS);
+            }
+        }
+        assert!(done > ROUNDS / 8 && failed > ROUNDS / 8, "{done} done, {failed} failed");
+    }
+
     // The readers the lines brought run only with debug lines on, and the tests above send them what
     // a driver sends or a few things near it. This one sends them anything.
     #[test]
@@ -1094,9 +1405,9 @@ mod tests {
             greatest_count += usize::from(framing.input == Count::PastEnd(u32::MAX));
             greatest_count += usize::from(framing.output == Count::PastEnd(u32::MAX));
             let mut quiet = sent.clone();
-            crate::answer_escape(PROCESS, &mut quiet);
+            crate::answer_escape(PROCESS, &mut quiet, None);
             let mut watched = sent.clone();
-            let lines = lines::logged(|| crate::answer_escape(PROCESS, &mut watched));
+            let lines = lines::logged(|| crate::answer_escape(PROCESS, &mut watched, None));
             assert_eq!(watched, quiet, "escape {sent:02x?}");
             assert_eq!(lines::at(Level::Debug, &lines).len(), 2, "escape {sent:02x?}");
 

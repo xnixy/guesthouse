@@ -26,4 +26,5 @@ pub mod hw_queue;
 pub mod node_metadata;
 pub mod standard;
 pub mod tiling;
+pub mod video_escape;
 pub mod wddm_caps;

@@ -6,7 +6,7 @@
 //! IoMmuSupported. The NVIDIA and Intel backends give the same shape for their own nodes.
 
 use super::bytes::dword;
-use crate::info::{EngineSet, HW_IP_COMPUTE, HW_IP_DMA, HW_IP_GFX};
+use crate::info::{EngineSet, HW_IP_COMPUTE, HW_IP_DMA, HW_IP_GFX, HW_IP_VCN_ENC};
 use crate::nodes::{Node, nodes};
 use guesthouse_backend::{Status, VendorQuery};
 
@@ -33,12 +33,14 @@ const IO_MMU_SUPPORTED: u8 = 0;
 
 /// The engine type and the name of a node. Compute has no type of its own in DXGK_ENGINE_TYPE, so
 /// it is "other". Windows shows an engine of that type by its name, so the name is the one its
-/// GPU Engine performance counters show for an AMD card's compute node.
+/// GPU Engine performance counters show for an AMD card's compute node. The video ring decodes and
+/// encodes, which are two types there, so it is "other" as well, under AMD's name for the engine.
 fn engine(node: &Node) -> (u32, &'static str) {
     match node.ip_type {
         HW_IP_GFX => (ENGINE_3D, "3D"),
         HW_IP_DMA => (ENGINE_COPY, "Copy"),
         HW_IP_COMPUTE => (ENGINE_OTHER, "Compute 0"),
+        HW_IP_VCN_ENC => (ENGINE_OTHER, "Video Codec 0"),
         _ => (ENGINE_OTHER, "Other"),
     }
 }
@@ -66,7 +68,7 @@ pub fn answer(query: &VendorQuery<'_>, engines: &EngineSet, out: &mut Vec<u8>) -
 mod tests {
     use super::*;
 
-    const FULL_CARD: EngineSet = EngineSet { graphics: true, compute: true, dma: true };
+    const FULL_CARD: EngineSet = EngineSet { graphics: true, compute: true, dma: true, video: false };
 
     fn asked(node: u32) -> [u8; ANSWER_SIZE] {
         let mut data = [0; ANSWER_SIZE];
@@ -119,11 +121,21 @@ mod tests {
 
     #[test]
     fn a_card_without_compute_numbers_its_copy_node_second() {
-        let engines = EngineSet { graphics: true, compute: false, dma: true };
+        let engines = EngineSet { graphics: true, compute: false, dma: true, video: false };
         let data = asked(1);
         let mut out = Vec::new();
         assert_eq!(answer(&query(&data), &engines, &mut out), Some(Status::SUCCESS));
         assert_eq!((dword(&out, 4), name_of(&out).as_str()), (Some(ENGINE_COPY), "Copy"));
+    }
+
+    #[test]
+    fn the_video_ring_is_answered_only_when_it_is_offered() {
+        let data = asked(3);
+        let mut out = Vec::new();
+        assert_eq!(answer(&query(&data), &FULL_CARD, &mut out), None);
+        let offered = EngineSet { video: true, ..FULL_CARD };
+        assert_eq!(answer(&query(&data), &offered, &mut out), Some(Status::SUCCESS));
+        assert_eq!((dword(&out, 4), name_of(&out).as_str()), (Some(ENGINE_OTHER), "Video Codec 0"));
     }
 
     #[test]

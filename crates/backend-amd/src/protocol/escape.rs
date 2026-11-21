@@ -274,6 +274,16 @@ pub fn payload(data: &[u8]) -> &[u8] {
 /// Answers an escape in place, inside its wrapper if it has one. Returns how, or why it couldn't be
 /// read; an escape too short for its header has nowhere to put an answer and goes back untouched.
 pub fn answer(data: &mut [u8]) -> Result<Answered, Refused> {
+    answer_with(data, |_, _| false)
+}
+
+/// [`answer`], with someone to ask about an escape nothing here answers. `other` is given the
+/// dispatched code and the payload after the header, and says whether it wrote an answer there, in
+/// which case the escape is done.
+pub fn answer_with(
+    data: &mut [u8],
+    other: impl FnOnce(EscapeCode, &mut [u8]) -> bool,
+) -> Result<Answered, Refused> {
     let data = unwrapped(data);
     let code = match parse(data) {
         Ok(code) => code,
@@ -284,10 +294,9 @@ pub fn answer(data: &mut [u8]) -> Result<Answered, Refused> {
             return Err(refused);
         }
     };
-    let done = code.needed().is_some_and(|needed| reply(data, needed));
-    if !done {
-        put_dword(data, RETURN_CODE, RETURN_FAILED);
-    }
+    let done =
+        code.needed().is_some_and(|needed| reply(data, needed)) || other(code, &mut data[HEADER_SIZE..]);
+    put_dword(data, RETURN_CODE, if done { RETURN_DONE } else { RETURN_FAILED });
     Ok(Answered { code, done })
 }
 
@@ -408,6 +417,33 @@ mod tests {
                 assert_eq!(data, before);
             }
         }
+    }
+
+    #[test]
+    fn an_escape_nothing_here_answers_is_done_when_someone_else_answers_it() {
+        let mut data = escape(0x0200_0103);
+        let answered = answer_with(&mut data, |code, payload| {
+            assert_eq!((code.service, code.subfunction, payload.len()), (2, 1, 0x20));
+            payload[4] = 0x5A;
+            true
+        });
+        assert!(answered.unwrap().done);
+        assert_eq!(dword(&data, RETURN_CODE), Some(RETURN_DONE));
+        assert_eq!(data[HEADER_SIZE + 4], 0x5A);
+
+        let mut left = escape(0x0200_0103);
+        assert!(!answer_with(&mut left, |_, _| false).unwrap().done);
+        assert_eq!(dword(&left, RETURN_CODE), Some(RETURN_FAILED));
+    }
+
+    #[test]
+    fn nobody_else_is_asked_about_an_escape_answered_here_or_one_that_cannot_be_read() {
+        let nobody = |_: EscapeCode, _: &mut [u8]| -> bool { panic!("asked") };
+        assert!(answer_with(&mut needed_escape(0x5D), nobody).unwrap().done);
+        let mut old = escape(0x0200_0103);
+        put_dword(&mut old, HEADER_VERSION, 0xFFFF);
+        assert!(answer_with(&mut old, nobody).is_err());
+        assert!(answer_with(&mut [0xEE; 6], nobody).is_err());
     }
 
     #[test]

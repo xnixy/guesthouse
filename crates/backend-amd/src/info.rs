@@ -14,6 +14,7 @@ use std::path::Path;
 const DEV_INFO: u32 = 0x16;
 const MEMORY: u32 = 0x19;
 const HW_IP_INFO: u32 = 0x02;
+const HW_IP_COUNT: u32 = 0x03;
 const TIMESTAMP: u32 = 0x05;
 const FW_VERSION: u32 = 0x0e;
 const READ_MMR_REG: u32 = 0x15;
@@ -41,6 +42,8 @@ const ALL_INSTANCES: u32 = 0xffff_ffff;
 pub const HW_IP_GFX: u32 = 0;
 pub const HW_IP_COMPUTE: u32 = 1;
 pub const HW_IP_DMA: u32 = 2;
+/// The video encode family. From VCN 4 its ring is the one that decodes as well.
+pub const HW_IP_VCN_ENC: u32 = 7;
 
 /// An APU carves its video memory out of system RAM, so its sizes and CPU reach differ from a card
 /// with its own VRAM. AMDGPU_IDS_FLAGS_FUSION says which this is.
@@ -141,8 +144,15 @@ pub struct DeviceInfo {
     pub va_alignment: u64,
     /// The GPU timer's tick rate in kHz, for turning a timestamp into nanoseconds.
     pub counter_freq_khz: u32,
-    /// Which of the three engine families have a ring the guest could be given.
+    /// Which engine families the guest is given a node for: the three that have a ring, and the
+    /// video ring once it is offered.
     pub engines: EngineSet,
+    /// Whether amdgpu has a ring ready for the video encode family, which is what
+    /// [`crate::video`] needs to offer the guest video. Offering it is not decided here.
+    pub video_ring: bool,
+    /// How many video instances amdgpu says the card has, harvested ones included, or 0 if it
+    /// wouldn't say. [`crate::video`] offers video only on a card with one.
+    pub video_instances: u32,
     /// How each engine family wants its command buffers aligned.
     pub ib_alignment: IbAlignments,
     /// The rest of what the card reports, which the guest's adapter block is built from.
@@ -208,11 +218,14 @@ pub struct EngineSet {
     pub graphics: bool,
     pub compute: bool,
     pub dma: bool,
+    /// The video ring. Never set by reading the card: a guest gets it only when the daemon was
+    /// asked to offer it, see [`crate::video`].
+    pub video: bool,
 }
 
 impl EngineSet {
     pub fn count(&self) -> u32 {
-        u32::from(self.graphics) + u32::from(self.compute) + u32::from(self.dma)
+        u32::from(self.graphics) + u32::from(self.compute) + u32::from(self.dma) + u32::from(self.video)
     }
 }
 
@@ -238,6 +251,7 @@ pub struct IbAlignments {
     pub graphics: IbAlignment,
     pub compute: IbAlignment,
     pub dma: IbAlignment,
+    pub video: IbAlignment,
 }
 
 impl IbAlignments {
@@ -247,6 +261,7 @@ impl IbAlignments {
             HW_IP_GFX => self.graphics,
             HW_IP_COMPUTE => self.compute,
             HW_IP_DMA => self.dma,
+            HW_IP_VCN_ENC => self.video,
             _ => IbAlignment::default(),
         }
     }
@@ -281,6 +296,19 @@ fn query_hw_ip(file: &impl AsRawFd, ip_type: u32) -> io::Result<HwIp> {
         size: get32(&reply, HW_IP_IB_SIZE_ALIGNMENT),
     };
     Ok(HwIp { version, rings: get32(&reply, HW_IP_AVAILABLE_RINGS), ib_alignment })
+}
+
+/// How many instances of an engine family the card has. For the video families amdgpu answers
+/// with every instance the chip has, one it has turned off included.
+fn query_hw_ip_count(file: &impl AsRawFd, ip_type: u32) -> io::Result<u32> {
+    let mut request = [0u8; INFO_REQUEST_SIZE];
+    let mut reply = [0u8; 4];
+    put64(&mut request, INFO_RETURN_POINTER, reply.as_mut_ptr() as u64);
+    put32(&mut request, INFO_RETURN_SIZE, reply.len() as u32);
+    put32(&mut request, INFO_QUERY, HW_IP_COUNT);
+    put32(&mut request, INFO_HW_IP_TYPE, ip_type);
+    ioctl::drm_ioctl(file, call::info(), &mut request)?;
+    Ok(u32::from_le_bytes(reply))
 }
 
 /// A firmware's version, or zero if the card has none of that kind.
@@ -397,7 +425,13 @@ pub fn read_device_info(file: &impl AsRawFd, device_folder: Option<&Path>) -> io
     let gfx = query_hw_ip(file, HW_IP_GFX).unwrap_or_default();
     let compute = query_hw_ip(file, HW_IP_COMPUTE).unwrap_or_default();
     let dma = query_hw_ip(file, HW_IP_DMA).unwrap_or_default();
-    let engines = EngineSet { graphics: gfx.rings != 0, compute: compute.rings != 0, dma: dma.rings != 0 };
+    let video = query_hw_ip(file, HW_IP_VCN_ENC).unwrap_or_default();
+    let engines = EngineSet {
+        graphics: gfx.rings != 0,
+        compute: compute.rings != 0,
+        dma: dma.rings != 0,
+        video: false,
+    };
 
     Ok(DeviceInfo {
         device_id: get32(&dev, DEV_DEVICE_ID) as u16,
@@ -415,10 +449,13 @@ pub fn read_device_info(file: &impl AsRawFd, device_folder: Option<&Path>) -> io
         va_alignment: u64::from(get32(&dev, DEV_VA_ALIGN)),
         counter_freq_khz: get32(&dev, DEV_GPU_COUNTER_FREQ),
         engines,
+        video_ring: video.rings != 0,
+        video_instances: query_hw_ip_count(file, HW_IP_VCN_ENC).unwrap_or(0),
         ib_alignment: IbAlignments {
             graphics: gfx.ib_alignment,
             compute: compute.ib_alignment,
             dma: dma.ib_alignment,
+            video: video.ib_alignment,
         },
         details: read_details(file, &dev, gfx, compute, device_folder),
     })

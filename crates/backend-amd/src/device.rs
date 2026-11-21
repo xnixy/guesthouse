@@ -39,6 +39,12 @@ impl Device {
         &self.info
     }
 
+    /// Counts the video ring among the engines the guest is given a node for, from here on. See
+    /// [`crate::video`], which decides it.
+    pub fn offer_video(&mut self) {
+        self.info.engines.video = true;
+    }
+
     pub fn file(&self) -> &File {
         &self.file
     }

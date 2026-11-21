@@ -136,6 +136,12 @@ fn serve_amd(
         if env::var_os(guesthouse_backend_amd::IB_DUMP_VARIABLE).is_some() {
             backend.keep_command_buffers(&run_folder, guesthouse_daemon::logger::started());
         }
+        let on = |name| guesthouse_backend_amd::video_switch_is_on(name, env::var_os(name).as_deref());
+        if on(guesthouse_backend_amd::VIDEO_VARIABLE) {
+            backend.offer_video();
+        }
+        let rest = env::var(guesthouse_backend_amd::VIDEO_REST_VARIABLE).ok();
+        backend.close_and_rest_video(on(guesthouse_backend_amd::VIDEO_CLOSE_VARIABLE), rest.as_deref());
     })
 }
 

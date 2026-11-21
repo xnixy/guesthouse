@@ -46,7 +46,8 @@ const SYSTEM_IN_VIRTUAL_MACHINE: u32 = 1 << 1;
 /// How many GPUs the adapter links. One, with linking off.
 const GPU_COUNT: usize = 0x608;
 
-// Firmware versions, from FW_VERSION. Video firmware stays zero, as no video engine is offered.
+// Firmware versions, from FW_VERSION. Video firmware stays zero: the guest's driver offers video
+// without it.
 const FIRMWARE_SDMA0: usize = 0x88C;
 const FIRMWARE_SDMA1: usize = 0x890;
 const FIRMWARE_SMU: usize = 0x8E8;
@@ -208,6 +209,15 @@ const CHECKSUM: usize = 0x2E20;
 const CHECKSUM_VERSION: usize = 0x35E0;
 pub const SUBMISSION_CHECKSUM_VERSION: u32 = 1;
 
+/// Two dwords the guest's driver wants set before it offers any video: with either left zero it
+/// lists no hardware decoder and finds no encoder, whatever nodes it is given. What they mean isn't
+/// known. The values are the ones a Radeon 890M's own driver has in its block, and the only ones
+/// that were tried. They are filled in only when the video ring is offered: see [`crate::video`].
+const VIDEO_FIRST: usize = 0x366C;
+const VIDEO_FIRST_AS_SEEN: u32 = 4;
+const VIDEO_SECOND: usize = 0x36EC;
+const VIDEO_SECOND_AS_SEEN: u32 = 1;
+
 /// The family union's arrays have room for four shader engines with two arrays each.
 const ENGINES_IN_BLOCK: usize = 4;
 const ARRAYS_IN_BLOCK: usize = 2;
@@ -263,6 +273,10 @@ pub fn build(info: &DeviceInfo) -> Vec<u8> {
     fill_virtual_memory(&mut block);
     put_dword(&mut block, SOFTWARE_FEATURES, FEATURES);
     put_dword(&mut block, CHECKSUM_VERSION, SUBMISSION_CHECKSUM_VERSION);
+    if info.engines.video {
+        put_dword(&mut block, VIDEO_FIRST, VIDEO_FIRST_AS_SEEN);
+        put_dword(&mut block, VIDEO_SECOND, VIDEO_SECOND_AS_SEEN);
+    }
     let sum = index_xor_sum(&block, BLOCK_SIZE / 4, CHECKSUM);
     put_dword(&mut block, CHECKSUM, sum);
     block
@@ -462,11 +476,12 @@ pub(crate) mod tests {
             visible_vram_total: 2 << 30,
             gtt_total: 8 << 30,
             counter_freq_khz: 100_000,
-            engines: EngineSet { graphics: true, compute: true, dma: true },
+            engines: EngineSet { graphics: true, compute: true, dma: true, video: false },
             ib_alignment: IbAlignments {
                 graphics: IbAlignment { start: 32, size: 32 },
                 compute: IbAlignment { start: 32, size: 32 },
                 dma: IbAlignment { start: 256, size: 4 },
+                video: IbAlignment { start: 256, size: 4 },
             },
             details: CardDetails {
                 external_revision: 0x9,
@@ -552,6 +567,45 @@ pub(crate) mod tests {
         assert!(block[NODE_ENGINES + 3..NODE_ENGINES + NODE_SLOTS].iter().all(|&byte| byte == NO_ENGINE));
         let words: Vec<u32> = (0..8).map(|index| dword_at(&block, NODE_IB_ALIGNMENT + index * 4)).collect();
         assert_eq!(words, [32, 32, 32, 32, 256, 4, 0, 0]);
+    }
+
+    /// [`small_card`] with its video ring offered to the guest.
+    fn card_offering_video() -> DeviceInfo {
+        let mut card = small_card();
+        card.video_ring = true;
+        card.engines.video = true;
+        card
+    }
+
+    #[test]
+    fn a_card_that_offers_video_names_the_codec_node_and_sets_the_two_video_dwords() {
+        let block = build(&card_offering_video());
+        assert_eq!(&block[NODE_ENGINES..NODE_ENGINES + 5], &[0, 5, 4, 41, NO_ENGINE]);
+        let at = NODE_IB_ALIGNMENT + 3 * NODE_IB_ALIGNMENT_STRIDE;
+        assert_eq!((dword_at(&block, at), dword_at(&block, at + 4)), (256, 4));
+        assert_eq!((dword_at(&block, VIDEO_FIRST), dword_at(&block, VIDEO_SECOND)), (4, 1));
+        assert!(KeyFields::read(&block).unwrap().checksum_holds);
+    }
+
+    /// The sum the block of [`small_card`] held before there was any video to offer. The sum is
+    /// over every dword of the block, so it stands for the whole of it.
+    const SUM_BEFORE_VIDEO: u32 = 0x4655_C071;
+
+    #[test]
+    fn a_card_that_offers_no_video_is_told_as_it_was_before() {
+        let block = build(&small_card());
+        assert_eq!(dword_at(&block, CHECKSUM), SUM_BEFORE_VIDEO);
+        assert!(KeyFields::read(&block).unwrap().checksum_holds);
+        assert_eq!((dword_at(&block, VIDEO_FIRST), dword_at(&block, VIDEO_SECOND)), (0, 0));
+        // The ring being there changes nothing by itself: the guest hears of it only when it is offered.
+        let with_a_ring = DeviceInfo { video_ring: true, ..small_card() };
+        assert_eq!(build(&with_a_ring), block);
+        // Offered, the block differs in the node's two places, the two dwords and the sum, and nowhere else.
+        let offered = build(&card_offering_video());
+        let changed: Vec<usize> =
+            (0..BLOCK_SIZE).step_by(4).filter(|&at| block[at..at + 4] != offered[at..at + 4]).collect();
+        let node = NODE_IB_ALIGNMENT + 3 * NODE_IB_ALIGNMENT_STRIDE;
+        assert_eq!(changed, [NODE_ENGINES, CHECKSUM, node, node + 4, VIDEO_FIRST, VIDEO_SECOND]);
     }
 
     #[test]

@@ -14,7 +14,7 @@ My card is the integrated Radeon in a Ryzen 9 9950X3D: RDNA2, 1002:13C0, on Fedo
 | Direct3D 12 | works |
 | Vulkan in a window | works, 0 wrong pixels, 144 fps at 144 Hz in my present test |
 | OpenGL in a window | works, 4.6 compatibility and 3.3 core, 0 wrong pixels, about 100 to 110 fps |
-| Hardware video decode | not yet, it falls back to the CPU |
+| Hardware video decode | not yet, it falls back to the CPU; on two newer chips it can be turned on, see [Hardware video](#hardware-video) |
 
 Testers have run it on these too:
 
@@ -45,6 +45,25 @@ A machine made for AMD stays on AMD. It can move to another AMD card while it's 
 Other RX 6000, RX 7000 and RX 9000 cards should work like the ones above. RX 5000 cards use the same driver package as the RX 6000s, but nobody has tried one. Older cards like Polaris aren't handled.
 
 If you have an AMD card, open an issue to say how it went.
+
+## Hardware video
+
+Off by default, and an experiment. With `GUESTHOUSE_AMD_VIDEO=1` in the environment the app or `guesthouse-vm` starts the machine from, the daemon offers Windows the card's video engine. AMD's driver then lists its hardware decoders, and AMF finds its encoder. Without it, video is decoded and encoded on the CPU as before.
+
+It's only offered on Phoenix and Strix chips, which are the Radeon 780M, the 890M and their siblings, and only on a chip with one video instance. The guest's driver has to be told how much video work the chip takes, and that's known for those two. With a second instance amdgpu reads more of the guest's video work than the daemon has copied, so the daemon asks amdgpu how many there are. On any other card the daemon's log says why, and the machine starts without it.
+
+Know this before you turn it on. Video work that the engine's firmware doesn't take makes amdgpu reset the card's video ring, and a reset hits everything on the host that's using the video engine just then: a browser playing a video, a recording, another machine. A guest has done that, with two encoders opened one after the other in one process. So turn it on only on a host where that's all right.
+
+Two more switches are a stopgap for that reset. Each is off unless set, and does nothing without the first. `GUESTHOUSE_AMD_VIDEO_CLOSE=1` has the daemon close an encode session in the card's firmware when the guest's driver says it's over, which the guest's driver doesn't do itself. `GUESTHOUSE_AMD_VIDEO_REST=1500` leaves the video engine idle for that many milliseconds before a new encode session starts, long enough for amdgpu to power it down. Turn on both, as they were run: with both, RustDesk's codec probe opened six encoders one after the other in one process without a fault, and a RustDesk session encoded 3440x1440 with `hevc_amf`. While the engine rests, nothing else of the guest's reaches the GPU.
+
+A tester ran it on a Radeon 780M with driver 32.0.32015.12012 in the guest:
+
+- HEVC decode through Direct3D 11, and the frames match the software decoder's. H.264 through Direct3D 11 crashes in AMD's driver inside the guest.
+- `hevc_amf`, `h264_amf` and `av1_amf` encode 1080p, about 2 ms a frame.
+- Each frame holds up the guest's other GPU work while the card decodes or encodes it.
+- A program that looks for AMF in System32 finds it only once `amfrt64.dll` is copied there from the driver's folder.
+
+Earlier test builds of the same work also ran AV1 decode, and sessions of a minute and more in 1440p and 4K.
 
 ## Linux guests on AMD
 

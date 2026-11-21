@@ -1,6 +1,5 @@
 # What install.sh sets up on other distributions: the program, KVM, the bridge helper, OpenGL and the
-# UEFI firmware. It takes the flake, so the package defaults to the one built from the same revision.
-self:
+# UEFI firmware.
 {
   config,
   lib,
@@ -64,8 +63,6 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.guesthouse;
-      defaultText = lib.literalExpression "guesthouse.packages.\${system}.guesthouse";
       description = "The Guesthouse package to use.";
     };
 

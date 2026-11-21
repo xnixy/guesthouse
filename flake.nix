@@ -19,7 +19,14 @@
         guesthouse = final.callPackage ./packaging/nix/package.nix { };
       };
 
-      nixosModules.default = import ./packaging/nix/module.nix self;
+      nixosModules.default = { lib, pkgs, ... }: {
+        # A key, for module deduplication
+        key = "guesthouse";
+        imports = [ ./packaging/nix/module.nix ];
+        config.programs.guesthouse.package =
+          lib.mkOptionDefault
+            self.packages.${pkgs.stdenv.hostPlatform.system}.guesthouse;
+      };
 
       checks.${system}.module = pkgs.testers.runNixOSTest (import ./packaging/nix/test.nix self);
 

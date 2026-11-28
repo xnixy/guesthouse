@@ -18,6 +18,9 @@ const TILED: gdk::ToplevelState = gdk::ToplevelState::TOP_TILED
     .union(gdk::ToplevelState::LEFT_TILED)
     .union(gdk::ToplevelState::RIGHT_TILED);
 
+/// The window's class while it has no bar of its own.
+const BARE: &str = "bare";
+
 pub fn is_tiled(state: gdk::ToplevelState) -> bool {
     state.contains(TILED)
 }
@@ -66,7 +69,15 @@ impl Window {
         for card in self.0.cards.borrow().values() {
             card.set_compact(arrangement == Arrangement::Sidebar);
         }
-        self.0.library.set_bar_shown(self.has_bar());
+        let bar = self.has_bar();
+        self.0.library.set_bar_shown(bar);
+        // Without a bar the compositor places the window, and draws its edge: Tide's style leaves
+        // the window's own corners and shadow out by this class.
+        if bar {
+            self.0.window.remove_css_class(BARE);
+        } else {
+            self.0.window.add_css_class(BARE);
+        }
         let layout = gtk::Settings::default().and_then(|settings| settings.gtk_decoration_layout());
         self.0.library.set_brand_icon_shown(!layout.is_some_and(|layout| shows_icon(&layout)));
         if let Some(page) = self.0.screen_page.borrow().as_ref() {

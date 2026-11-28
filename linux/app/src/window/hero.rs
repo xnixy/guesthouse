@@ -137,6 +137,8 @@ impl Hero {
             .height_request(LEAST_HEIGHT)
             .build();
         root.add_css_class("hero");
+        // Nothing to show until a machine is chosen.
+        root.set_visible(false);
         root.add_overlay(&scrim);
         root.add_overlay(&body);
         // The words decide the height. The picture only fills what they take.

@@ -293,8 +293,10 @@ impl LibraryPage {
                 from_rail(&card);
             }
         });
-        self.sidebar.list.connect_row_activated(move |_, row| {
-            if let Some(card) = row.child() {
+        // The keys move the selection in the sidebar, and the ring and the hero go with it, so the
+        // shortcuts act on the machine that's ringed.
+        self.sidebar.list.connect_row_selected(move |_, row| {
+            if let Some(card) = row.and_then(gtk::ListBoxRow::child) {
                 chosen(&card);
             }
         });

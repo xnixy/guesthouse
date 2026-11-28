@@ -46,8 +46,8 @@ struct State {
     drawn: Drawn,
     /// The accent colour wanted, if it's the desktop's and the desktop has one.
     accent: Option<accent::Rgb>,
-    /// The desktop's own layout of the window's buttons, from before the KDE look set KWin's.
-    desktops_buttons: Option<String>,
+    /// Whether the KDE look has put the window's buttons in KWin's order, over GTK's own setting.
+    kwin_buttons: bool,
     /// Told when the look that draws the app changes.
     listeners: Vec<Rc<dyn Fn(Drawn)>>,
 }
@@ -68,14 +68,24 @@ fn scheme(prefs: &Fields, drawn: Drawn) -> adw::ColorScheme {
     }
 }
 
-fn wants_desktop_accent(prefs: &Fields) -> bool {
-    prefs.get(ACCENT).and_then(Value::as_str) == Some(DESKTOP_ACCENT)
+/// Whether the desktop's accent is the one wanted. The KDE look takes Plasma's unless told not to;
+/// the others take it when asked.
+fn desktop_accent_wanted(prefs: &Fields, drawn: Drawn) -> bool {
+    match prefs.get(ACCENT).and_then(Value::as_str) {
+        Some(value) => value == DESKTOP_ACCENT,
+        None => drawn == Drawn::Kde,
+    }
+}
+
+/// The same, for the look that draws the app now, as the preferences show it.
+pub fn wants_desktop_accent(prefs: &Fields) -> bool {
+    desktop_accent_wanted(prefs, drawn())
 }
 
 /// The desktop's accent, when that's the one wanted. On KDE, what Plasma selects with stands in
 /// for a portal that says none.
 fn wanted_accent(prefs: &Fields, drawn: Drawn) -> Option<accent::Rgb> {
-    if !wants_desktop_accent(prefs) {
+    if !desktop_accent_wanted(prefs, drawn) {
         return None;
     }
     accent::desktop_accent().or_else(|| (drawn == Drawn::Kde).then(kde::selection).flatten())
@@ -91,17 +101,42 @@ fn load() {
     });
 }
 
-/// Puts the stylesheet over the desktop's theme or under it, and the window's buttons in KWin's
-/// order for the KDE look.
+/// Puts the stylesheet over the desktop's theme or under it.
 fn place(state: &State) {
     gtk::style_context_remove_provider_for_display(&state.display, &state.provider);
     let priority = if state.drawn == Drawn::System { UNDER_THE_THEME } else { PRIORITY };
     gtk::style_context_add_provider_for_display(&state.display, &state.provider, priority);
-    let buttons =
-        if state.drawn == Drawn::Kde { Some(kde::button_layout()) } else { state.desktops_buttons.clone() };
-    if buttons.is_some() {
-        gtk::Settings::for_display(&state.display).set_gtk_decoration_layout(buttons.as_deref());
+}
+
+/// The window's buttons in KWin's order for the KDE look. Leaving it, GTK's setting goes back to
+/// following the desktop.
+fn place_buttons(display: &gtk::gdk::Display, kde: bool, set_before: bool) -> bool {
+    let settings = gtk::Settings::for_display(display);
+    if kde {
+        settings.set_gtk_decoration_layout(Some(&kde::button_layout()));
+    } else if set_before {
+        settings.reset_property("gtk-decoration-layout");
     }
+    kde
+}
+
+/// The KDE look's buttons, by what draws the app now. Outside any borrow of the state, as GTK
+/// tells the windows of the change at once.
+fn follow_buttons() {
+    let Some((display, kde, set_before)) = STATE.with_borrow(|state| {
+        state.as_ref().map(|state| (state.display.clone(), state.drawn == Drawn::Kde, state.kwin_buttons))
+    }) else {
+        return;
+    };
+    if !kde && !set_before {
+        return;
+    }
+    let set = place_buttons(&display, kde, set_before);
+    STATE.with_borrow_mut(|state| {
+        if let Some(state) = state {
+            state.kwin_buttons = set;
+        }
+    });
 }
 
 /// Gives every window on this display the look the preferences ask for, and keeps it in step with
@@ -117,7 +152,7 @@ pub fn install(display: &gtk::gdk::Display, prefs: &Fields) {
         desktop,
         drawn,
         accent: wanted_accent(prefs, drawn),
-        desktops_buttons: gtk::Settings::for_display(display).gtk_decoration_layout().map(String::from),
+        kwin_buttons: false,
         listeners: Vec::new(),
     };
     STATE.set(Some(state));
@@ -126,6 +161,7 @@ pub fn install(display: &gtk::gdk::Display, prefs: &Fields) {
             place(state);
         }
     });
+    follow_buttons();
     load();
     adw::StyleManager::default().connect_dark_notify(|_| load());
 }
@@ -152,6 +188,7 @@ pub fn follow(prefs: &Fields) {
             place(state);
         }
     });
+    follow_buttons();
     load();
     if before != drawn {
         for listener in listeners {
@@ -182,6 +219,15 @@ pub fn connect_changed(changed: impl Fn(Drawn) + 'static) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kde_takes_plasmas_accent_unless_told_not_to() {
+        let prefs = |text: &str| serde_json::from_str::<Fields>(text).unwrap();
+        assert!(desktop_accent_wanted(&prefs("{}"), Drawn::Kde));
+        assert!(!desktop_accent_wanted(&prefs(r#"{"accent":""}"#), Drawn::Kde));
+        assert!(!desktop_accent_wanted(&prefs("{}"), Drawn::Tide));
+        assert!(desktop_accent_wanted(&prefs(r#"{"accent":"desktop"}"#), Drawn::Tide));
+    }
 
     #[test]
     fn tide_is_dark_unless_asked_and_the_others_follow_the_desktop() {

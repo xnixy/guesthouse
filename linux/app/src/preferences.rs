@@ -38,7 +38,7 @@ pub fn show(window: &Window) {
         remembering.remember(json!({ theme::SCHEME: value }));
         theme::follow(&read_prefs(&remembering.context()));
     });
-    let desktops = prefs.get(theme::ACCENT).and_then(Value::as_str) == Some(theme::DESKTOP_ACCENT);
+    let desktops = theme::wants_desktop_accent(&prefs);
     let accent = choice_row("Accent Colour", &ACCENTS);
     explain(&accent, ACCENT_INFO);
     accent.set_selected(u32::from(desktops));

@@ -8,18 +8,12 @@
 @define-color sidebar_bg_color @tide_sidebar_color;
 @define-color sidebar_backdrop_color @tide_sidebar_color;
 
-/* A tiled window has no corners or shadow of its own: the compositor draws its border. */
-window.csd.tiled-top,
-window.csd.tiled-bottom,
-window.csd.tiled-left,
-window.csd.tiled-right,
+/* A window without a bar of its own is placed by the compositor, which draws its border: it has
+   no corners or shadow of its own either. The window takes the class when it drops its bar. */
+window.csd.bare,
 window.csd.maximized {
   border-radius: 0;
   box-shadow: none;
-}
-
-window.background {
-  background-color: @window_bg_color;
 }
 
 /* Where there is a bar, it's slim. */

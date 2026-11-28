@@ -169,6 +169,7 @@ pub fn keep_hardware_log(context: &Context, machine: &Machine) -> std::io::Resul
 /// The log whole if it's small. A bigger one, as a verbose log is, keeps its start, which has the
 /// self-test and the stage, every warning and error line after that (the layers that refused), and
 /// its end, which has the last submissions, with what was left out said where it was.
+#[allow(clippy::disallowed_methods)] // the daemon's own log file, read to its end
 fn bounded_log(path: &Path) -> std::io::Result<Vec<u8>> {
     let size = fs::metadata(path)?.len();
     let mut reader = BufReader::new(fs::File::open(path)?);

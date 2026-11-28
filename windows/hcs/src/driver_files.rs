@@ -146,6 +146,7 @@ pub fn outside_files(inf: &str) -> Vec<(PathBuf, String)> {
 }
 
 /// The driver folder's install file: the folder is named for it, `NAME.inf_amd64_HASH`.
+#[allow(clippy::disallowed_methods)] // the host's own files
 fn inf_in(driver_folder: &Path) -> Option<PathBuf> {
     let name = driver_folder.file_name()?.to_str()?;
     let at = name.to_ascii_lowercase().find(".inf_")?;
@@ -154,6 +155,7 @@ fn inf_in(driver_folder: &Path) -> Option<PathBuf> {
 }
 
 /// Finds a file of the driver's folder by name, in the folder or below it, whatever its case.
+#[allow(clippy::disallowed_methods)] // the host's own files
 fn find_in(folder: &Path, name: &str) -> Option<PathBuf> {
     let mut stack = vec![folder.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -175,6 +177,7 @@ fn find_in(folder: &Path, name: &str) -> Option<PathBuf> {
 
 /// What of `driver_folder`'s install file goes outside the driver store, as files of the folder and
 /// where each goes in a guest. Files the folder doesn't have are left out.
+#[allow(clippy::disallowed_methods)] // the host's own files
 pub fn placements(driver_folder: &Path) -> Result<Vec<Placement>> {
     let Some(inf) = inf_in(driver_folder) else { return Ok(Vec::new()) };
     let bytes = fs::read(&inf).map_err(|error| Error::io(format!("Reading {}", inf.display()), error))?;
@@ -191,6 +194,7 @@ const MOST_LIST_BYTES: u64 = 1024 * 1024;
 /// guest's Windows volume, where the driver puts them, leaving the guest's own files alone: a file
 /// Guesthouse didn't put there, and a link or folder where one would go, whatever the list says.
 /// `nvapi_wrapper` is the NVAPI wrapper's file, which goes where NVIDIA's NVAPI would.
+#[allow(clippy::disallowed_methods)] // the host's own files
 pub fn place(driver_folder: &Path, guest: &GuestVolume, nvapi_wrapper: Option<&Path>) -> Result<Placed> {
     let list = guest.read(PLACED_LIST, MOST_LIST_BYTES).unwrap_or_default();
     let mut ours: BTreeSet<String> = String::from_utf8_lossy(&list)

@@ -1,13 +1,14 @@
 //! Just enough HTTP/1.1 for one client on a pipe.
 
 use crate::share::listing::http_date;
+use guesthouse_basics::capped_line::read_capped_bytes;
 use jiff::Timestamp;
 use std::io::{self, BufRead, Read, Write, sink};
 
 const SERVER: &str = "Guesthouse";
 /// Longer than any length a file can have, and what an honest client sends fits.
 const MOST_LENGTH_DIGITS: usize = 19;
-const MOST_LINE: u64 = 1 << 16;
+const MOST_LINE: usize = 1 << 16;
 /// Far more than Windows' WebDAV client sends, and what keeps a request's memory small.
 const MOST_HEADERS: usize = 64;
 const MOST_HEADER_BYTES: usize = 256 << 10;
@@ -21,8 +22,7 @@ pub struct Request {
 }
 
 fn read_line(input: &mut impl BufRead) -> io::Result<String> {
-    let mut line = Vec::new();
-    input.by_ref().take(MOST_LINE).read_until(b'\n', &mut line)?;
+    let line = read_capped_bytes(input, MOST_LINE)?.unwrap_or_default();
     Ok(String::from_utf8_lossy(&line).trim_end_matches(['\r', '\n']).to_owned())
 }
 

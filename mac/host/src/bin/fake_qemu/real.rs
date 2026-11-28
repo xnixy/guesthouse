@@ -15,6 +15,7 @@
 //! process there it fails as QEMU does. `-device help` lists `pvg-fwd`.
 //!
 //! It writes the arguments it was given, one a line, to `fake-qemu.args` in its folder.
+#![allow(clippy::disallowed_methods)] // a stand-in for trying the agent, reading its own sockets
 
 #[path = "../fake_parent/mod.rs"]
 mod fake_parent;

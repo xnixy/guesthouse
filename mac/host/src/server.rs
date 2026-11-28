@@ -6,8 +6,9 @@
 //! The same file holds the other end, `Connection`, which the app uses.
 
 use crate::agent::Agent;
+use guesthouse_basics::capped_line::read_capped_line;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -115,6 +116,9 @@ fn lock_file(path: &Path) -> Result<File, ServeError> {
     Ok(file)
 }
 
+/// The longest line the agent's socket is read for.
+const MOST_LINE: usize = 1 << 20;
+
 /// One connection: a writer thread owns the socket's output, so answers and events never mix
 /// in the middle of a line.
 fn talk(agent: &Agent, stream: UnixStream) {
@@ -124,8 +128,8 @@ fn talk(agent: &Agent, stream: UnixStream) {
     let (sender, receiver) = mpsc::channel::<String>();
     let subscription = agent.subscribe(sender.clone());
     thread::spawn(move || write_lines(output, receiver));
-    for line in BufReader::new(stream).lines() {
-        let Ok(line) = line else { break };
+    let mut reader = BufReader::new(stream);
+    while let Ok(Some(line)) = read_capped_line(&mut reader, MOST_LINE) {
         if line.trim().is_empty() {
             continue;
         }
@@ -202,7 +206,8 @@ impl Drop for Connection {
 }
 
 fn read_lines(input: UnixStream, sender: Sender<io::Result<String>>) {
-    for line in BufReader::new(input).lines() {
+    let mut reader = BufReader::new(input);
+    while let Some(line) = read_capped_line(&mut reader, MOST_LINE).transpose() {
         let failed = line.is_err();
         if sender.send(line).is_err() || failed {
             return;

@@ -49,6 +49,19 @@ jobs:
           shared-key: fedora-44
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+  clippy-windows:
+    name: clippy (Windows host)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-2025-clippy
+      - run: cargo clippy --locked -p guesthouse-hcs -p guesthouse-host-windows -p guesthouse-service --all-targets -- -D warnings
+
   tests:
     name: tests
     runs-on: ubuntu-24.04

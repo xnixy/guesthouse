@@ -692,3 +692,53 @@ fn the_disk_is_given_with_the_backing_files_its_settings_name() {
     assert_eq!(node["backing"]["backing"]["file"]["filename"], "/b/base.qcow2");
     assert_eq!(node["cache"]["no-flush"], true);
 }
+
+/// Every kind of boot gives QEMU its files by the rules in `drive_rules`.
+#[test]
+fn every_boot_gives_its_files_by_the_drive_rules() {
+    use crate::linux::amd::{AmdCard, AmdMode};
+    let install = UbuntuInstall {
+        iso: "/iso/ubuntu.iso".into(),
+        seed: "/m/seed/cidata.iso".into(),
+        kernel: "/m/boot/vmlinuz".into(),
+        initrd: "/m/boot/initrd".into(),
+    };
+    let amd = AmdBoot {
+        card: AmdCard {
+            pci: "0000:7c:00.0".into(),
+            render_node: "/dev/dri/renderD128".into(),
+            name: "AMD".into(),
+            device: 0x13C0,
+        },
+        mode: AmdMode::Native,
+        setup_image: Some("/m/setup.img".into()),
+    };
+    let layered = Machine {
+        backing_files: vec![crate::disk_image::backing::BackingFile {
+            path: "/b/base.qcow2".into(),
+            format: "qcow2".into(),
+        }],
+        ..windows()
+    };
+    let boots = [
+        (plain_machine(), plain_boot()),
+        (plain_machine(), Boot::Plain { iso: "/iso/plain.iso".into() }),
+        (windows(), Boot::Install { iso: "/iso/win.iso".into(), answer: "/m/answer.iso".into() }),
+        (windows(), Boot::Gpu),
+        (layered, Boot::Gpu),
+        (with_drives(windows(), &["a", "b"]), Boot::Gpu),
+        (with_drives(plain_machine(), &["a"]), plain_boot()),
+        (windows(), Boot::UbuntuInstall(install)),
+        (windows(), Boot::Ubuntu(UbuntuBoot::NoGpu { reason_file: "/r/gpu-off-reason".into() })),
+        (windows(), Boot::Ubuntu(UbuntuBoot::Amd(amd))),
+    ];
+    for (machine, boot) in boots {
+        let (_scratch, mut plan) = plan(&machine, boot);
+        plan.driver_disc = Some("/m/driver.iso".into());
+        drive_rules::check(&plan.qemu_arguments());
+        let files = memory_files_in(Path::new("/dev/shm"), slots::first());
+        drive_rules::check(&plan.clone().standalone(files, Path::new("/ids")).qemu_arguments());
+        let run = VmPlan { throwaway: Some(machine.disk.clone()), disk: throwaway_disk(), ..plan };
+        drive_rules::check(&run.qemu_arguments());
+    }
+}

@@ -464,4 +464,9 @@ mod tests {
         qemu_img(&["rebase", "-u", "-f", "qcow2", "-F", "raw", "-b", other, opencore]);
         assert!(with.checked_backing_files().unwrap_err().0.contains(other));
     }
+
+    #[test]
+    fn its_files_are_given_by_the_drive_rules() {
+        crate::vm_args::drive_rules::check(&plan(boot("")).qemu_arguments());
+    }
 }

@@ -15,6 +15,8 @@
 //!
 //! The disk work is behind [`Disks`], so all of this is tested without Windows.
 
+#![allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
+
 use crate::record::Record;
 use guesthouse_snapshot_core::windows_host::{
     Entry, INDEX, Index, NEW_INDEX, chain_in, folder, index_text, links_in, read_index, shown, snapshot_disk,

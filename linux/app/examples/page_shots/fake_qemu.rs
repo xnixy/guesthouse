@@ -1,5 +1,7 @@
 //! This program under QEMU's name: monitors that answer as a running VM's do, and a display. No VM runs.
 
+#![allow(clippy::disallowed_methods)] // This is the fake QEMU of the page shots.
+
 use crate::fake_display;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};

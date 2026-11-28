@@ -949,12 +949,12 @@ queue it ran on. If this card also draws your desktop, the screen may freeze for
 the driver can't recover, the desktop may need a restart or the PC a reboot. Save your work first.";
 
 /// Asks for the typed word. Anything else, or no input at all, is a no.
-pub fn confirm_break(input: &mut dyn BufRead, out: &mut dyn Write) -> bool {
+pub fn confirm_break(mut input: &mut dyn BufRead, out: &mut dyn Write) -> bool {
     let _ = writeln!(out, "{BREAK_WARNING}");
     let _ = write!(out, "Type {BREAK_WORD} to run them: ");
     let _ = out.flush();
-    let mut answer = String::new();
-    input.read_line(&mut answer).is_ok() && answer.trim() == BREAK_WORD
+    let answer = guesthouse_basics::capped_line::read_capped_line(&mut input, 64).ok().flatten();
+    answer.is_some_and(|word| word.trim() == BREAK_WORD)
 }
 
 /// Runs the test. `sysfs` is the card's device folder, for the job timeouts. The break steps need

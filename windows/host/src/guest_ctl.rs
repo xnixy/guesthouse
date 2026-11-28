@@ -334,6 +334,7 @@ impl Drop for Asking<'_> {
 
 /// Reads the guest's lines until the stream ends. Each is made printable; the channel's go to
 /// `ctl`, and every other is sent to `sink` as the guest's and handed to `on_line`.
+#[allow(clippy::disallowed_methods)] // each read is taken to LINE_LIMIT, and a longer line goes on as the next
 pub fn read_lines(source: impl Read, on_line: &mut impl FnMut(&str), sink: &dyn Sink, ctl: &GuestCtl) {
     let mut source = BufReader::new(source);
     let mut line = Vec::new();

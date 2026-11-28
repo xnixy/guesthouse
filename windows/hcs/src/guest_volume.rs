@@ -14,6 +14,8 @@
 //! - Names are always single parts: a part with a separator, a stream's colon, `.` or `..` is
 //!   refused.
 
+#![allow(clippy::disallowed_methods)] // the one place a guest's disk is opened
+
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;

@@ -254,6 +254,7 @@ pub(crate) fn give_guest_folder(guest: &GuestVolume) -> Result<(), String> {
 /// Tells the guest of its shares, with the marker `report.ps1` reads, and gives it the program that
 /// mounts them and WinFsp's installer. With no share the marker goes. A program or installer the
 /// host hasn't got is said and leaves the guest without a drive, never without a boot.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn give_share(guest: &GuestVolume, shares: &[Share], sink: &dyn Sink) -> Result<(), String> {
     if shares.is_empty() {
         let _ = guest.remove_file(SHARE_FILE);
@@ -286,6 +287,7 @@ fn give_share(guest: &GuestVolume, shares: &[Share], sink: &dyn Sink) -> Result<
 }
 
 /// remoteman's host's installer, beside the program that boots the machine, if it's there.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn screen_setup() -> Option<PathBuf> {
     let beside = std::env::current_exe().ok()?.parent()?.join(screen::SETUP);
     beside.is_file().then_some(beside)
@@ -293,6 +295,7 @@ fn screen_setup() -> Option<PathBuf> {
 
 /// Copies the host's file `from` to `to` in the guest's Guesthouse folder, unless the copy there
 /// has its bytes already: the bytes are compared, not the size and time. Gives whether it copied.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn copy_if_changed(from: &Path, guest: &GuestVolume, to: &Path) -> io::Result<bool> {
     let given = std::fs::read(from)
         .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", from.display())))?;
@@ -306,6 +309,7 @@ fn copy_if_changed(from: &Path, guest: &GuestVolume, to: &Path) -> io::Result<bo
 /// Puts what the guest needs for its screen in its screen folder: remoteman's installer, the script
 /// that runs it, the devices the guest trusts, the encoder for its card, and its account,
 /// so it signs in by itself. The report, written before this, runs the script.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn give_screen(
     disk: &Path,
     guest: &GuestVolume,
@@ -374,6 +378,7 @@ fn keep_trust(disk: &Path, guest: &GuestVolume, sink: &dyn Sink) {
 
 /// The NVAPI wrapper for NVIDIA guests, in the program's guest folder. Not beside the program, where
 /// it would be what the program itself loads for NVAPI.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn nvapi_wrapper() -> Option<PathBuf> {
     let file = std::env::current_exe().ok()?.parent()?.join(NVAPI_WRAPPER);
     file.is_file().then_some(file)

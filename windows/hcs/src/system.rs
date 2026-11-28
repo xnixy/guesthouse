@@ -195,6 +195,7 @@ pub fn ensure_runtime_state_file(path: &Path) -> Result<()> {
     })
 }
 
+#[allow(clippy::disallowed_methods)] // the host's own files
 fn ensure_state_file(path: &Path, kind: &str, create: impl FnOnce(*const u16) -> i32) -> Result<()> {
     if path.is_file() {
         return Ok(());

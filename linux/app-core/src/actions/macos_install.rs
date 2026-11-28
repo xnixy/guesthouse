@@ -11,9 +11,10 @@ use super::macos::start;
 use crate::failure::{Failure, Result};
 use crate::macos_part::{self, KEXT_SET, KEXTS_FOLDER, REIMS_UTIL};
 use crate::macos_setup::{FIRMWARE_CODE_FILE, FIRMWARE_VARS_FILE, MACOS_VERSION};
+use guesthouse_basics::capped_line::read_capped_line;
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -57,6 +58,9 @@ fn kext_words(list: &str, folder: &Path) -> Vec<String> {
     words
 }
 
+/// The longest line of reims-util's output that is read.
+const MOST_EVENT_LINE: usize = 1 << 20;
+
 /// Runs reims-util, telling the task how far each step is, and gives back what it says it made.
 fn reims_util(task: &Task, doing: &str, words: &[String]) -> Result<Value> {
     let mut child = Command::new(macos_part::file(&task.context.paths, REIMS_UTIL))
@@ -68,8 +72,9 @@ fn reims_util(task: &Task, doing: &str, words: &[String]) -> Result<Value> {
         .spawn()?;
     let output = child.stdout.take().ok_or_else(|| Failure::new(NO_RESULT))?;
     let (mut made, mut refusal, mut shown) = (None, None, None);
-    for line in BufReader::new(output).lines() {
-        let Ok(event) = serde_json::from_str::<Value>(&line?) else { continue };
+    let mut lines = BufReader::new(output);
+    while let Some(line) = read_capped_line(&mut lines, MOST_EVENT_LINE)? {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
         match event["event"].as_str() {
             Some("progress") => {
                 let (done, total) = (event["done"].as_u64(), event["total"].as_u64());

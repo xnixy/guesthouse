@@ -79,6 +79,7 @@ pub fn boot_with(
     ran
 }
 
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn run(
     settings: &BootSettings,
     sink: &Arc<dyn Sink>,

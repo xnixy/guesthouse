@@ -1,6 +1,8 @@
 //! What `prepare` knows of a machine that `boot` needs too, kept in a small file beside its disk:
 //! which system it runs, and for a Linux guest, its installer and whether it has installed.
 
+#![allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
+
 use crate::machine::Guest;
 use serde::{Deserialize, Serialize};
 use std::fs;

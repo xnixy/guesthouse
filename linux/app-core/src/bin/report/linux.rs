@@ -72,6 +72,7 @@ fn kinds() -> String {
 }
 
 /// The answer to a question on the terminal, or nothing when nobody is there to answer.
+#[allow(clippy::disallowed_methods)] // a line the person types at the terminal
 fn ask(question: &str) -> String {
     if !io::stdin().is_terminal() {
         return String::new();

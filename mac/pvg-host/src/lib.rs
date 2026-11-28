@@ -60,6 +60,9 @@
 //! as the program does (and [`serve`] with the window's ways of taking input), with the program's
 //! lines on standard error and its control socket; [`USAGE`] and [`DEFAULT_MODES`] are its texts.
 
+// Tests read their own sockets with plain `read_line`.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 #[cfg(target_os = "macos")]
 mod export;
 #[cfg(target_os = "macos")]

@@ -5,6 +5,7 @@ use std::io::{self, BufRead, ErrorKind, Read};
 /// Reads one line as raw bytes, its line end included, of at most `most` bytes besides the end.
 /// `Ok(None)` is the end of the stream. A longer line is an `InvalidData` error and nothing more
 /// than `most + 1` bytes were held.
+#[allow(clippy::disallowed_methods)] // this is the capped read the rest use
 pub fn read_capped_bytes(reader: &mut impl BufRead, most: usize) -> io::Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
     reader.by_ref().take(most as u64 + 1).read_until(b'\n', &mut bytes)?;

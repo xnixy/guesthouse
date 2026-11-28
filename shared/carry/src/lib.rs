@@ -134,6 +134,7 @@ impl<R: BufRead> Reader<R> {
         Ok(Self { input })
     }
 
+    #[allow(clippy::disallowed_methods)] // the read is taken to the limit
     fn read_line(&mut self) -> Result<Vec<u8>> {
         let mut text = Vec::new();
         (&mut self.input).take(MOST_LINE_BYTES).read_until(b'\n', &mut text)?;

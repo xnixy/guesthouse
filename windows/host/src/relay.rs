@@ -6,6 +6,7 @@
 use guesthouse_host_windows::printable::{LINE_LIMIT, printable};
 use std::io::{self, BufRead, Read, Write};
 
+#[allow(clippy::disallowed_methods)] // each read is taken to LINE_LIMIT, and a longer line goes on as the next
 fn main() {
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();

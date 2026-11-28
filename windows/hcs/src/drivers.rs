@@ -38,6 +38,7 @@ pub fn copy_folder(from: &Path, guest: &GuestVolume, to: &Path) -> Result<Copied
     Ok(copied)
 }
 
+#[allow(clippy::disallowed_methods)] // the host's own files
 fn copy_tree(from: &Path, guest: &GuestVolume, to: &Path, copied: &mut Copied) -> io::Result<()> {
     guest.create_dir_all(to)?;
     for entry in fs::read_dir(from)? {

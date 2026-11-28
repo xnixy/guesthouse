@@ -6,17 +6,18 @@
 //! What the lines say is `guesthouse-relay`'s, as the network side they ask is.
 
 use super::SOCKET;
+use guesthouse_basics::capped_line::read_capped_line;
 pub use guesthouse_relay::{Counters, RelayClient, RelayReply, RelayStatus, Request, ShareState};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// A request is a few dozen bytes. A longer line is not one of ours.
-const LONGEST_REQUEST: u64 = 4096;
+const LONGEST_REQUEST: usize = 4096;
 /// A status with the most devices the relay allows is a few kilobytes.
-const LONGEST_REPLY: u64 = 256 * 1024;
+const LONGEST_REPLY: usize = 256 * 1024;
 /// How long either side waits for the other to say its line.
 const LINE_TIMEOUT: Duration = Duration::from_secs(2);
 const SOCKET_MODE: u32 = 0o600;
@@ -34,8 +35,7 @@ pub fn ask(run_folder: &Path, request: &Request) -> io::Result<RelayReply> {
     let mut line = serde_json::to_string(request).map_err(io::Error::other)?;
     line.push('\n');
     stream.write_all(line.as_bytes())?;
-    let mut answer = String::new();
-    BufReader::new(stream.take(LONGEST_REPLY)).read_line(&mut answer)?;
+    let answer = read_capped_line(&mut BufReader::new(stream), LONGEST_REPLY)?.unwrap_or_default();
     serde_json::from_str(&answer).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
@@ -63,8 +63,7 @@ pub fn serve(listener: &UnixListener, mut answer: impl FnMut(Request) -> RelayRe
 fn serve_one(stream: UnixStream, answer: &mut impl FnMut(Request) -> RelayReply) -> io::Result<()> {
     stream.set_read_timeout(Some(LINE_TIMEOUT))?;
     stream.set_write_timeout(Some(LINE_TIMEOUT))?;
-    let mut line = String::new();
-    BufReader::new((&stream).take(LONGEST_REQUEST)).read_line(&mut line)?;
+    let line = read_capped_line(&mut BufReader::new(&stream), LONGEST_REQUEST)?.unwrap_or_default();
     let reply = match serde_json::from_str(&line) {
         Ok(request) => answer(request),
         Err(error) => RelayReply::Error(format!("not a request: {error}")),
@@ -78,6 +77,7 @@ fn serve_one(stream: UnixStream, answer: &mut impl FnMut(Request) -> RelayReply)
 mod tests {
     use super::*;
     use crate::testing::Scratch;
+    use std::io::BufRead;
     use std::thread;
 
     fn status(state: ShareState) -> RelayStatus {

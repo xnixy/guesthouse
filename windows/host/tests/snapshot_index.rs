@@ -4,6 +4,8 @@
 //! `GUESTHOUSE_WRITE_GOLDEN=1 cargo test -p guesthouse-host-windows --test snapshot_index` writes them
 //! afresh, which is only for a change meant to alter the index.
 
+#![allow(clippy::disallowed_methods)] // a test's own folders
+
 use guesthouse_host_windows::snapshots::{
     self, Disks, LONGEST_LABEL, MOST, Snapshot, chain, links, list, made_on_another, repair,
 };

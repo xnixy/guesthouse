@@ -24,6 +24,9 @@
 //! The JSON shapes, the order a machine gets its GPU in, and where a guest looks for its host's
 //! driver were first worked out in App Sandbox, as `THIRD-PARTY.md` says.
 
+// Anything on a guest's disk goes through `guest_volume`. Tests make their own folders.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod adapters;
 pub mod dns_sd;
 pub mod hvsock;

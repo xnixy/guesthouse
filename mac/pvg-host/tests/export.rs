@@ -4,6 +4,7 @@
 //! own reading side (`reader/`), the file the Guesthouse app and rmhost read through; one runs in
 //! a second process, so it can be killed.
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods)] // a test's own sockets
 
 mod played;
 mod reader;

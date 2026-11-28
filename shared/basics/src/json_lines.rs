@@ -7,6 +7,7 @@ use std::io::{self, BufRead, Read, Write};
 
 /// Reads one line of JSON, at most `limit` bytes long, as a `T`. Nothing read is `None`. A longer
 /// line is cut at the limit, which leaves the rest to be read, and fails as bad data.
+#[allow(clippy::disallowed_methods)] // the read is taken to the limit
 pub fn read_line_within<T: for<'de> Deserialize<'de>>(
     reader: &mut impl BufRead,
     limit: usize,

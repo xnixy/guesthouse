@@ -5,6 +5,7 @@
 //! Commands sent while the handshake runs wait for it; commands sent while there is no QEMU
 //! are dropped, since old input means nothing later. The thread tries again every second.
 
+use guesthouse_basics::capped_line::read_capped_line;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -162,12 +163,11 @@ pub(crate) fn connect_long(path: &Path) -> io::Result<UnixStream> {
     result
 }
 
+/// The longest line of QEMU's monitor that is read.
+const MOST_QMP_LINE: usize = 1 << 20;
+
 pub(crate) fn read_line(reader: &mut impl BufRead) -> io::Result<String> {
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
-        return Err(refused("QEMU closed the socket"));
-    }
-    Ok(line)
+    read_capped_line(reader, MOST_QMP_LINE)?.ok_or_else(|| refused("QEMU closed the socket"))
 }
 
 pub(crate) fn refused(why: &str) -> io::Error {

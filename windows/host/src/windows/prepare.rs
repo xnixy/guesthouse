@@ -28,6 +28,7 @@ const SYSTEM_PARTITION_MB: u32 = 260;
 const RESERVED_PARTITION_MB: u32 = 16;
 pub(super) const BYTES_PER_GB: u64 = 1 << 30;
 
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 pub fn prepare(settings: &PrepareSettings, sink: &dyn Sink) -> Result<(), String> {
     need_elevation()?;
     let disk = absolute(&settings.disk)?;
@@ -180,6 +181,7 @@ pub(super) fn new_password() -> Result<String, String> {
 }
 
 /// Keeps the guest's administrator and password beside its disk, the one place the host has them.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 pub(super) fn write_account(disk: &Path, user: &str, password: &str, sink: &dyn Sink) -> Result<(), String> {
     let account = disk.with_extension("account.txt");
     fs::write(&account, format!("user: {user}\npassword: {password}\n"))
@@ -190,6 +192,7 @@ pub(super) fn write_account(disk: &Path, user: &str, password: &str, sink: &dyn 
 
 /// Drive letters nothing uses or keeps, from the end of the alphabet, for a new disk's partitions
 /// while they're written.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 pub(super) fn free_letters<const N: usize>() -> Result<[char; N], String> {
     let taken = disk::letters_taken();
     let free: Vec<char> = ('D'..='Z')
@@ -203,6 +206,7 @@ pub(super) fn free_letters<const N: usize>() -> Result<[char; N], String> {
 
 /// Wipes disk `number`, makes it GPT, and runs `steps` on it, which must give the partitions these
 /// `letters`. Only ever called on a disk `attach_new` vouched for.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 pub(super) fn diskpart(number: u32, steps: &str, letters: &[char]) -> Result<(), String> {
     // diskpart's list of disks can lag behind a disk attached a moment ago, most of all while
     // another diskpart is busy, and then it refuses the number. A rescan brings it up to date.

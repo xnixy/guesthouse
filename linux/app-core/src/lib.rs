@@ -7,6 +7,8 @@
 
 // Linux only: it starts QEMU and the daemon, and reads a Linux host. Other systems get an empty crate.
 #![cfg(target_os = "linux")]
+// Tests read their own sockets with plain `read_line`.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod account;
 pub mod actions;

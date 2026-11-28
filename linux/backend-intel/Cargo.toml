@@ -9,6 +9,7 @@ license.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 guesthouse-backend.workspace = true
+guesthouse-basics.workspace = true
 guesthouse-messages.workspace = true
 guesthouse-sensors.workspace = true
 # The facade, as in the core.

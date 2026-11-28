@@ -1000,6 +1000,7 @@ version = "0.12.0"
 dependencies = [
  "guesthouse-backend",
  "guesthouse-backend-standin",
+ "guesthouse-basics",
  "guesthouse-core",
  "guesthouse-messages",
  "guesthouse-sensors",

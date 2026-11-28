@@ -65,6 +65,7 @@ fn parse_options() -> Result<Options, String> {
 }
 
 /// One line typed in answer, or nothing when there's nobody to type one.
+#[allow(clippy::disallowed_methods)] // a line the person types at the terminal
 fn answer() -> String {
     let mut line = String::new();
     let _ = io::stdin().lock().read_line(&mut line);

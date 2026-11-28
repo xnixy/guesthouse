@@ -1,0 +1,8 @@
+# Lines from a socket, a child's pipe or a guest are read with `read_capped_line`, which holds at
+# most the length it is given.
+disallowed-methods = [
+    { path = "std::io::BufRead::read_line", reason = "use guesthouse_basics::read_capped_line" },
+    { path = "std::io::BufRead::lines", reason = "use guesthouse_basics::read_capped_line" },
+    { path = "std::io::BufRead::read_until", reason = "use guesthouse_basics::read_capped_bytes" },
+    { path = "std::io::BufRead::split", reason = "use guesthouse_basics::read_capped_bytes" },
+]

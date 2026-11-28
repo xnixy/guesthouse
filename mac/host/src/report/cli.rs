@@ -88,6 +88,7 @@ impl Terminal for RealTerminal {
         print!("{question}");
         let _ = io::stdout().flush();
         let mut line = String::new();
+        #[allow(clippy::disallowed_methods)] // a line the person types at the terminal
         let _ = io::stdin().lock().read_line(&mut line);
         line.trim().to_owned()
     }

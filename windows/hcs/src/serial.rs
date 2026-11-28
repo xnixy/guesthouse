@@ -127,6 +127,7 @@ pub struct SerialPort {
 impl SerialPort {
     /// Connects to the port's pipe, if `server` serves it. Whoever serves it may learn who opened
     /// it, and nothing more.
+    #[allow(clippy::disallowed_methods)] // a named pipe, not a file on a disk
     pub fn open(pipe: &str, server: &Server) -> Result<SerialPort, OpenError> {
         let pipe = OpenOptions::new()
             .read(true)

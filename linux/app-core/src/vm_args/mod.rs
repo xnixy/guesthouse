@@ -7,6 +7,8 @@ mod amd;
 mod android;
 mod arguments;
 mod disk_node;
+#[cfg(test)]
+mod drive_rules;
 mod drives;
 mod forwarding_jail;
 mod macos;

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // The test's own fake QEMU and fake agent.
+
 use guesthouse_app_core::actions::run_task;
 use guesthouse_app_core::agent::make_token;
 use guesthouse_app_core::context::Context;

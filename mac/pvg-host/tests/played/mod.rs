@@ -5,6 +5,7 @@
 //! It calls Apple's framework through the program, so it is a Mac's, and runs where the build has
 //! a profile. Shared by the tests beside it, each of which uses part of it.
 #![allow(dead_code)]
+#![allow(clippy::disallowed_methods)] // a test's own sockets
 
 #[path = "../../src/wire.rs"]
 #[allow(dead_code)]

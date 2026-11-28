@@ -3,6 +3,8 @@
 //! declared in `include/guesthouse_core.h`. Answers cross as JSON text, so the interface stays a
 //! handful of functions while what they carry grows.
 #![cfg(target_os = "macos")]
+// Tests read their own sockets with plain `read_line`.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod agent;
 pub mod agent_api;

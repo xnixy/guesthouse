@@ -12,6 +12,7 @@
 //! - `hostdie`: exits 3 a second and a half after QEMU connects
 //! - `hoststuck`: stays when QEMU goes, so only SIGTERM ends it
 //! - `hostnomodes`: answers `modes` with an error, as a device that refuses the list
+#![allow(clippy::disallowed_methods)] // a stand-in for trying the agent, reading its own sockets
 
 #[path = "../fake_parent/mod.rs"]
 mod fake_parent;

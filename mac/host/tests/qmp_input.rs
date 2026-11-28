@@ -2,6 +2,7 @@
 //! Input through the same C functions the screen window calls, into a stand-in for QEMU's
 //! QMP socket that greets, answers every line and records what it got.
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods)] // a test's own sockets
 
 use guesthouse_core::*;
 use serde_json::{Value, json};

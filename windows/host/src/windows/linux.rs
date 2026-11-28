@@ -49,6 +49,7 @@ const LARGEST_FILES_DISK_GB: u64 = 32;
 /// The library nvidia-smi and CUDA load beside NVIDIA's. It comes with WSL, not with the driver.
 const DXCORE: &str = "libdxcore.so";
 
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 pub fn prepare(
     settings: &PrepareSettings,
     disk_path: &Path,
@@ -78,6 +79,7 @@ pub fn prepare(
     made
 }
 
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn make(
     settings: &PrepareSettings,
     disk_path: &Path,
@@ -176,6 +178,7 @@ pub fn refresh_disk(
 
 /// The GPU files on the files disk at `root`. WSL's own libraries go first and the driver's on top,
 /// as WSL lays one over the other. Only the card's driver folder is kept, so an old driver's goes.
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn refresh(
     guest: &GuestVolume,
     card: Option<&Card>,
@@ -250,6 +253,7 @@ fn files_disk_bytes(card: Option<&Card>) -> u64 {
     gb.clamp(SMALLEST_FILES_DISK_GB, LARGEST_FILES_DISK_GB) * BYTES_PER_GB
 }
 
+#[allow(clippy::disallowed_methods)] // the host's own files, not a guest's disk
 fn size_of_folder(folder: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(folder) else { return 0 };
     entries

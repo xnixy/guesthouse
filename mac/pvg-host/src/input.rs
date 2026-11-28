@@ -12,8 +12,9 @@
 //! can let go of all of it, and nothing the guest doesn't have down is let go.
 
 use crate::keys;
+use guesthouse_basics::capped_line::read_capped_line;
 use std::collections::BTreeSet;
-use std::io::{self, BufRead, BufReader, ErrorKind};
+use std::io::{self, BufReader, ErrorKind};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -138,15 +139,13 @@ impl Qmp {
     }
 }
 
+/// The longest line of QEMU's monitor that is read.
+const MOST_LINE: usize = 1 << 20;
+
 /// Reads QEMU's answers until it goes. Only whether it answered matters, and its errors.
 fn drain(stream: UnixStream, heard: &Heard) {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if !matches!(reader.read_line(&mut line), Ok(size) if size > 0) {
-            break;
-        }
+    while let Ok(Some(line)) = read_capped_line(&mut reader, MOST_LINE) {
         heard.answered.store(true, Ordering::Relaxed);
         if line.contains("\"error\"") {
             let seen = heard.errors.fetch_add(1, Ordering::Relaxed);
@@ -311,6 +310,7 @@ pub fn connect_later(path: std::path::PathBuf, found: impl FnOnce(Qmp) + Send + 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
     use std::io::Write;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;

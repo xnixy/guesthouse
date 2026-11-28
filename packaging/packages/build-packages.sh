@@ -17,9 +17,7 @@
 # the file installed-by names the package manager, which is how the app knows how to update.
 set -eu
 
-DEB_IMAGE=${DEB_IMAGE:-docker.io/library/debian:trixie}
-RPM_IMAGE=${RPM_IMAGE:-registry.fedoraproject.org/fedora:44}
-PACMAN_IMAGE=${PACMAN_IMAGE:-docker.io/library/archlinux:base}
+# The images come from packaging/images/Dockerfile, unless one of these names another.
 # The package's own release number, for a package that changes while the payload doesn't.
 PACKAGE_RELEASE=${PACKAGE_RELEASE:-1}
 PACKAGER=${PACKAGER:-ruxn labs <packages@ruxn.com>}
@@ -74,9 +72,9 @@ find_engine() {
 
 image_for() {
     case $1 in
-        deb) say "$DEB_IMAGE" ;;
-        rpm) say "$RPM_IMAGE" ;;
-        pacman) say "$PACMAN_IMAGE" ;;
+        deb) say "${DEB_IMAGE:-$(sh "$REPO/packaging/images/image-of.sh" debian)}" ;;
+        rpm) say "${RPM_IMAGE:-$(sh "$REPO/packaging/images/image-of.sh" fedora)}" ;;
+        pacman) say "${PACMAN_IMAGE:-$(sh "$REPO/packaging/images/image-of.sh" archlinux)}" ;;
     esac
 }
 

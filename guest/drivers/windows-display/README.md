@@ -24,6 +24,8 @@ Everything of mine is in `GuesthouseDisplay/Guesthouse/`, plus a few lines in th
 
 The driver makes its monitor when it starts. It keeps it until the guest stops, and ignores `DESTROYMONITOR`, as Sunshine sends that whenever it exits. `setup/take-over-display.ps1` makes that the only display at logon, as only a user's session can do that. Windows then remembers it.
 
+The device is named "RDPUDD Chained DD" in the INF, the name Windows gives a remote desktop's display, because the guest's OpenGL and Vulkan need it with an indirect display as the only display. Software that goes by that name takes the guest for a remote session.
+
 The hardware cursor is on in `vdd_settings.xml`. It goes to the viewer by the frame socket, and with no viewer asking for it the frame pass draws it into the frames.
 
 The frame channel for Sunshine is still here. It only starts copying frames once something asks about it. Its contract with Sunshine keeps zako-vdd's names, in `Common/Include/vdd_control_ioctl.h` and in the shared object names, because Sunshine looks for those. Nobody using this sees them.

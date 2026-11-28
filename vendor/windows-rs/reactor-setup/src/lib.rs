@@ -10,6 +10,8 @@ use std::process::Command;
 const RUNTIME_PKG: &str = "Microsoft.WindowsAppSDK.Runtime";
 // Pair with tool-reactor-metadata's WINDOWS_APP_SDK_VERSION; that tool checks agreement.
 const RUNTIME_VER: &str = "2.6.4";
+// The SHA-256 of each package's .nupkg, as the feed serves it. Change it with the version above.
+const RUNTIME_SHA256: &str = "3e6d1230df782973d09174cf874c947ee5fbbbe77198c52750771f71a085aa0c";
 // On upgrades, check runtime.txt against the runtime payload and app.manifest against the SDK
 // component packages' package.appxfragment files. These assets are not regenerated.
 const RUNTIME_FILES: &str = include_str!("../assets/runtime.txt");
@@ -18,6 +20,7 @@ const NUGET_URL: &str = "https://www.nuget.org/api/v2/package/{name}/{version}";
 const WEBVIEW2_PKG: &str = "Microsoft.Web.WebView2";
 // Pair with tool-webview's WEBVIEW2_VERSION; tool-reactor-metadata checks agreement.
 const WEBVIEW2_VER: &str = "1.0.4078.44";
+const WEBVIEW2_SHA256: &str = "dc4d1d9168df26b830398303e50210b6e1729f6ce5a7ac69d2c766852f489962";
 const WEBVIEW2_CORE_DLL: &str = "Microsoft.Web.WebView2.Core.dll";
 const SELF_CONTAINED_MARKER: &str = "windows-reactor-self-contained";
 
@@ -41,12 +44,13 @@ fn stage_self_contained() -> io::Result<()> {
     let dest = target_dir_from_out(&out_dir);
     let temp_dir = temp_dir()?;
     let arch = target_arch();
-    let runtime = stage_pkg(RUNTIME_PKG, RUNTIME_VER, &temp_dir, &runtime_msix(arch))?;
-    let extract = ensure_msix_extracted(&runtime, arch)?;
+    let (runtime_sha256, webview2_sha256) = pinned_sums();
+    let runtime = stage_pkg(RUNTIME_PKG, RUNTIME_VER, &runtime_sha256, &temp_dir, &runtime_msix(arch))?;
+    let extract = ensure_msix_extracted(runtime.path(), arch)?;
     fs::create_dir_all(&dest).map_err(|error| file_error("create output directory", &dest, error))?;
     let _destination_lock = lock_file(&dest.join(".windows-reactor-setup.lock"))?;
     copy_runtime_to(&extract, &dest)?;
-    deploy_webview2(&temp_dir, &dest, arch)?;
+    deploy_webview2(&temp_dir, &dest, arch, &webview2_sha256)?;
 
     let manifest_path = out_dir.join("app.manifest");
     let mut manifest = APP_MANIFEST.to_string();
@@ -78,10 +82,10 @@ fn stage_self_contained() -> io::Result<()> {
 /// (`webview2loader.dll`, supplied by the Evergreen runtime), it is not present
 /// on the machine by default, so a self-contained app must carry it alongside
 /// the other runtime DLLs.
-fn deploy_webview2(temp: &Path, dest: &Path, arch: &str) -> io::Result<()> {
+fn deploy_webview2(temp: &Path, dest: &Path, arch: &str, sha256: &str) -> io::Result<()> {
     let relative = PathBuf::from(format!("win-{arch}")).join("native_uap").join(WEBVIEW2_CORE_DLL);
-    let pkg = stage_pkg(WEBVIEW2_PKG, WEBVIEW2_VER, temp, &relative)?;
-    copy_entry(&pkg.join(relative), &dest.join(WEBVIEW2_CORE_DLL))
+    let pkg = stage_pkg(WEBVIEW2_PKG, WEBVIEW2_VER, sha256, temp, &relative)?;
+    copy_entry(&pkg.path().join(relative), &dest.join(WEBVIEW2_CORE_DLL))
 }
 
 fn out_dir() -> PathBuf {
@@ -99,7 +103,7 @@ fn temp_dir() -> io::Result<PathBuf> {
         panic!("could not determine cache directory: LOCALAPPDATA, XDG_CACHE_HOME, and HOME are all unset");
     };
     // Keep caches published by this implementation separate from unchecked legacy entries.
-    let temp = base.join("windows-reactor-setup").join("temp").join("v1");
+    let temp = base.join("windows-reactor-setup").join("temp").join("v2");
     fs::create_dir_all(&temp).map_err(|error| file_error("create cache", &temp, error))?;
     Ok(temp)
 }
@@ -148,16 +152,99 @@ fn copy_entry(src: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn stage_pkg(name: &str, ver: &str, temp: &Path, required: &Path) -> io::Result<PathBuf> {
-    let extract = cached_dir(temp, &format!("{name}-{ver}"), |partial| {
-        let nupkg = partial.join("package.nupkg");
-        dl_nupkg(name, ver, &nupkg)?;
-        extract_tar(&nupkg, partial, &["--strip-components=1"])?;
-        require_file(&partial.join(required))?;
-        fs::remove_file(&nupkg).map_err(|error| file_error("remove archive", &nupkg, error))
-    })?;
-    require_file(&extract.join(required))?;
-    Ok(extract)
+/// The SHA-256 each package has to have: the runtime's, then WebView2's. The crate's own tests name
+/// others, for packages they make.
+fn pinned_sums() -> (String, String) {
+    #[cfg(test)]
+    if let Ok(sums) = env::var("WINDOWS_REACTOR_SETUP_TEST_SUMS") {
+        let (runtime, webview2) = sums.split_once(',').expect("two sums");
+        return (runtime.to_owned(), webview2.to_owned());
+    }
+    (RUNTIME_SHA256.to_owned(), WEBVIEW2_SHA256.to_owned())
+}
+
+/// A package unpacked for one run, and removed again when it goes out of use.
+struct Staged(PathBuf);
+
+impl Staged {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Unpacks the package `name` at `ver` into a folder of this run's own. The .nupkg it comes from is
+/// kept in the cache, and has the SHA-256 `sha256` each time it is used.
+fn stage_pkg(name: &str, ver: &str, sha256: &str, temp: &Path, required: &Path) -> io::Result<Staged> {
+    let nupkg = verified_nupkg(name, ver, sha256, temp)?;
+    let dest = temp.join(format!("{name}-{ver}.{}", std::process::id()));
+    if dest.try_exists().map_err(|error| file_error("read staging metadata", &dest, error))? {
+        fs::remove_dir_all(&dest)
+            .map_err(|error| file_error("remove old staging directory", &dest, error))?;
+    }
+    fs::create_dir(&dest).map_err(|error| file_error("create staging directory", &dest, error))?;
+    let staged = Staged(dest);
+    extract_tar(&nupkg, staged.path(), &["--strip-components=1"])?;
+    require_file(&staged.path().join(required))?;
+    Ok(staged)
+}
+
+/// The cached .nupkg of the package, downloaded first if it isn't there or isn't the one with the
+/// SHA-256 `sha256`. A download that isn't that file is removed and is an error.
+fn verified_nupkg(name: &str, ver: &str, sha256: &str, temp: &Path) -> io::Result<PathBuf> {
+    let nupkg = temp.join(format!("{name}-{ver}.nupkg"));
+    let _lock = lock_file(&temp.join(format!("{name}-{ver}.nupkg.lock")))?;
+    if nupkg.try_exists().map_err(|error| file_error("read cache metadata", &nupkg, error))? {
+        if file_sha256(&nupkg)? == sha256 {
+            return Ok(nupkg);
+        }
+        fs::remove_file(&nupkg).map_err(|error| file_error("remove changed package", &nupkg, error))?;
+    }
+    let partial = temp.join(format!("{name}-{ver}.nupkg.partial"));
+    dl_nupkg(name, ver, &partial)?;
+    let found = file_sha256(&partial)?;
+    if found != sha256 {
+        let _ = fs::remove_file(&partial);
+        return Err(io::Error::other(format!(
+            "{name} {ver} has SHA-256 {found}, not the {sha256} this build names"
+        )));
+    }
+    fs::rename(&partial, &nupkg).map_err(|error| file_error("publish package", &nupkg, error))?;
+    Ok(nupkg)
+}
+
+/// The SHA-256 of a file, in lower case, from the system's own tool: certutil on Windows, sha256sum
+/// where the crate's tests run.
+fn file_sha256(path: &Path) -> io::Result<String> {
+    let output = if cfg!(windows) {
+        Command::new(system_tool("certutil.exe")?).arg("-hashfile").arg(path).arg("SHA256").output()
+    } else {
+        Command::new("sha256sum").arg(path).output()
+    }
+    .map_err(|error| file_error("hash", path, error))?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!("hashing {} failed with {}", path.display(), output.status)));
+    }
+    sha256_in(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        io::Error::other(format!("no SHA-256 in what the hash tool said of {}", path.display()))
+    })
+}
+
+/// The first 64 hex digits in the tool's output: certutil puts them on a line of their own, some
+/// versions with spaces between the bytes, and sha256sum puts them first on its line.
+fn sha256_in(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let first = line.split_whitespace().next().unwrap_or("");
+        let digits: String =
+            if first.len() == 64 { first.to_owned() } else { line.split_whitespace().collect() };
+        (digits.len() == 64 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| digits.to_ascii_lowercase())
+    })
 }
 
 fn cached_dir(
@@ -321,6 +408,18 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn archive_entries(src: &Path, dest: &Path, entries: &[&str]) {
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        run(Command::new(system_tool("tar.exe").unwrap())
+            .args(["--format=zip", "-cf"])
+            .arg(dest)
+            .arg("-C")
+            .arg(src)
+            .args(entries))
+        .unwrap();
+    }
+
+    #[cfg(windows)]
     fn runtime_archive(root: &Path, arch: &str) {
         let payload = root.join(format!("payload-{arch}"));
         write(&payload.join("Microsoft.WindowsAppRuntime.dll"), arch);
@@ -374,6 +473,48 @@ mod tests {
         let error = ensure_msix_extracted(&temp.0, "x64").unwrap_err();
         assert!(error.to_string().contains("Microsoft.WindowsAppRuntime.dll"));
         assert!(!temp.0.join(".msix_extract-x64").exists());
+    }
+
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    #[test]
+    fn the_pinned_sums_are_sha256_digests() {
+        for sum in [RUNTIME_SHA256, WEBVIEW2_SHA256] {
+            assert_eq!(sum.len(), 64);
+            assert!(sum.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        }
+    }
+
+    #[test]
+    fn a_sum_is_found_in_what_each_hash_tool_says() {
+        let certutil = "SHA256 hash of x.nupkg:\r\nBA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD\r\nCertUtil: -hashfile command completed successfully.\r\n";
+        assert_eq!(sha256_in(certutil).as_deref(), Some(ABC_SHA256));
+        let spaced = "SHA256 hash of x:\nba 78 16 bf 8f 01 cf ea 41 41 40 de 5d ae 22 23 b0 03 61 a3 96 17 7a 9c b4 10 ff 61 f2 00 15 ad\n";
+        assert_eq!(sha256_in(spaced).as_deref(), Some(ABC_SHA256));
+        assert_eq!(sha256_in(&format!("{ABC_SHA256}  x.nupkg\n")).as_deref(), Some(ABC_SHA256));
+        assert_eq!(sha256_in("CertUtil: -hashfile command failed\n"), None);
+        assert_eq!(sha256_in(""), None);
+    }
+
+    #[test]
+    fn a_cached_package_is_used_only_with_the_sum_pinned_for_it() {
+        let temp = TempDir::new();
+        let nupkg = temp.0.join("pkg-1.0.nupkg");
+        write(&nupkg, "abc");
+        assert_eq!(verified_nupkg("pkg", "1.0", ABC_SHA256, &temp.0).unwrap(), nupkg);
+        assert_eq!(fs::read_to_string(&nupkg).unwrap(), "abc");
+    }
+
+    // Off Windows there is no curl.exe to fetch a replacement, so what is kept as the cache and isn't
+    // the pinned file ends in an error, with the file gone.
+    #[test]
+    #[cfg(not(windows))]
+    fn a_cached_package_with_another_sum_is_removed_and_not_used() {
+        let temp = TempDir::new();
+        let nupkg = temp.0.join("pkg-1.0.nupkg");
+        write(&nupkg, "changed");
+        verified_nupkg("pkg", "1.0", ABC_SHA256, &temp.0).unwrap_err();
+        assert!(!nupkg.exists());
     }
 
     #[test]
@@ -456,21 +597,29 @@ mod tests {
         }
 
         let temp = TempDir::new();
-        let cache = temp.0.join("windows-reactor-setup").join("temp").join("v1");
-        let runtime = cache.join(format!("{RUNTIME_PKG}-{RUNTIME_VER}"));
-        write(&runtime.join(runtime_msix("x64")), "cached archive");
+        let cache = temp.0.join("windows-reactor-setup").join("temp").join("v2");
         let payload = "runtime".repeat(256 * 1024);
+        let build = temp.0.join("packages");
+        let runtime_payload = build.join("runtime-payload");
         for name in ["Microsoft.WindowsAppRuntime.dll", "Microsoft.ui.xaml.dll"] {
-            write(&runtime.join(".msix_extract-x64").join(name), &payload);
+            write(&runtime_payload.join(name), &payload);
         }
+        archive(&runtime_payload, &build.join("runtime").join("tools").join(runtime_msix("x64")));
+        let runtime_nupkg = cache.join(format!("{RUNTIME_PKG}-{RUNTIME_VER}.nupkg"));
+        archive_entries(&build.join("runtime"), &runtime_nupkg, &["tools"]);
         write(
-            &cache
-                .join(format!("{WEBVIEW2_PKG}-{WEBVIEW2_VER}"))
+            &build
+                .join("webview2")
+                .join("runtimes")
                 .join("win-x64")
                 .join("native_uap")
                 .join(WEBVIEW2_CORE_DLL),
             &payload,
         );
+        let webview2_nupkg = cache.join(format!("{WEBVIEW2_PKG}-{WEBVIEW2_VER}.nupkg"));
+        archive_entries(&build.join("webview2"), &webview2_nupkg, &["runtimes"]);
+        let sums =
+            format!("{},{}", file_sha256(&runtime_nupkg).unwrap(), file_sha256(&webview2_nupkg).unwrap());
         let dest = temp.0.join("release").join("target").join("profiling");
         write(&dest.join("Microsoft.ui.xaml.dll"), "previous deployment");
         let destination_lock = lock_file(&dest.join(".windows-reactor-setup.lock")).unwrap();
@@ -495,6 +644,7 @@ mod tests {
                     .args(["--exact", "tests::concurrent_deployment", "--nocapture"])
                     .env(WORKER_ROOT, &temp.0)
                     .env("LOCALAPPDATA", &temp.0)
+                    .env("WINDOWS_REACTOR_SETUP_TEST_SUMS", &sums)
                     .env("OUT_DIR", out)
                     .env("PROFILE", "release")
                     .env("CARGO_CFG_TARGET_OS", "windows")

@@ -33,6 +33,8 @@ jobs:
         run: bash tests/proxmox/setup-vm.sh
       - name: The package page, against the docs
         run: bash tests/packages/page.sh
+      - name: The repository signing, on stand-in tools
+        run: bash tests/packages/publish-repo.sh
       - name: The Windows graphics driver's sources
         run: sh tests/windows-pvg/check-driver-sources.sh
       - name: Release notes, on a made-up repo

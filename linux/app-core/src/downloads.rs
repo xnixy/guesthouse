@@ -210,7 +210,7 @@ mod tests {
         let plain = "a  ubuntu-26.04-live-server-amd64.iso  \n";
         assert_eq!(pick(plain).unwrap(), "a ubuntu-26.04-live-server-amd64.iso", "no star, spaces trimmed");
         let odd = "a *ubuntu-26.04-live-server-amd64.iso\nb *ubuntu-26.04x-live-server-amd64.iso\n";
-        assert_eq!(pick(odd).unwrap(), "b ubuntu-26.04x-live-server-amd64.iso", "an odd middle counts as 0");
+        assert_eq!(pick(odd).unwrap(), "a ubuntu-26.04-live-server-amd64.iso", "an odd middle is no disc");
         let same = "a *ubuntu-26.04.1-live-server-amd64.iso\nb *ubuntu-26.04.1-live-server-amd64.iso\n";
         assert_eq!(pick(same).unwrap(), "b ubuntu-26.04.1-live-server-amd64.iso", "the last of a tie");
         let short = "NOTAHASH *ubuntu-26.04-live-server-amd64.iso\n";

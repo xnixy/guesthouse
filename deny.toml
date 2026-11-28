@@ -5,6 +5,7 @@ all-features = true
 
 [advisories]
 version = 2
+yanked = "deny"
 # Three pieces of zbus 5, which have moved inside zbus 6 and get no releases of their own any
 # more. That is all these say: nothing is known to be wrong with the code. They come with ksni,
 # the tray's library, which is still on zbus 5, and go from this list when it moves on.

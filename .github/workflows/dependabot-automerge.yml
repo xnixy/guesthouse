@@ -1,5 +1,6 @@
 # Dependabot's minor and patch updates merge by themselves once every required check passes.
-# A major update is left for a person. The job only turns on auto-merge, so CI still decides.
+# A major update is left for a person, and so is an update to anything but Cargo or the Actions. The
+# job only turns on auto-merge, so CI still decides.
 name: Dependabot auto-merge
 
 on:
@@ -22,7 +23,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Turn on auto-merge for a minor or patch update
-        if: steps.meta.outputs.update-type == 'version-update:semver-minor' || steps.meta.outputs.update-type == 'version-update:semver-patch'
+        if: (steps.meta.outputs.package-ecosystem == 'cargo' || steps.meta.outputs.package-ecosystem == 'github_actions') && (steps.meta.outputs.update-type == 'version-update:semver-minor' || steps.meta.outputs.update-type == 'version-update:semver-patch')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.html_url }}

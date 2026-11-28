@@ -17,10 +17,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      # The check is the base branch's script, and it reads the signers' folder of the pull request.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: pull-request
           persist-credentials: false
       - name: Look for the author's file
         env:
           AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: sh scripts/cla-check.sh "$AUTHOR"
+        run: sh base/scripts/cla-check.sh "$AUTHOR" pull-request/CLA/signers

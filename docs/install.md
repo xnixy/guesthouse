@@ -38,7 +38,11 @@ Debian 13, and Ubuntu 24.04 or newer:
 
 ```sh
 sudo install -d /etc/apt/keyrings
-curl -fsSL https://pkg.ruxn.com/ruxn-pkg.gpg | sudo tee /etc/apt/keyrings/ruxn-pkg.gpg >/dev/null
+key=$(mktemp)
+curl -fsSL https://pkg.ruxn.com/ruxn-pkg.gpg -o "$key"
+gpg --show-keys --with-colons "$key" | grep -q '^fpr:::::::::80BE19F31995110352B875E22425E7C41C3ACA45:$' &&
+  sudo install -m 644 "$key" /etc/apt/keyrings/ruxn-pkg.gpg
+rm -f "$key"
 printf '%s\n' 'Types: deb' 'URIs: https://pkg.ruxn.com/guesthouse/apt' 'Suites: stable' 'Components: main' \
   'Signed-By: /etc/apt/keyrings/ruxn-pkg.gpg' | sudo tee /etc/apt/sources.list.d/guesthouse.sources >/dev/null
 sudo apt update && sudo apt install guesthouse
@@ -49,11 +53,18 @@ Keep the list's name, `guesthouse.sources`, as the app's update reads that list 
 Fedora:
 
 ```sh
-curl -fsSL https://pkg.ruxn.com/guesthouse/rpm/guesthouse.repo | sudo tee /etc/yum.repos.d/guesthouse.repo >/dev/null
+key=$(mktemp)
+curl -fsSL https://pkg.ruxn.com/ruxn-pkg.asc -o "$key"
+gpg --show-keys --with-colons "$key" | grep -q '^fpr:::::::::80BE19F31995110352B875E22425E7C41C3ACA45:$' &&
+  sudo install -D -m 644 "$key" /etc/pki/rpm-gpg/RPM-GPG-KEY-ruxn
+rm -f "$key"
+printf '%s\n' '[guesthouse]' 'name=Guesthouse' 'baseurl=https://pkg.ruxn.com/guesthouse/rpm' 'enabled=1' \
+  'gpgcheck=1' 'repo_gpgcheck=1' 'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-ruxn' |
+  sudo tee /etc/yum.repos.d/guesthouse.repo >/dev/null
 sudo dnf install guesthouse
 ```
 
-dnf asks once whether to trust the key, and shows its fingerprint.
+The key is the one in this repo, checked against the fingerprint above before it goes in. dnf asks once to import it, and shows the same fingerprint.
 
 Arch:
 
@@ -88,7 +99,7 @@ Opened from the file manager, it shows Guesthouse's own install window. That's t
 
 Started from a terminal, it installs in that terminal. Once this release or a newer one is installed, opening it again only starts the app, so it can be deleted after the first time. Updates come from the app, as for any install. `guesthouse-installer-VERSION.AppImage install --dry-run` shows the plan and stops, and `guesthouse-installer-VERSION.AppImage uninstall` runs the installed `uninstall.sh`.
 
-The app doesn't run from inside the AppImage. Its folder goes away when the AppImage stops, and a VM's QEMU has to keep running after the app closes. Check the AppImage against `SHA256SUMS` on the release, as nothing else checks it.
+The app doesn't run from inside the AppImage. Its folder goes away when the AppImage stops, and a VM's QEMU has to keep running after the app closes. Check the AppImage against `SHA256SUMS` on the release, as nothing else checks it. `gh attestation verify FILE --repo ruxnlabs/guesthouse` checks it was built by this repo's release workflow.
 
 A word on the checksum. It proves the download is the release the script names, and that's all. It can't protect you from the script, which is why you should read it.
 

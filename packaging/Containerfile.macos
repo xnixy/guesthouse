@@ -3,7 +3,7 @@
 # the part bundles. cmake and the X11, Wayland and EGL headers are for SDL3, which the library builds
 # from source and links in. The Rust is the dated nightly reims-vgpu's rust-toolchain.toml names, with
 # every target and component it lists, so nothing is fetched into the image's toolchain at build time.
-FROM docker.io/library/ubuntu:24.04
+FROM docker.io/library/ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
 ARG RUST_TOOLCHAIN=nightly-2026-11-03
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \

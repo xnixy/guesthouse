@@ -3,6 +3,7 @@ build-essential
 kmod
 pciutils
 curl
+gnupg
 pkg-config
 libvulkan1
 libvulkan-dev

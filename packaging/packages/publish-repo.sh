@@ -11,20 +11,23 @@
 # that copied a package into a suite's pool finishes.
 #
 # SIGNING_KEY_FILE names a file with the armored secret key, which is imported into a keyring of the
-# container's own and never leaves it. SIGNING_KEY is its fingerprint. A package already in the pool
+# container's own and never leaves it. SIGNING_KEY is its fingerprint. The tools are installed first, in
+# an image of its own made with no key. The key is only in the second container, which has no network
+# and installs nothing. A package already in the pool
 # under the same name stays as it is, as what's published never changes. The newest KEEP versions stay
 # in each pool, 3 if it isn't set, so a version can still be gone back to.
 set -eu
 
-DEB_IMAGE=${DEB_IMAGE:-docker.io/library/debian:trixie}
-RPM_IMAGE=${RPM_IMAGE:-registry.fedoraproject.org/fedora:44}
-PACMAN_IMAGE=${PACMAN_IMAGE:-docker.io/library/archlinux:base}
 KEEP=${KEEP:-3}
+# Where the repository is in the signing container.
+TREE=${TREE:-/tree}
 ORIGIN='ruxn labs'
 PACMAN_DB=guesthouse
 RPM_REPO_FILE=guesthouse.repo
 RPM_BASE=https://pkg.ruxn.com/guesthouse/rpm
 KEY_URL=https://pkg.ruxn.com/ruxn-pkg.asc
+# How many days a Proxmox suite's index stays valid. proxmox-refresh.yml signs it again each day.
+VALID_DAYS=${VALID_DAYS:-14}
 
 REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 
@@ -47,16 +50,32 @@ find_engine() {
 
 image_for() {
     case $1 in
-        apt | proxmox) say "$DEB_IMAGE" ;;
-        rpm) say "$RPM_IMAGE" ;;
-        pacman) say "$PACMAN_IMAGE" ;;
+        apt | proxmox) say "${DEB_IMAGE:-$(sh "$REPO/packaging/images/image-of.sh" debian)}" ;;
+        rpm) say "${RPM_IMAGE:-$(sh "$REPO/packaging/images/image-of.sh" fedora)}" ;;
+        pacman) say "${PACMAN_IMAGE:-$(sh "$REPO/packaging/images/image-of.sh" archlinux)}" ;;
     esac
 }
 
-# The rest runs in the container, as its root.
+# The tools, installed into the image the signing container is made from. No key is here.
+prepare() {
+    case $1 in
+        apt | proxmox)
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends apt-utils gnupg xz-utils >/dev/null
+            ;;
+        rpm) dnf -y -q install rpm-sign createrepo_c gnupg2 >/dev/null 2>&1 ;;
+        pacman)
+            for tool in gpg repo-add; do
+                command -v "$tool" >/dev/null || die "the image has no $tool."
+            done
+            ;;
+    esac
+}
+
+# The rest runs in the signing container, as its root.
 
 hand_back() {
-    [ -z "${OWNER:-}" ] || chown -R "$OWNER" /tree
+    [ -z "${OWNER:-}" ] || chown -R "$OWNER" "$TREE"
 }
 
 import_key() {
@@ -103,7 +122,7 @@ prune_pool() {
 apt_release() {
     suite=$1
     label=$2
-    cd /tree
+    cd "$TREE"
     mkdir -p "dists/$suite/main/binary-amd64"
     packages=dists/$suite/main/binary-amd64/Packages
     apt-ftparchive packages "pool/$suite" >"$packages"
@@ -117,7 +136,13 @@ apt_release() {
         -o APT::FTPArchive::Release::Architectures=amd64 \
         -o APT::FTPArchive::Release::Components=main \
         release "dists/$suite" >"dists/$suite/Release.new"
-    mv "dists/$suite/Release.new" "dists/$suite/Release"
+    if [ -n "${VALID_UNTIL:-}" ]; then
+        sed "/^Date: /a Valid-Until: $VALID_UNTIL" "dists/$suite/Release.new" >"dists/$suite/Release"
+        grep -q '^Valid-Until: ' "dists/$suite/Release" || die "the Release file has no Date line to put Valid-Until after."
+        rm -f "dists/$suite/Release.new"
+    else
+        mv "dists/$suite/Release.new" "dists/$suite/Release"
+    fi
     sign_detached --clearsign -o "dists/$suite/InRelease" "dists/$suite/Release"
     sign_detached --armor --detach-sign -o "dists/$suite/Release.gpg" "dists/$suite/Release"
 }
@@ -127,31 +152,28 @@ publish_apt() {
     label=$2
     package_pattern=$3
     shift 3
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends apt-utils gnupg xz-utils >/dev/null
     import_key
     for package in "$@"; do
         dpkg-deb -f "$package" Package | grep -Eqx "$package_pattern" || die "${package##*/} isn't a package of this repository."
     done
-    add_to_pool "/tree/pool/$suite" "$@"
+    add_to_pool "$TREE/pool/$suite" "$@"
     # shellcheck disable=SC2010 # names of our own making, with no spaces
-    for name in $(ls "/tree/pool/$suite" | grep '\.deb$' | sed 's/_.*//' | sort -u); do
-        prune_pool "/tree/pool/$suite" "^${name}_.*\\.deb\$"
+    for name in $(ls "$TREE/pool/$suite" | grep '\.deb$' | sed 's/_.*//' | sort -u); do
+        prune_pool "$TREE/pool/$suite" "^${name}_.*\\.deb\$"
     done
     apt_release "$suite" "$label"
 }
 
 publish_rpm() {
-    dnf -y -q install rpm-sign createrepo_c gnupg2 >/dev/null 2>&1
     import_key
-    add_to_pool /tree/packages "$@"
+    add_to_pool "$TREE/packages" "$@"
     for package in $ADDED; do
         rpmsign --define "_gpg_name $SIGNING_KEY" --addsign "$package" >/dev/null
     done
-    prune_pool /tree/packages '^guesthouse-[0-9].*\.x86_64\.rpm$'
-    createrepo_c --quiet --update /tree
-    sign_detached --armor --detach-sign -o /tree/repodata/repomd.xml.asc /tree/repodata/repomd.xml
-    cat >"/tree/$RPM_REPO_FILE" <<EOF
+    prune_pool "$TREE/packages" '^guesthouse-[0-9].*\.x86_64\.rpm$'
+    createrepo_c --quiet --update "$TREE"
+    sign_detached --armor --detach-sign -o "$TREE/repodata/repomd.xml.asc" "$TREE/repodata/repomd.xml"
+    cat >"$TREE/$RPM_REPO_FILE" <<EOF
 [guesthouse]
 name=Guesthouse
 baseurl=$RPM_BASE
@@ -165,9 +187,8 @@ EOF
 # pacman reads one version of each package from the database, so older files stay only for going back
 # by hand. The database's links become copies, as the bucket serves files and not links.
 publish_pacman() {
-    pacman -Sy --noconfirm --needed gnupg >/dev/null
     import_key
-    folder=/tree/x86_64
+    folder=$TREE/x86_64
     add_to_pool "$folder" "$@"
     for package in $ADDED; do
         sign_detached --detach-sign --no-armor -o "$package.sig" "$package"
@@ -187,6 +208,19 @@ publish_pacman() {
     rm -f "$folder"/*.old "$folder"/*.old.sig
 }
 
+# Sets IMAGE_NAME to an image of the distribution's, with the tools put in. The script is copied into it, so the signing
+# container runs the same file. Nothing of the key is anywhere near.
+prepared_image() {
+    kind=$1
+    context=$(mktemp -d)
+    IMAGE_NAME=guesthouse-publish-$kind-$$
+    trap 'rm -rf "$context"; "$ENGINE" rmi -f "$IMAGE_NAME" >/dev/null 2>&1 || true' EXIT
+    cp "$REPO/packaging/packages/publish-repo.sh" "$context/publish-repo.sh"
+    printf 'FROM %s\nCOPY publish-repo.sh /script/publish-repo.sh\nRUN sh /script/publish-repo.sh --prepare %s\n' \
+        "$(image_for "$kind")" "$kind" >"$context/Containerfile"
+    "$ENGINE" build --quiet -t "$IMAGE_NAME" -f "$context/Containerfile" "$context" >/dev/null || die "couldn't make the image."
+}
+
 inside() {
     kind=$1
     shift
@@ -202,6 +236,11 @@ inside() {
 }
 
 main() {
+    if [ "${1:-}" = --prepare ]; then
+        shift
+        prepare "$@"
+        return
+    fi
     if [ "${1:-}" = --inside ]; then
         shift
         inside "$@"
@@ -245,11 +284,16 @@ main() {
         shift
     done
     key_file=$(CDPATH='' cd -- "$(dirname -- "$SIGNING_KEY_FILE")" && pwd)/${SIGNING_KEY_FILE##*/}
+    valid_until=
+    if [ "$kind" = proxmox ]; then
+        valid_until=$(date -u -d "+$VALID_DAYS days" '+%a, %d %b %Y %H:%M:%S UTC') || die "can't work out the Valid-Until date."
+    fi
+    prepared_image "$kind"
+    # The key is in this container only. It has no network, and the tools are in the image already.
     # shellcheck disable=SC2086 # the mounts are flags, and their paths have no spaces
-    "$ENGINE" run --rm --security-opt label=disable -e "OWNER=$OWNER" -e "SIGNING_KEY=$SIGNING_KEY" \
-        -e "SUITE=$SUITE" -e "KEEP=$KEEP" -v "$key_file:/signing-key.asc:ro" -v "$tree:/tree" \
-        -v "$REPO/packaging/packages:/script:ro" $mounts "$(image_for "$kind")" \
-        sh /script/publish-repo.sh --inside "$kind" "$@"
+    "$ENGINE" run --rm --network none --security-opt label=disable -e "OWNER=$OWNER" -e "SIGNING_KEY=$SIGNING_KEY" \
+        -e "SUITE=$SUITE" -e "KEEP=$KEEP" -e "VALID_UNTIL=$valid_until" -v "$key_file:/signing-key.asc:ro" \
+        -v "$tree:/tree" $mounts "$IMAGE_NAME" sh /script/publish-repo.sh --inside "$kind" "$@"
 }
 
 { main "$@"; }

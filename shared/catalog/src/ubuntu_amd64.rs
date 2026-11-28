@@ -9,26 +9,30 @@ pub const UBUNTU_SUMS: &str = "SHA256SUMS";
 pub const UBUNTU_PREFIX: &str = "ubuntu-26.04";
 pub const UBUNTU_SUFFIX: &str = "-live-server-amd64.iso";
 
+/// A server disc's point release, from its name: nothing between the prefix and the suffix is the
+/// first, and `.` and digits are a later one. Any other name isn't an Ubuntu disc's.
+fn point_release(name: &str) -> Option<u32> {
+    let middle = name.strip_prefix(UBUNTU_PREFIX)?.strip_suffix(UBUNTU_SUFFIX)?;
+    if middle.is_empty() {
+        return Some(0);
+    }
+    let digits = middle.strip_prefix('.')?;
+    (!digits.is_empty() && digits.len() <= 4 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
 /// The newest point release's server disc in Ubuntu's checksum list, and its SHA-256.
 pub fn newest_server_disc(sums: &str) -> Option<(String, String)> {
-    let mut discs: Vec<(String, String)> = sums
-        .lines()
+    sums.lines()
         .filter_map(|line| {
             let (sum, name) = line.split_once(' ')?;
             let name = name.trim().trim_start_matches('*');
-            (name.starts_with(UBUNTU_PREFIX) && name.ends_with(UBUNTU_SUFFIX))
-                .then(|| (name.to_owned(), sum.to_owned()))
+            // 26.04 sorts before 26.04.1, which sorts before 26.04.2.
+            Some((point_release(name)?, name.to_owned(), sum.to_owned()))
         })
-        .collect();
-    // 26.04 sorts before 26.04.1, which sorts before 26.04.2.
-    discs.sort_by(|one, other| {
-        let point = |name: &str| {
-            let middle = &name[UBUNTU_PREFIX.len()..name.len() - UBUNTU_SUFFIX.len()];
-            middle.trim_start_matches('.').parse::<u32>().unwrap_or(0)
-        };
-        point(&one.0).cmp(&point(&other.0))
-    });
-    discs.pop()
+        .max_by_key(|(point, _, _)| *point)
+        .map(|(_, name, sum)| (name, sum))
 }
 
 #[cfg(test)]
@@ -44,5 +48,23 @@ mod tests {
         let ten = "b *ubuntu-26.04.10-live-server-amd64.iso\na *ubuntu-26.04.9-live-server-amd64.iso\n";
         assert_eq!(pick(ten).unwrap(), "b ubuntu-26.04.10-live-server-amd64.iso");
         assert_eq!(pick("x *ubuntu-26.04-live-server-arm64.iso\n"), None);
+    }
+
+    #[test]
+    fn a_name_with_anything_but_a_point_release_between_is_no_disc() {
+        let pick = |name: &str| newest_server_disc(&format!("aa *{name}\n"));
+        assert!(pick("ubuntu-26.04.2-live-server-amd64.iso").is_some());
+        for name in [
+            "ubuntu-26.04/../../x-live-server-amd64.iso",
+            "ubuntu-26.04.1/../../x-live-server-amd64.iso",
+            "ubuntu-26.04..1-live-server-amd64.iso",
+            "ubuntu-26.04.-live-server-amd64.iso",
+            "ubuntu-26.04.1a-live-server-amd64.iso",
+            "ubuntu-26.04-beta-live-server-amd64.iso",
+            "ubuntu-26.04.-1-live-server-amd64.iso",
+            "ubuntu-26.04.+1-live-server-amd64.iso",
+        ] {
+            assert_eq!(pick(name), None, "{name}");
+        }
     }
 }

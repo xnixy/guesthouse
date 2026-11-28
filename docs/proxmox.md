@@ -42,7 +42,11 @@ As root on the host, for `stable`:
 
 ```sh
 install -d /etc/apt/keyrings
-curl -fsSL https://pkg.ruxn.com/ruxn-pkg.gpg -o /etc/apt/keyrings/ruxn-pkg.gpg
+key=$(mktemp)
+curl -fsSL https://pkg.ruxn.com/ruxn-pkg.gpg -o "$key"
+gpg --show-keys --with-colons "$key" | grep -q '^fpr:::::::::80BE19F31995110352B875E22425E7C41C3ACA45:$' &&
+  install -m 644 "$key" /etc/apt/keyrings/ruxn-pkg.gpg
+rm -f "$key"
 printf '%s\n' 'Types: deb' 'URIs: https://pkg.ruxn.com/proxmox' 'Suites: stable' 'Components: main' \
   'Signed-By: /etc/apt/keyrings/ruxn-pkg.gpg' >/etc/apt/sources.list.d/guesthouse-gpupv.sources
 printf '%s\n' 'Package: pve-qemu-kvm' 'Pin: release o=ruxn labs,l=Guesthouse GPU-PV pve-qemu-kvm' 'Pin-Priority: 1001' \
@@ -53,6 +57,8 @@ apt update && apt install pve-qemu-kvm
 For `testing`, write `testing` in place of `stable`. The pin takes the place of the hold. It keeps `pve-qemu-kvm` to this repository's builds, even when Proxmox's is newer, and `apt upgrade` still takes each new build here. A package that's held already needs `apt-mark unhold pve-qemu-kvm` first. To go back to Proxmox's own, remove the two files, then `apt update && apt install --allow-downgrades pve-qemu-kvm=VERSION` with Proxmox's version.
 
 Between a new Proxmox release and its build here, `apt list --upgradable` shows nothing for `pve-qemu-kvm`, as the pin keeps Proxmox's out. A `qemu-server` that asks for a newer `pve-qemu-kvm` waits for that build too.
+
+Both suites' indexes are signed again each day, and say how long they're good for.
 
 The debug symbols aren't in the repository. They stay with the workflow's run for 30 days.
 

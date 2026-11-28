@@ -1,7 +1,7 @@
 # Where the app and its helpers are built. They call so little of glibc that they run on far older
 # ones than this. GTK is what the build needs to be recent, and its programs load the host's anyway.
 # MinGW and Rust's Windows library build the NVAPI wrapper that goes into Windows guests.
-FROM registry.fedoraproject.org/fedora:44
+FROM registry.fedoraproject.org/fedora:44@sha256:c1e457a3c398b0d7b12d060ad86ad52bab714a17faecc907deb1262fb2b72d98
 RUN dnf -y install gcc git xz findutils which binutils pkgconf-pkg-config rust cargo gtk4-devel \
       libadwaita-devel curl squashfs-tools mingw64-gcc rust-std-static-x86_64-pc-windows-gnu \
     && dnf clean all

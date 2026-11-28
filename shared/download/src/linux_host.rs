@@ -10,8 +10,8 @@
 //! trusts a file with its mark when the mark's text, trimmed, is the wanted sum, without reading the
 //! file again. A download that stops keeps its partial file as it was, for the next try.
 //!
-//! curl is given no rule on the address: it follows redirects (`--location`) and takes any protocol
-//! it knows. What keeps a wrong file out is the SHA-256 alone.
+//! curl follows redirects (`--location`), and only to https. What keeps a wrong file out is the
+//! SHA-256.
 
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,8 @@ pub const PARTIAL: &str = "part";
 pub const CHECKED: &str = "sha256";
 
 /// The words curl is given before anything else, for a download, a file's size or a small text.
-pub const CURL_WORDS: [&str; 6] = ["--fail", "--location", "--silent", "--show-error", "--retry", "3"];
+pub const CURL_WORDS: [&str; 8] =
+    ["--fail", "--location", "--silent", "--show-error", "--proto-redir", "=https", "--retry", "3"];
 /// The words that ask curl for the answer's headers only, before the address, for a file's size.
 pub const HEAD_WORD: &str = "--head";
 /// The words a download gives curl after [`CURL_WORDS`]: go on from what an earlier try left in the

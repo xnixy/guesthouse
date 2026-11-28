@@ -378,7 +378,7 @@ fn with_a_stand_in_curl() {
 fn stand_in_curl_pins() {
     let Some(bin) = stand_in_here() else { return };
     let scratch = Scratch::new();
-    let base = "--fail --location --silent --show-error --retry 3";
+    let base = "--fail --location --silent --show-error --proto-redir =https --retry 3";
 
     // With a size: the file's names at every stage, each step said, and curl's words.
     let file = scratch.path("parts/ubuntu/ubuntu-26.04.1-live-server-amd64.iso");

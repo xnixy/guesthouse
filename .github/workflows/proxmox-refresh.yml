@@ -1,0 +1,46 @@
+# Signs the indexes of both Proxmox suites again each day, with the packages as they are, so the Release
+# files' Valid-Until moves forward. It adds, removes and promotes nothing.
+name: Proxmox refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    name: sign the indexes again
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # The environment holds the signing key and the bucket's token, and only main may use it.
+    environment: packages
+    concurrency:
+      group: pkg-proxmox
+      cancel-in-progress: false
+    env:
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Take the signing key
+        env:
+          SIGNING_KEY_SECRET: ${{ secrets.PKG_SIGNING_KEY }}
+        run: sh packaging/packages/signing-key.sh "$RUNNER_TEMP"
+      - name: Sign each suite that is published
+        run: |
+          sh packaging/packages/bucket.sh pull proxmox repo
+          for suite in testing stable; do
+            if [ -d "repo/pool/$suite" ] && [ -f "repo/dists/$suite/InRelease" ]; then
+              sh packaging/packages/publish-repo.sh proxmox repo "$suite"
+            fi
+          done
+          sh packaging/packages/bucket.sh push repo proxmox
+      - name: Forget the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/signing-key.asc"

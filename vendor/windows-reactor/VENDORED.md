@@ -4,9 +4,9 @@ Microsoft's `windows-reactor` (declarative WinUI 3 for Rust, MIT OR Apache-2.0: 
 `license-apache-2.0`), from the windows-rs repository at commit
 `63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25` (`crates/libs/reactor`). That commit, not the
 crates.io release, because the release lacks the notification icon, reopenable windows and the
-window handle. The workspace's `Cargo.toml` pins `windows-reactor` and `windows-reactor-setup`
-to that commit and replaces `windows-reactor` with this copy through `[patch]`; this copy's own
-`windows-*` dependencies point at the same commit.
+window handle. The Windows apps (`windows/app`, `windows/setup`) use this copy by path, and its own
+`windows-*` dependencies are the sibling copies in `vendor/windows-rs`; the workspace's `Cargo.toml`
+leaves both folders out of its members.
 
 It was copied from the owner's blurman project (its `reactor-spike` worktree,
 `vendor/windows-reactor`), which made the first two patches. Each patched place says so in a
@@ -74,7 +74,7 @@ comment ("Spike patch" for blurman's, "remoteman patch" for ours).
    If the cursor can't be made, the default one is worn (Reactor would otherwise unwrap the error).
 
 Cargo.toml: the `[lints]` and docs.rs sections are gone (with `[lints.rust]` set here instead)
-and the dependencies name the git commit instead of the windows-rs workspace. `public-api.txt` is
+and the dependencies are paths to the sibling copies in `vendor/windows-rs`. `public-api.txt` is
 upstream's and does not list the patches.
 
 To move to a newer Reactor: copy `crates/libs/reactor` from that commit over this folder, apply

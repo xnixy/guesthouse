@@ -31,7 +31,7 @@ enum AppInfo {
 
     static let website = URL(string: "https://guesthouse.ruxn.com")!
     /// The public project's source.
-    static let source = URL(string: "https://github.com/ruxnhq/guesthouse")!
+    static let source = URL(string: "https://github.com/ruxnlabs/guesthouse")!
 }
 
 /// Looking for a newer Guesthouse with the shared check, and keeping what it found.

@@ -162,7 +162,7 @@ fn stand_in_curl_pins() {
     assert_eq!(
         asked(&bin),
         [format!(
-            "--fail --location --silent --show-error --retry 3 --continue-at - --output {} \
+            "--fail --location --silent --show-error --proto-redir =https --retry 3 --continue-at - --output {} \
              https://example.invalid/part.tar.xz",
             partial.display()
         )]

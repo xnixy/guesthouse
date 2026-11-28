@@ -34,13 +34,47 @@ mask_user_sound() {
     systemctl --global mask pipewire.socket pipewire.service pipewire-pulse.socket pipewire-pulse.service wireplumber.service
 }
 
-# Ubuntu's firefox package is a snap, which is untested here. This is Mozilla's own build.
+# Ubuntu's firefox package is a snap, which is untested here. This is Mozilla's own build, the
+# current release. Its SHA256SUMS has to be signed by Mozilla's release key, which is named by its
+# fingerprint here and fetched from the keyserver by that fingerprint.
+FIREFOX_KEY_FINGERPRINT=14F26682D0916CDD81E37B6D61B7B526D98F0353
 install_firefox() {
-    local folder=/opt/ff
+    local folder=/opt/ff work version base file expected status fingerprint
+    local fetch=(curl -fsSL --proto '=https' --proto-redir '=https')
+    work=$(mktemp -d)
+    version=$("${fetch[@]}" https://product-details.mozilla.org/1.0/firefox_versions.json |
+        sed -n 's/.*"LATEST_FIREFOX_VERSION": *"\([^"]*\)".*/\1/p')
+    printf '%s' "$version" | grep -Eqx '[0-9]+(\.[0-9]+){1,2}' || {
+        echo "Mozilla's current Firefox version isn't a version: $version" >&2
+        rm -rf "$work"
+        return 1
+    }
+    base=https://archive.mozilla.org/pub/firefox/releases/$version
+    file=linux-x86_64/en-US/firefox-$version.tar.xz
+    "${fetch[@]}" "$base/SHA256SUMS" -o "$work/SHA256SUMS"
+    "${fetch[@]}" "$base/SHA256SUMS.asc" -o "$work/SHA256SUMS.asc"
+    "${fetch[@]}" "https://keys.openpgp.org/vks/v1/by-fingerprint/$FIREFOX_KEY_FINGERPRINT" -o "$work/key.asc"
+    mkdir -m 700 "$work/gnupg"
+    export GNUPGHOME=$work/gnupg
+    gpg --batch --quiet --import "$work/key.asc"
+    fingerprint=$(gpg --batch --with-colons --list-keys | awk -F: '$1 == "pub" { next_is_key = 1; next } next_is_key && $1 == "fpr" { print $10; exit }')
+    status=$(gpg --batch --status-fd 1 --verify "$work/SHA256SUMS.asc" "$work/SHA256SUMS" 2>/dev/null) || status=
+    if [ "$fingerprint" != "$FIREFOX_KEY_FINGERPRINT" ] ||
+        ! grep -Eq "^\[GNUPG:\] VALIDSIG .* $FIREFOX_KEY_FINGERPRINT\$" <<<"$status"; then
+        echo "Firefox $version's SHA256SUMS isn't signed by Mozilla's release key $FIREFOX_KEY_FINGERPRINT." >&2
+        rm -rf "$work"
+        return 1
+    fi
+    expected=$(awk -v name="$file" '$2 == name { print $1 }' "$work/SHA256SUMS")
+    "${fetch[@]}" "$base/$file" -o "$work/ff.tar.xz"
+    echo "$expected  $work/ff.tar.xz" | sha256sum -c - >/dev/null || {
+        echo "The Firefox download isn't the file Mozilla's signed list names." >&2
+        rm -rf "$work"
+        return 1
+    }
     mkdir -p "$folder"
-    curl -fsSL 'https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US' -o "$folder/ff.tar"
-    tar -xf "$folder/ff.tar" -C "$folder"
-    rm "$folder/ff.tar"
+    tar -xf "$work/ff.tar.xz" -C "$folder"
+    rm -rf "$work"
     install -m 644 "$here/firefox.desktop" /usr/share/applications/firefox.desktop
 }
 

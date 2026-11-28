@@ -42,7 +42,10 @@ fn a_mark_and_a_sum_are_read_exactly() {
 
 #[test]
 fn curl_is_given_these_words() {
-    assert_eq!(CURL_WORDS, ["--fail", "--location", "--silent", "--show-error", "--retry", "3"]);
+    assert_eq!(
+        CURL_WORDS,
+        ["--fail", "--location", "--silent", "--show-error", "--proto-redir", "=https", "--retry", "3"]
+    );
     assert_eq!(HEAD_WORD, "--head");
     assert_eq!(GO_ON_WORDS, ["--continue-at", "-", "--output"]);
 }
